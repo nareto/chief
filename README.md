@@ -93,7 +93,7 @@ See `todos.json.example` for reference. Here's a sample:
     {
       "todo": "Add user authentication with JWT tokens",
       "priority": 10,
-      "context_files": ["src/auth.py", "src/models/user.py"]
+      "expectations": "Users can login and receive a JWT token for subsequent API calls"
     },
     {
       "todo": "Implement rate limiting for API endpoints",
@@ -116,6 +116,26 @@ python chief.py --quiet
 # or
 CHIEF_QUIET=1 python chief.py
 ```
+
+## Optional: Claude Code Commands
+
+Chief includes optional Claude Code slash commands that help manage your `todos.json`. To use them, symlink the `.claude` directory and example files into your project:
+
+```bash
+ln -s /path/to/chief/.claude /path/to/your/project/.claude
+ln -s /path/to/chief/todos.json.example /path/to/your/project/todos.json.example
+ln -s /path/to/chief/chief.toml.example /path/to/your/project/chief.toml.example
+```
+
+This gives you access to:
+
+| Command | Description |
+|---------|-------------|
+| `/req <requirements>` | Break down requirements into todos and add them to `todos.json` |
+| `/reprio` | Reprioritize todos based on recent project activity |
+| `/prd <prd text>` | Generate project scaffolding and create todos from a PRD |
+
+The commands reference the example files to understand the schema, so all three symlinks are needed.
 
 ## Features
 
@@ -151,7 +171,6 @@ CHIEF_QUIET=1 python chief.py
 |-------|----------|-------------|
 | `todo` | Yes | Description of the task |
 | `priority` | No | Higher = processed first (default: 0) |
-| `context_files` | No | Files to reference for context |
 | `expectations` | No | Expected outcome (1-2 sentences) - helps write better tests |
 | `testable` | No | Set `false` for non-testable tasks (docs, prompts). Uses file-change verification instead of tests (default: true) |
 | `done_at_commit` | Auto | Set by Chief when completed |
