@@ -241,3 +241,34 @@
 # target_type = "file"
 # file_patterns = ["*.test.ts", "*.spec.ts"]
 # disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.spec.ts"]
+
+
+# ============================================================
+# Multi-Suite with Docker Build (projects deployed via Docker)
+# ============================================================
+# When deploying via Docker, add "docker compose build <service>" to catch
+# build-time errors (TypeScript strict mode, etc.) that local tests may miss.
+
+# [[suites]]
+# name = "backend"
+# language = "Python"
+# framework = "pytest"
+# root = "backend/"
+# command = "source backend/.venv/bin/activate && pytest {target} -v && docker compose build sb-backend"
+# init = "cd backend && python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+# default_target = "tests/"
+# target_type = "file"
+# file_patterns = ["test_*.py", "*_test.py"]
+# disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
+#
+# [[suites]]
+# name = "frontend"
+# language = "TypeScript"
+# framework = "Vitest"
+# root = "frontend/"
+# command = "npm run test --prefix frontend -- {target} && docker compose build sb-frontend"
+# init = "cd frontend && npm install"
+# default_target = "src/"
+# target_type = "file"
+# file_patterns = ["*.test.ts", "*.spec.ts"]
+# disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.spec.ts"]
