@@ -1,0 +1,1757 @@
+#!/usr/bin/env python3
+"""
+chief.py - TDD Orchestrator for Claude Code
+
+Runs a Red-Green-Refactor cycle using Claude Code as the coding agent.
+Loads todos from todos.json and processes them by priority.
+Configuration is loaded from chief.toml for language/framework flexibility.
+"""
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import subprocess
+import sys
+import os
+import tomllib
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+
+TODOS_FILE = "todos.json"
+CONFIG_FILE = "chief.toml"
+MAX_SECONDARY_ITERATIONS = 6
+MAX_TERTIARY_ITERATIONS = 6
+MAX_TEST_REFINEMENT_ITERATIONS = 6
+STABILITY_ITERATIONS = 2  # Times Claude must give consistent answer before accepting
+
+# Global config loaded at startup
+CONFIG: dict = {}
+# Quiet mode: suppress Claude Code output (verbose is default)
+QUIET: bool = False
+# Track which suites have had their setup run
+SETUP_COMPLETED: set[str] = set()
+# Auto-push commits to remote (can be disabled with --no-autopush)
+AUTOPUSH: bool = True
+
+# ============================================================================
+# ANSI Color Codes (stdlib-only terminal styling)
+# ============================================================================
+class Colors:
+    """ANSI escape codes for terminal colors."""
+    # Reset
+    RESET = "\033[0m"
+    # Styles
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    # Foreground colors
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    # Bright foreground
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BRIGHT_CYAN = "\033[96m"
+
+
+def color(text: str, *codes: str) -> str:
+    """Wrap text with ANSI color codes."""
+    if not sys.stdout.isatty():
+        return text  # No colors if not a terminal
+    return "".join(codes) + text + Colors.RESET
+
+
+def print_banner(text: str, char: str = "=", width: int = 60) -> None:
+    """Print a prominent banner."""
+    line = char * width
+    print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
+    print(color(text.center(width), Colors.BRIGHT_CYAN, Colors.BOLD))
+    print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
+
+
+def print_phase(phase: str, description: str) -> None:
+    """Print a TDD phase header (RED/GREEN/REFINE)."""
+    phase_colors = {
+        "RED": Colors.BRIGHT_RED,
+        "GREEN": Colors.BRIGHT_GREEN,
+        "REFINE": Colors.BRIGHT_YELLOW,
+        "FIX": Colors.BRIGHT_MAGENTA,
+    }
+    phase_color = phase_colors.get(phase, Colors.CYAN)
+    print(f"\n{color(f'[{phase}]', phase_color, Colors.BOLD)} {color(description, Colors.WHITE)}")
+
+
+def print_info(msg: str, indent: int = 0) -> None:
+    """Print an informational message from the script."""
+    prefix = "  " * indent
+    print(f"{prefix}{color('▸', Colors.CYAN)} {msg}")
+
+
+def print_success(msg: str, indent: int = 0) -> None:
+    """Print a success message."""
+    prefix = "  " * indent
+    print(f"{prefix}{color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {color(msg, Colors.GREEN)}")
+
+
+def print_warning(msg: str, indent: int = 0) -> None:
+    """Print a warning message."""
+    prefix = "  " * indent
+    print(f"{prefix}{color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {color(msg, Colors.YELLOW)}")
+
+
+def print_error(msg: str, indent: int = 0) -> None:
+    """Print an error message."""
+    prefix = "  " * indent
+    print(f"{prefix}{color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {color(msg, Colors.RED)}")
+
+
+def print_claude_start() -> None:
+    """Print marker for start of Claude Code output."""
+    if not QUIET:
+        print(color("─" * 40 + " Claude Code " + "─" * 40, Colors.DIM))
+
+
+def print_claude_end() -> None:
+    """Print marker for end of Claude Code output."""
+    if not QUIET:
+        print(color("─" * 93, Colors.DIM))
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="TDD Orchestrator for Claude Code - runs Red-Green-Refactor cycle"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress Claude Code output (only show status messages)"
+    )
+    parser.add_argument(
+        "--no-autopush",
+        action="store_true",
+        help="Disable automatic git push after commits (commits are still created locally)"
+    )
+    parser.add_argument(
+        "--clean-done",
+        action="store_true",
+        help="Remove completed todos (non-null done_at_commit) from todos.json and exit"
+    )
+    return parser.parse_args()
+
+
+def load_config() -> dict:
+    """
+    Load configuration from chief.toml.
+
+    Expected structure (multi-suite format):
+        [[suites]]
+        name = "backend"
+        language = "Python"
+        framework = "pytest"
+        root = "backend/"
+        command = "pytest {target} -v"
+        target_type = "file"
+        file_patterns = ["test_*.py", "*_test.py"]
+        disallow_write_globs = ["backend/tests/**"]
+
+        [[suites]]
+        name = "frontend"
+        language = "TypeScript"
+        framework = "vitest"
+        root = "frontend/"
+        command = "npm test -- {target}"
+        target_type = "file"
+        file_patterns = ["*.test.ts", "*.spec.ts"]
+        disallow_write_globs = ["frontend/**/*.test.ts"]
+
+    Returns:
+        Configuration dictionary with 'suites' array
+    """
+    if not Path(CONFIG_FILE).exists():
+        print_error(f"{CONFIG_FILE} not found")
+        print_info("Please create a chief.toml configuration file.")
+        print()
+        print(color("Example chief.toml:", Colors.DIM))
+        print(color('[[suites]]', Colors.DIM))
+        print(color('name = "backend"', Colors.DIM))
+        print(color('language = "Python"', Colors.DIM))
+        print(color('framework = "pytest"', Colors.DIM))
+        print(color('root = "."', Colors.DIM))
+        print(color('command = "pytest {target} -v"', Colors.DIM))
+        print(color('target_type = "file"', Colors.DIM))
+        print(color('file_patterns = ["test_*.py", "*_test.py"]', Colors.DIM))
+        print(color('disallow_write_globs = ["tests/**", "test_*.py"]', Colors.DIM))
+        sys.exit(1)
+
+    with open(CONFIG_FILE, "rb") as f:
+        config = tomllib.load(f)
+
+    # Validate suites array exists
+    if "suites" not in config or not config["suites"]:
+        print_error(f"{CONFIG_FILE} must contain at least one [[suites]] entry")
+        sys.exit(1)
+
+    # Validate each suite
+    required_suite_keys = ["name", "language", "framework", "root", "command", "target_type"]
+    for i, suite in enumerate(config["suites"]):
+        missing = [k for k in required_suite_keys if k not in suite]
+        if missing:
+            print_error(f"Suite {i+1} missing required keys: {', '.join(missing)}")
+            sys.exit(1)
+
+        # Set defaults for optional keys
+        suite.setdefault("default_target", ".")
+        suite.setdefault("file_patterns", [])
+        suite.setdefault("disallow_write_globs", [])
+        suite.setdefault("init", None)   # One-time dev env setup (run if validation fails)
+        suite.setdefault("setup", None)  # Pre-test setup (run once per suite before tests)
+        suite.setdefault("env", {})      # Environment variables for init, setup, and command
+
+    return config
+
+
+def get_suite_env(suite: dict) -> dict[str, str]:
+    """
+    Build environment dict for running suite commands.
+
+    Merges the current environment with suite-specific env vars.
+    Suite vars override existing environment vars.
+
+    Args:
+        suite: The suite configuration dict
+
+    Returns:
+        Environment dict to pass to subprocess
+    """
+    env = os.environ.copy()
+    suite_env = suite.get("env", {})
+    for key, value in suite_env.items():
+        env[key] = str(value)
+    return env
+
+
+def validate_suite_environments():
+    """
+    Validate that all test suite commands can execute.
+    If a suite fails validation and has an init command, run init and retry.
+    Exits with error if any suite fails validation after init attempt.
+    """
+    print_info("Validating test suite environments...")
+
+    for suite in CONFIG["suites"]:
+        name = suite["name"]
+        command = suite["command"]
+        init_cmd = suite.get("init")
+        suite_env = get_suite_env(suite)
+
+        # Build validation command - use --version as a quick check
+        if "{target}" in command:
+            validation_cmd = command.replace("{target}", "--version 2>/dev/null || true")
+        else:
+            validation_cmd = command
+
+        # First attempt
+        result = subprocess.run(
+            validation_cmd,
+            capture_output=True,
+            text=True,
+            shell=True,
+            cwd=os.getcwd(),
+            env=suite_env,
+            timeout=60
+        )
+
+        # If validation fails and we have an init command, try running it
+        if result.returncode != 0 and init_cmd:
+            print_warning(f"Suite '{name}' validation failed, running init...")
+            print_info(f"  Init: {init_cmd}")
+
+            init_result = subprocess.run(
+                init_cmd,
+                capture_output=False,  # Show init output
+                text=True,
+                shell=True,
+                cwd=os.getcwd(),
+                env=suite_env
+            )
+
+            if init_result.returncode != 0:
+                print_error(f"Suite '{name}': init command failed")
+                sys.exit(1)
+
+            # Retry validation
+            result = subprocess.run(
+                validation_cmd,
+                capture_output=True,
+                text=True,
+                shell=True,
+                cwd=os.getcwd(),
+                env=suite_env,
+                timeout=60
+            )
+
+            if result.returncode != 0:
+                print_error(f"Suite '{name}': still failing after init")
+                print_error(f"  Command: {validation_cmd}")
+                if result.stderr:
+                    print(result.stderr)
+                if result.stdout:
+                    print(result.stdout)
+                sys.exit(1)
+        elif result.returncode != 0:
+            print_error(f"Suite '{name}': environment validation failed (no init command defined)")
+            print_error(f"  Command: {validation_cmd}")
+            if result.stderr:
+                print(result.stderr)
+            if result.stdout:
+                print(result.stdout)
+            sys.exit(1)
+
+        print(f"  {color('✓', Colors.BRIGHT_GREEN)} {color(name, Colors.MAGENTA)}: OK")
+
+    print()
+
+
+def run_suite_setup(suite: dict) -> None:
+    """
+    Run setup command for a suite (once before that suite's tests).
+    Tracks completion to avoid re-running for multiple todos in same suite.
+    """
+    name = suite["name"]
+
+    # Skip if already set up
+    if name in SETUP_COMPLETED:
+        return
+
+    setup_cmd = suite.get("setup")
+    if not setup_cmd:
+        SETUP_COMPLETED.add(name)
+        return
+
+    print_info(f"Running setup for suite '{name}': {setup_cmd}")
+
+    result = subprocess.run(
+        setup_cmd,
+        capture_output=False,  # Show setup output
+        text=True,
+        shell=True,
+        cwd=os.getcwd(),
+        env=get_suite_env(suite)
+    )
+
+    if result.returncode != 0:
+        print_error(f"Setup failed for suite '{name}'")
+        sys.exit(1)
+
+    SETUP_COMPLETED.add(name)
+    print_success(f"Setup complete for suite '{name}'")
+
+
+def load_todos() -> dict:
+    """Load todos from todos.json."""
+    if not Path(TODOS_FILE).exists():
+        print_error(f"{TODOS_FILE} not found")
+        sys.exit(1)
+
+    with open(TODOS_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_todos(data: dict) -> None:
+    """Save todos back to todos.json."""
+    with open(TODOS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def clean_done_todos() -> int:
+    """
+    Remove completed todos from todos.json.
+
+    Removes all todos where done_at_commit is not null.
+
+    Returns:
+        Exit code (0 for success)
+    """
+    if not Path(TODOS_FILE).exists():
+        print_error(f"{TODOS_FILE} not found")
+        return 1
+
+    with open(TODOS_FILE, "r") as f:
+        data = json.load(f)
+
+    if "todos" not in data:
+        print_error("todos.json must have a 'todos' array")
+        return 1
+
+    original_count = len(data["todos"])
+    data["todos"] = [t for t in data["todos"] if t.get("done_at_commit") is None]
+    removed_count = original_count - len(data["todos"])
+
+    if removed_count == 0:
+        print_info("No completed todos to remove")
+        return 0
+
+    with open(TODOS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+    print_success(f"Removed {removed_count} completed todo(s) from {TODOS_FILE}")
+    print_info(f"Remaining: {len(data['todos'])} pending todo(s)")
+    return 0
+
+
+def get_next_todo(data: dict) -> Optional[dict]:
+    """Get the highest priority todo that hasn't been completed."""
+    pending = [t for t in data["todos"] if t.get("done_at_commit") is None]
+    if not pending:
+        return None
+    # Sort by priority descending (highest first)
+    pending.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    return pending[0]
+
+
+def detect_suite_from_path(file_path: str) -> Optional[dict]:
+    """
+    Determine which suite a file belongs to based on its path.
+
+    Args:
+        file_path: Path to a file
+
+    Returns:
+        The matching suite dict, or None if no match
+    """
+    for suite in CONFIG["suites"]:
+        root = suite.get("root", "")
+        # Normalize: ensure root ends with / for prefix matching (unless empty or ".")
+        if root and root != "." and not root.endswith("/"):
+            root = root + "/"
+        # Check if file is under this root
+        if root == "." or root == "" or file_path.startswith(root):
+            return suite
+    return None
+
+
+def get_suite_by_name(name: str) -> Optional[dict]:
+    """Get suite configuration by name."""
+    for suite in CONFIG["suites"]:
+        if suite["name"] == name:
+            return suite
+    return None
+
+
+def filter_test_files_all_suites(files: list[str]) -> dict[str, list[str]]:
+    """
+    Filter files to test files and group by suite.
+
+    Args:
+        files: List of file paths to check
+
+    Returns:
+        Dict mapping suite name -> list of test files for that suite
+    """
+    suite_test_files: dict[str, list[str]] = {}
+
+    for filepath in files:
+        # First, determine which suite this file belongs to based on path
+        suite = detect_suite_from_path(filepath)
+        if not suite:
+            continue
+
+        # Check if it's a test file for that suite
+        file_patterns = suite.get("file_patterns", [])
+        if not file_patterns:
+            continue
+
+        filename = Path(filepath).name
+        for pattern in file_patterns:
+            if fnmatch.fnmatch(filename, pattern):
+                suite_name = suite["name"]
+                if suite_name not in suite_test_files:
+                    suite_test_files[suite_name] = []
+                suite_test_files[suite_name].append(filepath)
+                break
+
+    return suite_test_files
+
+
+def run_tests_for_all_affected_suites(
+    suite_test_files: dict[str, list[str]]
+) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
+    """
+    Run tests for all affected suites.
+
+    Args:
+        suite_test_files: Dict mapping suite name -> list of test files
+
+    Returns:
+        Tuple of (all_passed, results_by_suite)
+        where results_by_suite maps suite_name:test_file -> (passed, stdout, stderr)
+    """
+    all_passed = True
+    results: dict[str, tuple[bool, str, str]] = {}
+
+    for suite_name, test_files in suite_test_files.items():
+        suite = get_suite_by_name(suite_name)
+        if not suite:
+            print_warning(f"Suite '{suite_name}' not found, skipping")
+            continue
+
+        # Run setup for this suite
+        run_suite_setup(suite)
+
+        # Run tests for each test file in this suite
+        for test_file in test_files:
+            passed, stdout, stderr = run_tests(test_file, suite)
+            results[f"{suite_name}:{test_file}"] = (passed, stdout, stderr)
+            if not passed:
+                all_passed = False
+
+    return all_passed, results
+
+
+def get_all_disallowed_paths() -> list[str]:
+    """
+    Get disallowed paths from ALL suites for multi-suite protection.
+
+    Returns:
+        Combined list of paths to protect from writes
+    """
+    all_paths = []
+    for suite in CONFIG["suites"]:
+        all_paths.extend(get_disallowed_paths(suite))
+    return list(set(all_paths))  # Deduplicate
+
+
+def get_disallowed_paths(suite: dict) -> list[str]:
+    """
+    Get list of paths to disallow writing to, based on suite's disallow_write_globs.
+    Expands globs to actual file paths that exist.
+
+    Args:
+        suite: The suite configuration dict
+    """
+    globs = suite.get("disallow_write_globs", [])
+    paths = []
+
+    for pattern in globs:
+        # Use glob to find matching files
+        if "**" in pattern or "*" in pattern:
+            matched = list(Path(".").glob(pattern))
+            paths.extend(str(p) for p in matched)
+        else:
+            # Literal path
+            if Path(pattern).exists():
+                paths.append(pattern)
+
+    return paths
+
+
+def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tuple[int, str, str]:
+    """
+    Run claude code with the given prompt.
+
+    Args:
+        prompt: The prompt to send to claude code
+        disallow_paths: Paths to block write access to
+
+    Returns:
+        Tuple of (return_code, stdout, stderr)
+    """
+    # Prompt must be positional argument right after -p (not via stdin)
+    # --verbose shows real-time tool calls and agent activity
+    cmd = ["claude", "-p", prompt, "--permission-mode", "acceptEdits", "--verbose"]
+
+    # Add disallowed paths if any
+    for path in (disallow_paths or []):
+        cmd.extend(["--disallowedTools", f"Edit:{path}", "--disallowedTools", f"Write:{path}"])
+
+    print_info("Invoking Claude Code...")
+    print_claude_start()
+
+    if QUIET:
+        # Original quiet behavior - capture and hide output
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        print_claude_end()
+        return result.returncode, result.stdout, result.stderr
+    else:
+        # Stream output in real-time while capturing for parsing
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout
+            text=True,
+            cwd=os.getcwd()
+        )
+
+        stdout_lines = []
+        for line in process.stdout:
+            print(line, end="")  # Real-time output
+            stdout_lines.append(line)
+
+        process.wait()
+        print_claude_end()
+        return process.returncode, "".join(stdout_lines), ""
+
+
+def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
+    """
+    Run tests on the specified target using the suite's test command.
+
+    Args:
+        target: The test target (file, package, project, or repo path)
+        suite: The test suite configuration to use
+
+    Returns:
+        Tuple of (passed, stdout, stderr)
+    """
+    print_info(f"Running tests: {color(target, Colors.WHITE, Colors.BOLD)} (suite: {suite['name']})")
+
+    command_template = suite["command"]
+
+    # Strip root prefix from target by default (configurable via strip_root_from_target)
+    strip_root = suite.get("strip_root_from_target", True)
+    root = suite.get("root", "")
+
+    transformed_target = target
+    if strip_root and root and root != ".":
+        # Normalize root to end with /
+        normalized_root = root if root.endswith("/") else root + "/"
+        if target.startswith(normalized_root):
+            transformed_target = target[len(normalized_root):]
+
+    # Substitute {target} with the (possibly transformed) path
+    if "{target}" in command_template:
+        test_command = command_template.format(target=transformed_target)
+    else:
+        test_command = command_template
+
+    # Use shell=True since commands may contain shell builtins (cd, source)
+    # and operators (&&, ||, ;)
+    result = subprocess.run(
+        test_command,
+        capture_output=True,
+        text=True,
+        shell=True,
+        cwd=os.getcwd(),
+        env=get_suite_env(suite)
+    )
+
+    # Show test output by default (unless quiet mode)
+    if not QUIET:
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
+    passed = result.returncode == 0
+    return passed, result.stdout, result.stderr
+
+
+def git_commit_and_tag(message: str) -> str:
+    """
+    Commit changes and create a tag (does not push).
+
+    Returns:
+        The commit hash
+
+    Raises:
+        subprocess.CalledProcessError if commit fails
+    """
+    # Stage all changes
+    subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
+
+    # Commit
+    subprocess.run(["git", "commit", "-m", message], check=True, capture_output=True)
+
+    # Get commit hash
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    commit_hash = result.stdout.strip()
+
+    # Create tag with timestamp
+    tag_name = f"chief-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    subprocess.run(["git", "tag", tag_name], check=True, capture_output=True)
+
+    print_success(f"Committed: {commit_hash[:8]} (tag: {tag_name})")
+    return commit_hash
+
+
+def git_push_with_tags() -> bool:
+    """
+    Push commits and tags to remote.
+
+    Returns:
+        True if push succeeded, False if failed (non-fatal)
+    """
+    if not AUTOPUSH:
+        print_info("Auto-push disabled, skipping push")
+        return True
+
+    try:
+        subprocess.run(["git", "push"], check=True, capture_output=True)
+        subprocess.run(["git", "push", "--tags"], check=True, capture_output=True)
+        print_success("Pushed to remote")
+        return True
+    except subprocess.CalledProcessError as e:
+        print_warning(f"Push failed (commit is saved locally): {e}")
+        return False
+
+
+def git_commit_todos(todo_text: str) -> None:
+    """Commit todos.json update after marking a todo as done."""
+    subprocess.run(["git", "add", "todos.json"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", f"chief: mark done - {todo_text[:50]}"],
+        check=True,
+        capture_output=True
+    )
+    # Push is non-fatal for todos commit
+    git_push_with_tags()
+
+
+def get_dirty_files() -> set[str]:
+    """Get set of currently modified, staged, or untracked files."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True
+    )
+    files = set()
+    for line in result.stdout.strip().split("\n"):
+        if line:
+            # Format is "XY filename" or "XY filename -> newname" for renames
+            parts = line[3:].split(" -> ")
+            files.add(parts[-1])  # Use the destination name for renames
+    return files
+
+
+def git_revert_changes(baseline_files: set[str] | None = None) -> None:
+    """Revert uncommitted changes made since baseline (or all except todos.json if no baseline)."""
+    print_warning("Reverting uncommitted changes...")
+
+    if baseline_files is None:
+        # Revert everything except todos.json (legacy behavior)
+        subprocess.run(["git", "checkout", "--", ".", ":!todos.json"], capture_output=True)
+        subprocess.run(["git", "clean", "-fd", "--exclude=todos.json"], capture_output=True)
+        return
+
+    # Only revert files that weren't dirty before
+    current_files = get_dirty_files()
+    files_to_revert = current_files - baseline_files - {"todos.json"}
+
+    if not files_to_revert:
+        print_info("No new changes to revert")
+        return
+
+    # Separate tracked (checkout) vs untracked (clean) files
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        capture_output=True,
+        text=True
+    )
+    untracked = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+
+    tracked_to_revert = [f for f in files_to_revert if f not in untracked]
+    untracked_to_revert = [f for f in files_to_revert if f in untracked]
+
+    if tracked_to_revert:
+        subprocess.run(["git", "checkout", "--"] + tracked_to_revert, capture_output=True)
+
+    for f in untracked_to_revert:
+        try:
+            Path(f).unlink(missing_ok=True)
+        except (OSError, IsADirectoryError):
+            subprocess.run(["rm", "-rf", f], capture_output=True)
+
+
+def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
+    """
+    Find test files modified after the given timestamp.
+
+    Args:
+        since_mtime: Unix timestamp; only return files modified after this
+        suite: The test suite configuration to use
+
+    Returns:
+        List of test file paths modified since the timestamp
+    """
+    file_patterns = suite.get("file_patterns", [])
+
+    if not file_patterns:
+        return []
+
+    test_files = []
+    for pattern in file_patterns:
+        glob_pattern = pattern if pattern.startswith("**/") else f"**/{pattern}"
+        for path in Path(".").glob(glob_pattern):
+            if path.stat().st_mtime > since_mtime:
+                test_files.append(str(path))
+
+    return test_files
+
+
+def git_get_baseline() -> set[str]:
+    """
+    Capture baseline of all tracked and untracked files in git.
+
+    Returns:
+        Set of file paths that exist in the working tree
+    """
+    # Get all files known to git (tracked)
+    result = subprocess.run(
+        ["git", "ls-files"],
+        capture_output=True,
+        text=True,
+        cwd=os.getcwd()
+    )
+    tracked = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+
+    # Get untracked files
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        capture_output=True,
+        text=True,
+        cwd=os.getcwd()
+    )
+    untracked = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+
+    return tracked | untracked
+
+
+def git_detect_new_files(baseline: set[str]) -> list[str]:
+    """
+    Detect files that are new or modified since the baseline.
+
+    Uses git status --porcelain=v1 for stable parseable output.
+
+    Args:
+        baseline: Set of file paths from git_get_baseline()
+
+    Returns:
+        List of new file paths (not in baseline)
+    """
+    # Get current state using porcelain format
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        capture_output=True,
+        text=True,
+        cwd=os.getcwd()
+    )
+
+    new_files = []
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        # Porcelain format: XY filename (where X=staged, Y=unstaged)
+        # ?? = untracked, A = added, M = modified
+        # status = line[:2]  # Not used but kept for reference
+        filepath = line[3:].strip()
+
+        # Handle renamed files (R  old -> new)
+        if " -> " in filepath:
+            filepath = filepath.split(" -> ")[1]
+
+        # Check if this is a new file (not in baseline)
+        if filepath not in baseline and Path(filepath).exists():
+            new_files.append(filepath)
+
+    return new_files
+
+
+def filter_test_files(files: list[str], suite: dict) -> list[str]:
+    """
+    Filter a list of files to only include test files matching suite's patterns.
+
+    Args:
+        files: List of file paths
+        suite: The test suite configuration to use
+
+    Returns:
+        List of file paths matching test file patterns
+    """
+    file_patterns = suite.get("file_patterns", [])
+
+    if not file_patterns:
+        return []
+
+    test_files = []
+    for filepath in files:
+        filename = Path(filepath).name
+        for pattern in file_patterns:
+            if fnmatch.fnmatch(filename, pattern):
+                test_files.append(filepath)
+                break
+
+    return test_files
+
+
+def get_file_hashes(files: list[str]) -> dict[str, Optional[str]]:
+    """
+    Get MD5 hashes of files for change detection.
+
+    Args:
+        files: List of file paths to hash
+
+    Returns:
+        Dict mapping filepath -> hash (or None if file doesn't exist)
+    """
+    hashes = {}
+    for filepath in files:
+        if Path(filepath).is_file():
+            with open(filepath, "rb") as f:
+                hashes[filepath] = hashlib.md5(f.read()).hexdigest()
+        else:
+            hashes[filepath] = None
+    return hashes
+
+
+def read_test_file_contents(files: list[str]) -> str:
+    """
+    Read contents of test files for inclusion in refinement prompt.
+
+    Args:
+        files: List of test file paths to read
+
+    Returns:
+        Combined contents of all test files with headers
+    """
+    contents = []
+    for filepath in files:
+        if Path(filepath).is_file():
+            with open(filepath, "r") as f:
+                contents.append(f"--- {filepath} ---\n{f.read()}")
+    return "\n\n".join(contents)
+
+
+def get_target_type_description(suite: dict) -> str:
+    """Get a human-readable description of what kind of test target to create."""
+    target_type = suite["target_type"]
+    language = suite["language"]
+    framework = suite["framework"]
+
+    descriptions = {
+        "file": f"Create a test file using {language} and {framework}.",
+        "package": f"Create tests in the appropriate package directory for {language}/{framework}.",
+        "project": f"Add tests to the project's test directory following {framework} conventions.",
+        "repo": f"Add tests following the repository's {framework} test structure.",
+    }
+
+    return descriptions.get(target_type, descriptions["file"])
+
+
+def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
+    """
+    Run claude code to write failing tests for the todo.
+    Claude can write tests for any suite(s) - suites are detected from git changes.
+
+    Args:
+        todo: The todo item
+
+    Returns:
+        Tuple of (suite_test_files, all_test_artifacts) where:
+        - suite_test_files: Dict mapping suite name -> list of test files
+        - all_test_artifacts: List of all test files created (for locking)
+    """
+    todo_text = todo.get("todo", "")
+
+    expectations = todo.get("expectations", "")
+    expectations_section = ""
+    if expectations:
+        expectations_section = f"\n\nExpected outcome (from product manager):\n{expectations}"
+
+    # Build suite info section listing all available suites
+    suite_info_lines = []
+    for suite in CONFIG["suites"]:
+        patterns = suite.get("file_patterns", [])
+        patterns_str = ", ".join(patterns) if patterns else "none"
+        suite_info_lines.append(
+            f"- {suite['name']}: {suite['language']}/{suite['framework']} "
+            f"(root: {suite['root']}, test patterns: {patterns_str})"
+        )
+    suite_info = "\n".join(suite_info_lines)
+
+    prompt = f"""Write or modify tests (Red phase of TDD) for the following task:
+
+Task: {todo_text}
+{expectations_section}
+
+Available test suites in this project:
+{suite_info}
+
+Instructions:
+1. Analyze the task and determine which test suite(s) are appropriate
+2. First, search for existing tests related to this functionality
+3. **If comprehensive tests already exist for this task:**
+   - Output a single line: TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
+   - List all relevant existing test files (comma-separated)
+   - Do NOT create or modify any files
+   - Stop here - do not proceed with further instructions
+4. Follow the patterns and conventions used in existing tests (fixtures, configuration, setup/teardown, naming conventions)
+5. Determine the nature of this task:
+
+   **If MODIFYING existing behavior:**
+   - Find and update existing tests to reflect the new expected behavior
+   - The modified tests should FAIL until the implementation is updated
+   - Keep test names/structure where possible, just update expectations
+
+   **If ADDING new functionality:**
+   - Write new failing tests for the new feature
+   - Place them in the appropriate existing test file if one exists, or create a new one
+
+   **If FIXING a bug:**
+   - Add a regression test that currently FAILS (demonstrates the bug)
+   - If existing tests have incorrect expectations, fix them
+
+6. Write COMPREHENSIVE tests covering:
+   - Happy path (normal expected usage)
+   - Edge cases (empty input, boundary values)
+   - Error conditions (invalid input, missing data)
+   - Security considerations if applicable
+7. Multiple test functions in one test file is expected and encouraged
+8. Write tests in the correct location based on the suite conventions above
+
+Only write/modify the tests, do not implement the feature."""
+
+    # Capture git baseline before RED phase
+    baseline = git_get_baseline()
+
+    returncode, stdout, stderr = run_claude_code(prompt)
+
+    if returncode != 0:
+        print_error(f"Claude Code failed during test creation: {stderr}")
+        return {}, []
+
+    # Check if Claude found existing tests (before checking git changes)
+    existing_tests = extract_existing_tests(stdout)
+    if existing_tests:
+        print_info("Claude reports tests already exist, verifying...")
+        stable_tests = verify_existing_tests_stable(todo, existing_tests, suite_info)
+        if stable_tests:
+            # Map existing test files to their suites
+            suite_test_files = filter_test_files_all_suites(stable_tests)
+            if suite_test_files:
+                for suite_name, files in suite_test_files.items():
+                    print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
+                return suite_test_files, stable_tests
+            else:
+                print_warning("Existing test files don't match any suite patterns")
+        # If stability failed or no suite match, fall through to normal git-based detection
+
+    # Detect new/modified files via git and map to suites
+    new_files = git_detect_new_files(baseline)
+    suite_test_files = filter_test_files_all_suites(new_files)
+
+    # Flatten all test artifacts for locking
+    all_test_artifacts = []
+    for files in suite_test_files.values():
+        all_test_artifacts.extend(files)
+
+    if not suite_test_files:
+        print_warning("No test files detected after RED phase")
+        return {}, []
+
+    # Report which suites were affected
+    for suite_name, files in suite_test_files.items():
+        print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
+
+    # --- REFINEMENT LOOP ---
+    files_to_monitor = list(all_test_artifacts)
+
+    if not files_to_monitor:
+        print_warning("No test files to refine, skipping refinement loop")
+        return suite_test_files, all_test_artifacts
+
+    no_change_count = 0
+    for refine_iter in range(1, MAX_TEST_REFINEMENT_ITERATIONS + 1):
+        if no_change_count >= STABILITY_ITERATIONS:
+            print_success(f"Tests stable (no changes for {STABILITY_ITERATIONS} consecutive iterations)")
+            break
+
+        print_phase("REFINE", f"Test refinement iteration {refine_iter}/{MAX_TEST_REFINEMENT_ITERATIONS}")
+        print_info(f"Monitoring {len(files_to_monitor)} file(s) for changes: {', '.join(files_to_monitor)}")
+
+        # Capture state before
+        hashes_before = get_file_hashes(files_to_monitor)
+
+        # Read test file contents for review
+        test_contents = read_test_file_contents(files_to_monitor)
+
+        # Build refinement prompt
+        refine_prompt = f"""Review and refine the following tests for this task:
+
+Task: {todo_text}
+
+Current test file(s):
+{test_contents}
+
+Instructions:
+1. Check if the tests accurately represent the task description
+2. Check for any bugs, typos, or logic errors in the tests
+3. Ensure test coverage is comprehensive (happy path, edge cases, error conditions)
+4. If improvements are needed, edit the test file(s)
+5. If the tests are already correct and complete, make NO changes
+
+Only modify the tests if there are actual issues to fix."""
+
+        # Run Claude to review/refine
+        returncode, stdout, stderr = run_claude_code(refine_prompt)
+
+        if returncode != 0:
+            print_warning(f"Claude returned error during refinement: {stderr}", indent=1)
+            # Continue anyway - tests might still be usable
+
+        # Capture state after
+        hashes_after = get_file_hashes(files_to_monitor)
+
+        # Deterministic change detection
+        if hashes_before == hashes_after:
+            no_change_count += 1
+            print_info(f"No changes detected (stable count: {no_change_count}/{STABILITY_ITERATIONS})", indent=1)
+        else:
+            no_change_count = 0
+            changed_files = [f for f in files_to_monitor if hashes_before.get(f) != hashes_after.get(f)]
+            print_warning(f"Test files modified: {', '.join(changed_files)} — will refine again", indent=1)
+
+    if no_change_count < STABILITY_ITERATIONS:
+        print_warning("Refinement loop hit max iterations without stabilizing")
+    # --- END REFINEMENT LOOP ---
+
+    return suite_test_files, all_test_artifacts
+
+
+def extract_test_target(output: str) -> Optional[str]:
+    """
+    Extract test target from claude code output.
+    Looks for the structured "TEST_TARGET: <path>" format.
+    """
+    for line in output.split("\n"):
+        line = line.strip()
+        if line.startswith("TEST_TARGET:"):
+            target = line[len("TEST_TARGET:"):].strip()
+            # Remove any backticks or quotes
+            target = target.strip("`\"'")
+            if target:
+                return target
+    return None
+
+
+def extract_watch_files(output: str) -> list[str]:
+    """
+    Extract watch files from claude code output.
+    Looks for the structured "WATCH_FILES: path1, path2, ..." format.
+    """
+    for line in output.split("\n"):
+        line = line.strip()
+        if line.startswith("WATCH_FILES:"):
+            files_str = line[len("WATCH_FILES:"):].strip()
+            # Split by comma and clean up each path
+            files = [f.strip().strip("`\"'") for f in files_str.split(",")]
+            return [f for f in files if f]  # Filter empty strings
+    return []
+
+
+def extract_existing_tests(output: str) -> list[str]:
+    """
+    Extract existing test files from claude code output.
+    Looks for "TESTS_ALREADY_EXIST: path1, path2, ..." format.
+    """
+    for line in output.split("\n"):
+        line = line.strip()
+        if line.startswith("TESTS_ALREADY_EXIST:"):
+            files_str = line[len("TESTS_ALREADY_EXIST:"):].strip()
+            files = [f.strip().strip("`\"'") for f in files_str.split(",")]
+            return [f for f in files if f]
+    return []
+
+
+def verify_existing_tests_stable(todo: dict, initial_tests: list[str], suite_info: str) -> list[str]:
+    """
+    Verify TESTS_ALREADY_EXIST answer is stable across STABILITY_ITERATIONS.
+    Re-runs the prompt to confirm Claude consistently identifies the same test files.
+
+    Args:
+        todo: The todo item
+        initial_tests: Initial list of test paths from first response
+        suite_info: Formatted string of available test suites
+
+    Returns:
+        List of confirmed test paths, or empty list if unstable
+    """
+    todo_text = todo.get("todo", "")
+    expectations = todo.get("expectations", "")
+    expectations_section = ""
+    if expectations:
+        expectations_section = f"\n\nExpected outcome:\n{expectations}"
+
+    previous_tests = sorted(initial_tests)
+    stable_count = 1  # Already have one answer from initial call
+
+    prompt = f"""For this task, verify whether comprehensive tests already exist:
+
+Task: {todo_text}
+{expectations_section}
+
+Available test suites:
+{suite_info}
+
+If tests already exist that cover this task, output a single line:
+TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
+
+If tests need to be written or modified, proceed to write them."""
+
+    for i in range(STABILITY_ITERATIONS + 1):
+        if stable_count >= STABILITY_ITERATIONS:
+            print_success(f"Existing tests confirmed: {', '.join(previous_tests)}")
+            return previous_tests
+
+        returncode, stdout, stderr = run_claude_code(prompt)
+
+        if returncode != 0:
+            print_warning(f"Claude returned error: {stderr}", indent=1)
+            continue
+
+        current_tests = extract_existing_tests(stdout)
+
+        if not current_tests:
+            print_warning("Claude did not confirm existing tests, will write new tests", indent=1)
+            return []
+
+        current_tests = sorted(current_tests)
+
+        if current_tests == previous_tests:
+            stable_count += 1
+            print_info(f"Existing tests stable (count: {stable_count}/{STABILITY_ITERATIONS})", indent=1)
+        else:
+            stable_count = 1
+            previous_tests = current_tests
+            print_info(f"Existing tests: {', '.join(current_tests)}", indent=1)
+
+    print_warning("Failed to stabilize existing tests list, will write new tests")
+    return []
+
+
+def get_watch_files_for_todo(todo: dict) -> list[str]:
+    """
+    Ask Claude to identify files that should change for non-testable tasks.
+    Requires STABILITY_ITERATIONS consistent responses.
+
+    Args:
+        todo: The todo item
+
+    Returns:
+        List of file paths to watch, or empty list if failed to stabilize
+    """
+    todo_text = todo.get("todo", "")
+    expectations = todo.get("expectations", "")
+
+    expectations_section = ""
+    if expectations:
+        expectations_section = f"\n\nExpected outcome:\n{expectations}"
+
+    prompt = f"""This task is marked as non-testable (no unit tests apply).
+
+Task: {todo_text}
+{expectations_section}
+
+Identify the files or directories that MUST be modified to complete this task.
+Output them on a single line in this exact format:
+WATCH_FILES: path1, path2, path3
+
+Only list files/directories that should actually change. Be specific."""
+
+    print_info("Asking Claude to identify files to watch...")
+
+    # Stability loop - must get same answer STABILITY_ITERATIONS times
+    previous_files: list[str] | None = None
+    stable_count = 0
+
+    for i in range(STABILITY_ITERATIONS + 2):  # Allow some retries
+        returncode, stdout, stderr = run_claude_code(prompt)
+
+        if returncode != 0:
+            print_warning(f"Claude returned error: {stderr}", indent=1)
+            continue
+
+        watch_files = extract_watch_files(stdout)
+
+        if not watch_files:
+            print_warning("No WATCH_FILES found in output, retrying...", indent=1)
+            continue
+
+        # Sort for consistent comparison
+        watch_files = sorted(watch_files)
+
+        if watch_files == previous_files:
+            stable_count += 1
+            print_info(f"Watch files stable (count: {stable_count}/{STABILITY_ITERATIONS})", indent=1)
+            if stable_count >= STABILITY_ITERATIONS:
+                print_success(f"Watch files confirmed: {', '.join(watch_files)}")
+                return watch_files
+        else:
+            stable_count = 1
+            previous_files = watch_files
+            print_info(f"Watch files: {', '.join(watch_files)}", indent=1)
+
+    print_error("Failed to get stable watch files list")
+    return []
+
+
+def implement_todo_no_tests(todo: dict, watch_files: list[str]) -> tuple[bool, str, str]:
+    """
+    Run claude code to implement a non-testable todo.
+    No test files to protect, just implement the task.
+
+    Args:
+        todo: The todo item
+        watch_files: List of files that should be modified
+
+    Returns:
+        Tuple of (success, stdout, stderr)
+    """
+    todo_text = todo.get("todo", "")
+    expectations = todo.get("expectations", "")
+
+    expectations_section = ""
+    if expectations:
+        expectations_section = f"\n\nExpected outcome:\n{expectations}"
+
+    prompt = f"""Implement the following task:
+
+Task: {todo_text}
+{expectations_section}
+
+You should modify these files: {', '.join(watch_files)}
+
+Implement the task completely."""
+
+    returncode, stdout, stderr = run_claude_code(prompt)
+
+    return returncode == 0, stdout, stderr
+
+
+def implement_todo(
+    todo: dict,
+    suite_test_files: dict[str, list[str]],
+    all_test_artifacts: list[str]
+) -> tuple[bool, str, str]:
+    """
+    Run claude code to implement the todo.
+    Blocks write access to test files via configured globs and test_artifacts.
+
+    Args:
+        todo: The todo item
+        suite_test_files: Dict mapping suite name -> list of test files
+        all_test_artifacts: List of all test files to lock (disallow writes)
+
+    Returns:
+        Tuple of (success, stdout, stderr)
+    """
+    todo_text = todo.get("todo", "")
+
+    # Build test locations string for prompt
+    test_locations = []
+    for suite_name, files in suite_test_files.items():
+        test_locations.append(f"- {suite_name}: {', '.join(files)}")
+    test_locations_str = "\n".join(test_locations)
+
+    # Collect disallow paths from all affected suites + test artifacts
+    extra_disallow = list(all_test_artifacts)
+    for suite_name in suite_test_files.keys():
+        suite = get_suite_by_name(suite_name)
+        if suite:
+            extra_disallow.extend(get_disallowed_paths(suite))
+    extra_disallow = list(set(extra_disallow))  # Deduplicate
+
+    prompt = f"""Implement the following task:
+
+Task: {todo_text}
+
+Tests have been created in the following locations:
+{test_locations_str}
+
+Do NOT modify any test files. Only implement the code to make ALL tests pass.
+
+Implement the minimal code needed to pass the tests."""
+
+    returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
+
+    return returncode == 0, stdout, stderr
+
+
+def fix_failing_tests(
+    todo: dict,
+    suite_test_files: dict[str, list[str]],
+    all_test_artifacts: list[str],
+    test_results: dict[str, tuple[bool, str, str]]
+) -> tuple[bool, str, str]:
+    """
+    Run claude code to fix failing tests.
+
+    Args:
+        todo: The todo item
+        suite_test_files: Dict mapping suite name -> list of test files
+        all_test_artifacts: List of all test files to lock (disallow writes)
+        test_results: Results from all suites (key -> (passed, stdout, stderr))
+
+    Returns:
+        Tuple of (success, stdout, stderr)
+    """
+    todo_text = todo.get("todo", "")
+
+    # Build test locations string for prompt
+    test_locations = []
+    for suite_name, files in suite_test_files.items():
+        test_locations.append(f"- {suite_name}: {', '.join(files)}")
+    test_locations_str = "\n".join(test_locations)
+
+    # Build failure output from all failing suites
+    failure_output_lines = []
+    for key, (passed, stdout, stderr) in test_results.items():
+        if not passed:
+            failure_output_lines.append(f"=== {key} ===")
+            failure_output_lines.append(f"STDOUT:\n{stdout}")
+            if stderr:
+                failure_output_lines.append(f"STDERR:\n{stderr}")
+    failure_output = "\n\n".join(failure_output_lines)
+
+    # Collect disallow paths from all affected suites + test artifacts
+    extra_disallow = list(all_test_artifacts)
+    for suite_name in suite_test_files.keys():
+        suite = get_suite_by_name(suite_name)
+        if suite:
+            extra_disallow.extend(get_disallowed_paths(suite))
+    extra_disallow = list(set(extra_disallow))  # Deduplicate
+
+    prompt = f"""The tests are failing. Fix the code to make them pass.
+
+Original task: {todo_text}
+
+Test files (DO NOT MODIFY):
+{test_locations_str}
+
+Test failures:
+{failure_output}
+
+Analyze the test failures and fix the implementation code to make ALL tests pass."""
+
+    returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
+
+    return returncode == 0, stdout, stderr
+
+
+def process_todo_no_tests(todo: dict, data: dict) -> bool:
+    """
+    Process a non-testable todo using file-change verification.
+
+    Instead of TDD, this:
+    1. Asks Claude to identify files that should change
+    2. Has Claude implement the task
+    3. Verifies those files actually changed
+
+    Args:
+        todo: The todo item
+        data: The full todos data structure
+
+    Returns:
+        True if todo was completed successfully, False otherwise
+    """
+    todo_text = todo.get("todo", "")
+
+    # Step 1: Identify files to watch
+    print_phase("RED", "Identifying files to watch (non-testable task)...")
+    watch_files = get_watch_files_for_todo(todo)
+
+    if not watch_files:
+        print_error("Failed to identify watch files, skipping todo")
+        return False
+
+    print_info(f"Watching for changes: {', '.join(watch_files)}")
+
+    # Step 2: Implement and verify
+    for attempt in range(1, MAX_SECONDARY_ITERATIONS + 1):
+        print_phase("GREEN", f"Implementation attempt {attempt}/{MAX_SECONDARY_ITERATIONS}")
+
+        # Snapshot files before implementation
+        baseline_dirty = get_dirty_files()
+        hashes_before = get_file_hashes(watch_files)
+
+        # Run implementation
+        success, _, _ = implement_todo_no_tests(todo, watch_files)
+
+        if not success:
+            print_error("Claude Code returned error during implementation")
+            if attempt < MAX_SECONDARY_ITERATIONS:
+                git_revert_changes(baseline_dirty)
+            else:
+                print_info("Keeping changes for inspection (final attempt)")
+            continue
+
+        # Check if watched files changed
+        hashes_after = get_file_hashes(watch_files)
+
+        if hashes_before != hashes_after:
+            # Files changed - success!
+            changed = [f for f in watch_files if hashes_before.get(f) != hashes_after.get(f)]
+            print_success(f"Files modified: {', '.join(changed)}")
+
+            try:
+                commit_hash = git_commit_and_tag(f"chief: {todo_text}")
+                git_push_with_tags()  # Non-fatal
+                todo["done_at_commit"] = commit_hash
+                save_todos(data)
+                git_commit_todos(todo_text)
+                return True
+            except subprocess.CalledProcessError as e:
+                print_error(f"Git operation failed: {e}")
+                git_revert_changes(baseline_dirty)
+                continue
+        else:
+            print_warning("Watched files not modified, retrying...")
+            if attempt < MAX_SECONDARY_ITERATIONS:
+                git_revert_changes(baseline_dirty)
+            else:
+                print_info("Keeping changes for inspection (final attempt)")
+
+    print_error(f"Failed to complete todo after {MAX_SECONDARY_ITERATIONS} attempts")
+    return False
+
+
+def process_todo(todo: dict, data: dict) -> bool:
+    """
+    Process a single todo through the TDD cycle.
+    Suites are detected automatically from the test files Claude creates.
+
+    Args:
+        todo: The todo item
+        data: The full todos data structure
+
+    Returns:
+        True if todo was completed successfully, False otherwise
+    """
+    todo_text = todo.get("todo", "")
+    print()
+    print_banner(f"TODO: {todo_text[:50]}{'...' if len(todo_text) > 50 else ''}")
+    print_info(f"Full task: {todo_text}")
+    print_info(f"Priority: {color(str(todo.get('priority', 0)), Colors.YELLOW, Colors.BOLD)}")
+
+    # Check if this todo is testable
+    testable = todo.get("testable", True)
+
+    if not testable:
+        # Non-testable task: use file-change verification instead of tests
+        return process_todo_no_tests(todo, data)
+
+    # Step 1: Write failing tests (Red) - Claude chooses which suite(s)
+    print_phase("RED", "Writing failing tests...")
+    suite_test_files, all_test_artifacts = write_test_for_todo(todo)
+
+    if not suite_test_files:
+        print_error("Failed to create tests, skipping todo")
+        return False
+
+    # Run setup for each affected suite
+    for suite_name in suite_test_files.keys():
+        suite = get_suite_by_name(suite_name)
+        if suite:
+            run_suite_setup(suite)
+
+    # Verify tests fail (as expected for Red phase)
+    all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
+    if all_passed:
+        print_warning("All tests passed before implementation (expected to fail)")
+        print_info("Feature may already exist — marking as done")
+        # Could be that feature already exists, mark as done
+        try:
+            dirty_files = get_dirty_files()
+            if dirty_files - {"todos.json"}:
+                # There are changes to commit (excluding todos.json)
+                commit_hash = git_commit_and_tag(f"chief: {todo_text} (test already passing)")
+                git_push_with_tags()  # Non-fatal
+            else:
+                # No changes - feature was already committed, use current HEAD
+                print_info("No changes to commit — using existing HEAD commit")
+                result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                commit_hash = result.stdout.strip()
+
+            todo["done_at_commit"] = commit_hash
+            save_todos(data)
+            git_commit_todos(todo_text)
+            return True
+        except subprocess.CalledProcessError as e:
+            print_error(f"Git commit failed: {e}")
+            return False
+
+    print_success("Tests fail as expected (Red phase complete)")
+
+    # Secondary loop: implement and verify
+    for secondary_iter in range(1, MAX_SECONDARY_ITERATIONS + 1):
+        print_phase("GREEN", f"Implementation attempt {secondary_iter}/{MAX_SECONDARY_ITERATIONS}")
+
+        # Snapshot dirty files before implementation so we only revert what we change
+        baseline_files = get_dirty_files()
+
+        # Step 2: Implement the todo (pass test_artifacts to lock test files)
+        success, _, _ = implement_todo(todo, suite_test_files, all_test_artifacts)
+
+        if not success:
+            print_error("Claude Code returned error during implementation")
+            if secondary_iter < MAX_SECONDARY_ITERATIONS:
+                git_revert_changes(baseline_files)
+            else:
+                print_info("Keeping changes for inspection (final attempt)")
+            continue
+
+        # Step 3: Run tests for all affected suites
+        all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
+
+        if all_passed:
+            print_success("All tests passed!")
+            try:
+                commit_hash = git_commit_and_tag(f"chief: {todo_text}")
+                git_push_with_tags()  # Non-fatal
+                todo["done_at_commit"] = commit_hash
+                save_todos(data)
+                git_commit_todos(todo_text)
+                return True
+            except subprocess.CalledProcessError as e:
+                print_error(f"Git commit failed: {e}")
+                git_revert_changes(baseline_files)
+                continue
+
+        # Tests failed, enter tertiary loop
+        print_warning("Tests failed, entering fix loop...")
+
+        for tertiary_iter in range(1, MAX_TERTIARY_ITERATIONS + 1):
+            print_phase("FIX", f"Fix attempt {tertiary_iter}/{MAX_TERTIARY_ITERATIONS}")
+
+            success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
+
+            if not success:
+                print_error("Claude Code returned error during fix", indent=1)
+                continue
+
+            # Run tests again for all affected suites
+            all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
+
+            if all_passed:
+                print_success("All tests passed after fix!")
+                try:
+                    commit_hash = git_commit_and_tag(f"chief: {todo_text}")
+                    git_push_with_tags()  # Non-fatal
+                    todo["done_at_commit"] = commit_hash
+                    save_todos(data)
+                    git_commit_todos(todo_text)
+                    return True
+                except subprocess.CalledProcessError as e:
+                    print_error(f"Git commit failed: {e}", indent=1)
+                    break  # Break tertiary, will revert in secondary
+
+        # Tertiary loop exhausted, revert and retry secondary
+        print_warning("Fix loop exhausted, reverting changes...")
+        if secondary_iter < MAX_SECONDARY_ITERATIONS:
+            git_revert_changes(baseline_files)
+        else:
+            print_info("Keeping changes for inspection (final attempt)")
+
+    # Secondary loop exhausted
+    print_error(f"Failed to complete todo after {MAX_SECONDARY_ITERATIONS} attempts")
+    return False
+
+
+def main():
+    """Main orchestration loop."""
+    global CONFIG, QUIET, AUTOPUSH
+
+    # Parse command-line arguments
+    args = parse_args()
+    QUIET = args.quiet or os.environ.get("CHIEF_QUIET", "").lower() in ("1", "true", "yes")
+    AUTOPUSH = not args.no_autopush
+
+    # Handle --clean-done early (doesn't need config)
+    if args.clean_done:
+        return clean_done_todos()
+
+    print_banner("CHIEF - TDD Orchestrator for Claude Code")
+    print()
+
+    # Load configuration
+    CONFIG = load_config()
+    print_info(f"Loaded {color(str(len(CONFIG['suites'])), Colors.YELLOW, Colors.BOLD)} test suite(s):")
+    for suite in CONFIG["suites"]:
+        print(f"  {color('•', Colors.CYAN)} {color(suite['name'], Colors.MAGENTA, Colors.BOLD)}: "
+              f"{suite['language']}/{suite['framework']} (root: {suite['root']})")
+    print()
+
+    # Validate suite environments before processing
+    validate_suite_environments()
+
+    # Load todos
+    data = load_todos()
+
+    if "todos" not in data:
+        print_error("todos.json must have a 'todos' array")
+        sys.exit(1)
+
+    pending_count = len([t for t in data["todos"] if t.get("done_at_commit") is None])
+    total_count = len(data["todos"])
+    print_info(f"Loaded {color(str(total_count), Colors.YELLOW)} todos "
+               f"({color(str(pending_count), Colors.BRIGHT_GREEN, Colors.BOLD)} pending)")
+
+    if pending_count == 0:
+        print()
+        print_success("All todos already completed!")
+        return 0
+
+    # Process todos by priority
+    completed_count = 0
+    while True:
+        # Reload todos.json each iteration to pick up any external changes
+        data = load_todos()
+        todo = get_next_todo(data)
+
+        if todo is None:
+            print()
+            print_banner("All todos completed!", char="*")
+            print_success(f"Completed {completed_count} todo(s) this session")
+            break
+
+        success = process_todo(todo, data)
+
+        if not success:
+            print()
+            print_banner("FAILED", char="!")
+            print_error(f"Could not complete todo after maximum retries")
+            print_error(f"Todo: {todo.get('todo', 'Unknown')}")
+            print_info("Exiting...")
+            sys.exit(1)
+
+        completed_count += 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
