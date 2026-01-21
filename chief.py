@@ -1153,21 +1153,6 @@ def extract_test_target(output: str) -> Optional[str]:
     return None
 
 
-def extract_watch_files(output: str) -> list[str]:
-    """
-    Extract watch files from claude code output.
-    Looks for the structured "WATCH_FILES: path1, path2, ..." format.
-    """
-    for line in output.split("\n"):
-        line = line.strip()
-        if line.startswith("WATCH_FILES:"):
-            files_str = line[len("WATCH_FILES:"):].strip()
-            # Split by comma and clean up each path
-            files = [f.strip().strip("`\"'") for f in files_str.split(",")]
-            return [f for f in files if f]  # Filter empty strings
-    return []
-
-
 def extract_existing_tests(output: str) -> list[str]:
     """
     Extract existing test files from claude code output.
@@ -1184,8 +1169,12 @@ def extract_existing_tests(output: str) -> list[str]:
 
 def verify_existing_tests_stable(todo: dict, initial_tests: list[str], suite_info: str) -> list[str]:
     """
-    Verify TESTS_ALREADY_EXIST answer is stable across STABILITY_ITERATIONS.
-    Re-runs the prompt to confirm Claude consistently identifies the same test files.
+    Verify TESTS_ALREADY_EXIST answer is stable using intersection-based approach.
+
+    Collects multiple responses and finds the common intersection (files that appear
+    in ALL responses). Accepts when the intersection is non-empty and stable for
+    STABILITY_ITERATIONS consecutive responses. This handles Claude's natural variance
+    in finding related test files while ensuring core files are consistently identified.
 
     Args:
         todo: The todo item
@@ -1193,7 +1182,7 @@ def verify_existing_tests_stable(todo: dict, initial_tests: list[str], suite_inf
         suite_info: Formatted string of available test suites
 
     Returns:
-        List of confirmed test paths, or empty list if unstable
+        List of confirmed test paths (intersection), or empty list if unstable
     """
     todo_text = todo.get("todo", "")
     expectations = todo.get("expectations", "")
@@ -1201,8 +1190,8 @@ def verify_existing_tests_stable(todo: dict, initial_tests: list[str], suite_inf
     if expectations:
         expectations_section = f"\n\nExpected outcome:\n{expectations}"
 
-    previous_tests = sorted(initial_tests)
-    stable_count = 1  # Already have one answer from initial call
+    # Track all responses as sets for intersection computation
+    all_responses: list[set[str]] = [set(initial_tests)]
 
     prompt = f"""For this task, verify whether comprehensive tests already exist:
 
@@ -1217,11 +1206,10 @@ TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
 
 If tests need to be written or modified, proceed to write them."""
 
-    for i in range(STABILITY_ITERATIONS + 1):
-        if stable_count >= STABILITY_ITERATIONS:
-            print_success(f"Existing tests confirmed: {', '.join(previous_tests)}")
-            return previous_tests
+    previous_intersection: set[str] | None = None
+    stable_count = 0
 
+    for i in range(STABILITY_ITERATIONS + 1):
         returncode, stdout, stderr = run_claude_code(prompt)
 
         if returncode != 0:
@@ -1234,94 +1222,44 @@ If tests need to be written or modified, proceed to write them."""
             print_warning("Claude did not confirm existing tests, will write new tests", indent=1)
             return []
 
-        current_tests = sorted(current_tests)
+        # Add this response to our collection
+        all_responses.append(set(current_tests))
 
-        if current_tests == previous_tests:
+        # Compute intersection of ALL responses so far
+        current_intersection = set.intersection(*all_responses)
+
+        print_info(f"Existing tests: {', '.join(sorted(current_tests))}", indent=1)
+
+        # Check if intersection is empty - no common files across all responses
+        if not current_intersection:
+            print_warning("No common tests across responses, will write new tests", indent=1)
+            return []
+
+        # Check if intersection is stable (same as previous iteration)
+        if current_intersection == previous_intersection:
             stable_count += 1
-            print_info(f"Existing tests stable (count: {stable_count}/{STABILITY_ITERATIONS})", indent=1)
+            print_info(f"Intersection stable ({stable_count}/{STABILITY_ITERATIONS}): {', '.join(sorted(current_intersection))}", indent=1)
         else:
             stable_count = 1
-            previous_tests = current_tests
-            print_info(f"Existing tests: {', '.join(current_tests)}", indent=1)
+            previous_intersection = current_intersection
+            print_info(f"Intersection: {', '.join(sorted(current_intersection))}", indent=1)
 
-    print_warning("Failed to stabilize existing tests list, will write new tests")
+        if stable_count >= STABILITY_ITERATIONS:
+            result = sorted(current_intersection)
+            print_success(f"Existing tests confirmed: {', '.join(result)}")
+            return result
+
+    print_warning("Failed to stabilize existing tests intersection, will write new tests")
     return []
 
 
-def get_watch_files_for_todo(todo: dict) -> list[str]:
-    """
-    Ask Claude to identify files that should change for non-testable tasks.
-    Requires STABILITY_ITERATIONS consistent responses.
-
-    Args:
-        todo: The todo item
-
-    Returns:
-        List of file paths to watch, or empty list if failed to stabilize
-    """
-    todo_text = todo.get("todo", "")
-    expectations = todo.get("expectations", "")
-
-    expectations_section = ""
-    if expectations:
-        expectations_section = f"\n\nExpected outcome:\n{expectations}"
-
-    prompt = f"""This task is marked as non-testable (no unit tests apply).
-
-Task: {todo_text}
-{expectations_section}
-
-Identify the files or directories that MUST be modified to complete this task.
-Output them on a single line in this exact format:
-WATCH_FILES: path1, path2, path3
-
-Only list files/directories that should actually change. Be specific."""
-
-    print_info("Asking Claude to identify files to watch...")
-
-    # Stability loop - must get same answer STABILITY_ITERATIONS times
-    previous_files: list[str] | None = None
-    stable_count = 0
-
-    for i in range(STABILITY_ITERATIONS + 2):  # Allow some retries
-        returncode, stdout, stderr = run_claude_code(prompt)
-
-        if returncode != 0:
-            print_warning(f"Claude returned error: {stderr}", indent=1)
-            continue
-
-        watch_files = extract_watch_files(stdout)
-
-        if not watch_files:
-            print_warning("No WATCH_FILES found in output, retrying...", indent=1)
-            continue
-
-        # Sort for consistent comparison
-        watch_files = sorted(watch_files)
-
-        if watch_files == previous_files:
-            stable_count += 1
-            print_info(f"Watch files stable (count: {stable_count}/{STABILITY_ITERATIONS})", indent=1)
-            if stable_count >= STABILITY_ITERATIONS:
-                print_success(f"Watch files confirmed: {', '.join(watch_files)}")
-                return watch_files
-        else:
-            stable_count = 1
-            previous_files = watch_files
-            print_info(f"Watch files: {', '.join(watch_files)}", indent=1)
-
-    print_error("Failed to get stable watch files list")
-    return []
-
-
-def implement_todo_no_tests(todo: dict, watch_files: list[str]) -> tuple[bool, str, str]:
+def implement_todo_no_tests(todo: dict, is_retry: bool = False) -> tuple[bool, str, str]:
     """
     Run claude code to implement a non-testable todo.
-    No test files to protect, just implement the task.
 
     Args:
         todo: The todo item
-        watch_files: List of files that should be modified
+        is_retry: Whether this is a retry after previous verification failed
 
     Returns:
         Tuple of (success, stdout, stderr)
@@ -1333,18 +1271,98 @@ def implement_todo_no_tests(todo: dict, watch_files: list[str]) -> tuple[bool, s
     if expectations:
         expectations_section = f"\n\nExpected outcome:\n{expectations}"
 
+    retry_section = ""
+    if is_retry:
+        retry_section = "\n\nPrevious verification failed. Please fix outstanding issues."
+
     prompt = f"""Implement the following task:
 
 Task: {todo_text}
 {expectations_section}
-
-You should modify these files: {', '.join(watch_files)}
+{retry_section}
 
 Implement the task completely."""
 
     returncode, stdout, stderr = run_claude_code(prompt)
 
     return returncode == 0, stdout, stderr
+
+
+def verify_completion_stable(todo: dict) -> bool:
+    """
+    Verify task completion using semantic review with stability check.
+
+    Prompts Claude to review whether the task is fully completed.
+    Requires STABILITY_ITERATIONS consecutive YES responses to return True.
+    Returns False immediately on any NO response.
+
+    Args:
+        todo: The todo item containing 'todo' and 'expectations' fields
+
+    Returns:
+        True if task verified complete (stable YES), False otherwise
+    """
+    todo_text = todo.get("todo", "")
+    expectations = todo.get("expectations", "")
+
+    expectations_section = ""
+    if expectations:
+        expectations_section = f"\n\nExpected outcome:\n{expectations}"
+
+    prompt = f"""Review the current state of the files for this task:
+
+Task: {todo_text}
+{expectations_section}
+
+Is the task fully completed? Output ONLY 'YES' or 'NO'."""
+
+    consecutive_yes = 0
+
+    for i in range(MAX_TERTIARY_ITERATIONS):
+        print_info(f"Verification attempt {i + 1}/{MAX_TERTIARY_ITERATIONS}...")
+
+        returncode, stdout, stderr = run_claude_code(prompt)
+
+        if returncode != 0:
+            print_warning("Claude returned error during verification")
+            consecutive_yes = 0
+            continue
+
+        # Parse response - normalize and scan for YES/NO
+        response = stdout.strip().upper()
+        verified = None
+        for line in response.split('\n'):
+            line = line.strip()
+            if line == 'YES':
+                verified = True
+                break
+            elif line == 'NO':
+                verified = False
+                break
+
+        if verified is None:
+            if response == 'YES':
+                verified = True
+            elif response == 'NO':
+                verified = False
+
+        if verified is None:
+            print_warning(f"Unexpected response (not YES/NO): {stdout[:100]}")
+            consecutive_yes = 0
+            continue
+
+        if verified:
+            consecutive_yes += 1
+            print_info(f"Verification: YES ({consecutive_yes}/{STABILITY_ITERATIONS})")
+            if consecutive_yes >= STABILITY_ITERATIONS:
+                print_success("Task verified complete (stable)")
+                return True
+        else:
+            print_warning("Verification: NO - task not complete")
+            return False  # Fail immediately on NO
+
+    print_warning(f"Verification did not stabilize after {MAX_TERTIARY_ITERATIONS} attempts")
+    return False
 
 
 def implement_todo(
@@ -1459,12 +1477,11 @@ Analyze the test failures and fix the implementation code to make ALL tests pass
 
 def process_todo_no_tests(todo: dict, data: dict) -> bool:
     """
-    Process a non-testable todo using file-change verification.
+    Process a non-testable todo using semantic verification.
 
     Instead of TDD, this:
-    1. Asks Claude to identify files that should change
-    2. Has Claude implement the task
-    3. Verifies those files actually changed
+    1. Has Claude implement the task
+    2. Verifies completion via semantic review with stability check
 
     Args:
         todo: The todo item
@@ -1475,26 +1492,15 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
     """
     todo_text = todo.get("todo", "")
 
-    # Step 1: Identify files to watch
-    print_phase("RED", "Identifying files to watch (non-testable task)...")
-    watch_files = get_watch_files_for_todo(todo)
-
-    if not watch_files:
-        print_error("Failed to identify watch files, skipping todo")
-        return False
-
-    print_info(f"Watching for changes: {', '.join(watch_files)}")
-
-    # Step 2: Implement and verify
+    # Outer retry loop
     for attempt in range(1, MAX_SECONDARY_ITERATIONS + 1):
         print_phase("GREEN", f"Implementation attempt {attempt}/{MAX_SECONDARY_ITERATIONS}")
 
-        # Snapshot files before implementation
+        # Snapshot dirty files before implementation
         baseline_dirty = get_dirty_files()
-        hashes_before = get_file_hashes(watch_files)
 
-        # Run implementation
-        success, _, _ = implement_todo_no_tests(todo, watch_files)
+        # Step A: Implementation (with retry message on attempt 2+)
+        success, _, _ = implement_todo_no_tests(todo, is_retry=(attempt > 1))
 
         if not success:
             print_error("Claude Code returned error during implementation")
@@ -1504,14 +1510,12 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
                 print_info("Keeping changes for inspection (final attempt)")
             continue
 
-        # Check if watched files changed
-        hashes_after = get_file_hashes(watch_files)
+        # Step B: Verification
+        print_phase("VERIFY", f"Semantic verification (attempt {attempt})")
 
-        if hashes_before != hashes_after:
-            # Files changed - success!
-            changed = [f for f in watch_files if hashes_before.get(f) != hashes_after.get(f)]
-            print_success(f"Files modified: {', '.join(changed)}")
-
+        # Step C: Decision
+        if verify_completion_stable(todo):
+            # Verified complete - commit and mark done
             try:
                 commit_hash = git_commit_and_tag(f"chief: {todo_text}")
                 git_push_with_tags()  # Non-fatal
@@ -1524,7 +1528,8 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
                 git_revert_changes(baseline_dirty)
                 continue
         else:
-            print_warning("Watched files not modified, retrying...")
+            # Verification failed
+            print_warning("Semantic verification failed, will retry implementation...")
             if attempt < MAX_SECONDARY_ITERATIONS:
                 git_revert_changes(baseline_dirty)
             else:
