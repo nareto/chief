@@ -79,10 +79,12 @@ def print_banner(text: str, char: str = "=", width: int = 60) -> None:
 
 
 def print_phase(phase: str, description: str) -> None:
-    """Print a TDD phase header (RED/GREEN/REFINE)."""
+    """Print a TDD phase header (RED/GREEN/BUILD/REFINE/FIX)."""
     phase_colors = {
         "RED": Colors.BRIGHT_RED,
         "GREEN": Colors.BRIGHT_GREEN,
+        "BUILD": Colors.BRIGHT_BLUE,
+        "BUILD-FIX": Colors.BRIGHT_BLUE,
         "REFINE": Colors.BRIGHT_YELLOW,
         "FIX": Colors.BRIGHT_MAGENTA,
     }
@@ -163,18 +165,21 @@ def load_config() -> dict:
         name = "backend"
         language = "Python"
         framework = "pytest"
-        root = "backend/"           # Working directory for commands; also strips this prefix from {target}
-        command = "pytest {target} -v"
+        test_root = "backend/"           # Working directory for test_init and test_command
+        test_command = "pytest {target} -v"
         target_type = "file"
         file_patterns = ["test_*.py", "*_test.py"]
         disallow_write_globs = ["backend/tests/**"]
+        test_init = "pip install -r requirements.txt"  # Runs in test_root
+        test_setup = "docker compose up -d db"         # Runs in PROJECT ROOT
+        post_green_command = "docker compose build"    # Runs in PROJECT ROOT after tests pass
 
         [[suites]]
         name = "frontend"
         language = "TypeScript"
         framework = "vitest"
-        root = "frontend/"
-        command = "npm test -- {target}"
+        test_root = "frontend/"
+        test_command = "npm test -- {target}"
         target_type = "file"
         file_patterns = ["*.test.ts", "*.spec.ts"]
         disallow_write_globs = ["frontend/**/*.test.ts"]
@@ -191,8 +196,8 @@ def load_config() -> dict:
         print(color('name = "backend"', Colors.DIM))
         print(color('language = "Python"', Colors.DIM))
         print(color('framework = "pytest"', Colors.DIM))
-        print(color('root = "."', Colors.DIM))
-        print(color('command = "pytest {target} -v"', Colors.DIM))
+        print(color('test_root = "."', Colors.DIM))
+        print(color('test_command = "pytest {target} -v"', Colors.DIM))
         print(color('target_type = "file"', Colors.DIM))
         print(color('file_patterns = ["test_*.py", "*_test.py"]', Colors.DIM))
         print(color('disallow_write_globs = ["tests/**", "test_*.py"]', Colors.DIM))
@@ -207,7 +212,7 @@ def load_config() -> dict:
         sys.exit(1)
 
     # Validate each suite
-    required_suite_keys = ["name", "language", "framework", "root", "command", "target_type"]
+    required_suite_keys = ["name", "language", "framework", "test_root", "test_command", "target_type"]
     for i, suite in enumerate(config["suites"]):
         missing = [k for k in required_suite_keys if k not in suite]
         if missing:
@@ -218,9 +223,10 @@ def load_config() -> dict:
         suite.setdefault("default_target", ".")
         suite.setdefault("file_patterns", [])
         suite.setdefault("disallow_write_globs", [])
-        suite.setdefault("init", None)   # One-time dev env setup (run if validation fails)
-        suite.setdefault("setup", None)  # Pre-test setup (run once per suite before tests)
-        suite.setdefault("env", {})      # Environment variables for init, setup, and command
+        suite.setdefault("test_init", None)           # One-time dev env setup (run in test_root if validation fails)
+        suite.setdefault("test_setup", None)          # Pre-test setup (run in PROJECT ROOT once per suite)
+        suite.setdefault("post_green_command", None)  # Post-test validation (run in PROJECT ROOT after tests pass)
+        suite.setdefault("env", {})                   # Environment variables for all commands
 
     return config
 
@@ -248,15 +254,15 @@ def get_suite_env(suite: dict) -> dict[str, str]:
 def validate_suite_environments():
     """
     Validate that all test suite commands can execute.
-    If a suite fails validation and has an init command, run init and retry.
+    If a suite fails validation and has a test_init command, run init and retry.
     Exits with error if any suite fails validation after init attempt.
     """
     print_info("Validating test suite environments...")
 
     for suite in CONFIG["suites"]:
         name = suite["name"]
-        command = suite["command"]
-        init_cmd = suite.get("init")
+        command = suite["test_command"]
+        init_cmd = suite.get("test_init")
         suite_env = get_suite_env(suite)
 
         # Build validation command - use --version as a quick check
@@ -265,33 +271,34 @@ def validate_suite_environments():
         else:
             validation_cmd = command
 
-        # First attempt
+        # First attempt (test_init and test_command run in test_root)
         result = subprocess.run(
             validation_cmd,
             capture_output=True,
             text=True,
             shell=True,
-            cwd=suite.get("root") or os.getcwd(),
+            cwd=suite.get("test_root") or os.getcwd(),
             env=suite_env,
             timeout=60
         )
 
         # If validation fails and we have an init command, try running it
         if result.returncode != 0 and init_cmd:
-            print_warning(f"Suite '{name}' validation failed, running init...")
+            print_warning(f"Suite '{name}' validation failed, running test_init...")
             print_info(f"  Init: {init_cmd}")
 
+            # test_init runs in test_root
             init_result = subprocess.run(
                 init_cmd,
                 capture_output=False,  # Show init output
                 text=True,
                 shell=True,
-                cwd=suite.get("root") or os.getcwd(),
+                cwd=suite.get("test_root") or os.getcwd(),
                 env=suite_env
             )
 
             if init_result.returncode != 0:
-                print_error(f"Suite '{name}': init command failed")
+                print_error(f"Suite '{name}': test_init command failed")
                 sys.exit(1)
 
             # Retry validation
@@ -300,13 +307,13 @@ def validate_suite_environments():
                 capture_output=True,
                 text=True,
                 shell=True,
-                cwd=suite.get("root") or os.getcwd(),
+                cwd=suite.get("test_root") or os.getcwd(),
                 env=suite_env,
                 timeout=60
             )
 
             if result.returncode != 0:
-                print_error(f"Suite '{name}': still failing after init")
+                print_error(f"Suite '{name}': still failing after test_init")
                 print_error(f"  Command: {validation_cmd}")
                 if result.stderr:
                     print(result.stderr)
@@ -314,7 +321,7 @@ def validate_suite_environments():
                     print(result.stdout)
                 sys.exit(1)
         elif result.returncode != 0:
-            print_error(f"Suite '{name}': environment validation failed (no init command defined)")
+            print_error(f"Suite '{name}': environment validation failed (no test_init command defined)")
             print_error(f"  Command: {validation_cmd}")
             if result.stderr:
                 print(result.stderr)
@@ -329,8 +336,9 @@ def validate_suite_environments():
 
 def run_suite_setup(suite: dict) -> None:
     """
-    Run setup command for a suite (once before that suite's tests).
+    Run test_setup command for a suite (once before that suite's tests).
     Tracks completion to avoid re-running for multiple todos in same suite.
+    Note: test_setup runs in PROJECT ROOT, not test_root.
     """
     name = suite["name"]
 
@@ -338,13 +346,14 @@ def run_suite_setup(suite: dict) -> None:
     if name in SETUP_COMPLETED:
         return
 
-    setup_cmd = suite.get("setup")
+    setup_cmd = suite.get("test_setup")
     if not setup_cmd:
         SETUP_COMPLETED.add(name)
         return
 
-    print_info(f"Running setup for suite '{name}': {setup_cmd}")
+    print_info(f"Running test_setup for suite '{name}': {setup_cmd}")
 
+    # test_setup runs in PROJECT ROOT (not test_root)
     result = subprocess.run(
         setup_cmd,
         capture_output=False,  # Show setup output
@@ -355,16 +364,16 @@ def run_suite_setup(suite: dict) -> None:
     )
 
     if result.returncode != 0:
-        print_error(f"Setup failed for suite '{name}'")
+        print_error(f"test_setup failed for suite '{name}'")
         sys.exit(1)
 
     SETUP_COMPLETED.add(name)
-    print_success(f"Setup complete for suite '{name}'")
+    print_success(f"test_setup complete for suite '{name}'")
 
 
 def test_suite_config(suite_name: str) -> int:
     """
-    Test a suite's configuration by running setup and a test command.
+    Test a suite's configuration by running test_setup and a test command.
 
     Uses the same path stripping and cwd logic as run_tests() to verify
     the configuration is correct.
@@ -388,16 +397,18 @@ def test_suite_config(suite_name: str) -> int:
 
     # Show configuration
     print_info("Configuration:")
-    print(f"  root: {color(suite.get('root', '.'), Colors.CYAN)}")
-    print(f"  command: {color(suite['command'], Colors.CYAN)}")
+    print(f"  test_root: {color(suite.get('test_root', '.'), Colors.CYAN)}")
+    print(f"  test_command: {color(suite['test_command'], Colors.CYAN)}")
     print(f"  default_target: {color(suite.get('default_target', '.'), Colors.CYAN)}")
     print(f"  strip_root_from_target: {color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}")
+    if suite.get("post_green_command"):
+        print(f"  post_green_command: {color(suite['post_green_command'], Colors.CYAN)}")
     print()
 
-    # Run setup if configured
-    setup_cmd = suite.get("setup")
+    # Run test_setup if configured (runs in PROJECT ROOT)
+    setup_cmd = suite.get("test_setup")
     if setup_cmd:
-        print_info(f"Running setup: {setup_cmd}")
+        print_info(f"Running test_setup (in project root): {setup_cmd}")
         result = subprocess.run(
             setup_cmd,
             capture_output=False,
@@ -407,15 +418,15 @@ def test_suite_config(suite_name: str) -> int:
             env=get_suite_env(suite)
         )
         if result.returncode != 0:
-            print_error("Setup failed")
+            print_error("test_setup failed")
             return 1
-        print_success("Setup complete")
+        print_success("test_setup complete")
         print()
 
     # Build test command using same logic as run_tests()
     target = suite.get("default_target", ".")
-    command_template = suite["command"]
-    root = suite.get("root", "")
+    command_template = suite["test_command"]
+    root = suite.get("test_root", "")
     strip_root = suite.get("strip_root_from_target", True)
 
     # Show the path transformation
@@ -429,7 +440,7 @@ def test_suite_config(suite_name: str) -> int:
             transformed_target = target[len(normalized_root):]
             print(f"  After stripping '{normalized_root}': {color(transformed_target, Colors.CYAN)}")
         else:
-            print(f"  (target doesn't start with root, not stripped)")
+            print(f"  (target doesn't start with test_root, not stripped)")
 
     cwd = root or os.getcwd()
     print(f"  Working directory: {color(cwd, Colors.CYAN)}")
@@ -443,8 +454,8 @@ def test_suite_config(suite_name: str) -> int:
     print(f"  Final command: {color(test_command, Colors.YELLOW)}")
     print()
 
-    # Run the test command
-    print_info("Running test command...")
+    # Run the test command (runs in test_root)
+    print_info("Running test_command...")
     result = subprocess.run(
         test_command,
         capture_output=False,
@@ -459,7 +470,7 @@ def test_suite_config(suite_name: str) -> int:
         print_success(f"Suite '{suite_name}' configuration is valid")
         return 0
     else:
-        print_error(f"Test command failed with exit code {result.returncode}")
+        print_error(f"test_command failed with exit code {result.returncode}")
         return 1
 
 
@@ -536,7 +547,7 @@ def detect_suite_from_path(file_path: str) -> Optional[dict]:
         The matching suite dict, or None if no match
     """
     for suite in CONFIG["suites"]:
-        root = suite.get("root", "")
+        root = suite.get("test_root", "")
         # Normalize: ensure root ends with / for prefix matching (unless empty or ".")
         if root and root != "." and not root.endswith("/"):
             root = root + "/"
@@ -715,7 +726,7 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
 
 def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
     """
-    Run tests on the specified target using the suite's test command.
+    Run tests on the specified target using the suite's test_command.
 
     Args:
         target: The test target (file, package, project, or repo path)
@@ -726,11 +737,11 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
     """
     print_info(f"Running tests: {color(target, Colors.WHITE, Colors.BOLD)} (suite: {suite['name']})")
 
-    command_template = suite["command"]
+    command_template = suite["test_command"]
 
-    # Strip root prefix from target by default (configurable via strip_root_from_target)
+    # Strip test_root prefix from target by default (configurable via strip_root_from_target)
     strip_root = suite.get("strip_root_from_target", True)
-    root = suite.get("root", "")
+    root = suite.get("test_root", "")
 
     transformed_target = target
     if strip_root and root and root != ".":
@@ -747,12 +758,13 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
 
     # Use shell=True since commands may contain shell builtins (cd, source)
     # and operators (&&, ||, ;)
+    # test_command runs in test_root
     result = subprocess.run(
         test_command,
         capture_output=True,
         text=True,
         shell=True,
-        cwd=suite.get("root") or os.getcwd(),
+        cwd=suite.get("test_root") or os.getcwd(),
         env=get_suite_env(suite)
     )
 
@@ -1090,7 +1102,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
         patterns_str = ", ".join(patterns) if patterns else "none"
         suite_info_lines.append(
             f"- {suite['name']}: {suite['language']}/{suite['framework']} "
-            f"(root: {suite['root']}, test patterns: {patterns_str})"
+            f"(test_root: {suite['test_root']}, test patterns: {patterns_str})"
         )
     suite_info = "\n".join(suite_info_lines)
 
@@ -1585,6 +1597,128 @@ Analyze the test failures and fix the implementation code to make ALL tests pass
     return returncode == 0, stdout, stderr
 
 
+def run_post_green_commands(
+    suite_test_files: dict[str, list[str]]
+) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
+    """
+    Run post_green_command for all affected suites.
+
+    Args:
+        suite_test_files: Dict mapping suite name -> list of test files
+
+    Returns:
+        Tuple of (all_passed, results_by_suite)
+        where results_by_suite maps suite_name -> (passed, stdout, stderr)
+    """
+    all_passed = True
+    results: dict[str, tuple[bool, str, str]] = {}
+
+    for suite_name in suite_test_files.keys():
+        suite = get_suite_by_name(suite_name)
+        if not suite:
+            continue
+
+        post_green_cmd = suite.get("post_green_command")
+        if not post_green_cmd:
+            continue
+
+        print_info(f"Running post_green_command for suite '{suite_name}': {post_green_cmd}")
+
+        # post_green_command runs in PROJECT ROOT (not test_root)
+        result = subprocess.run(
+            post_green_cmd,
+            capture_output=True,
+            text=True,
+            shell=True,
+            cwd=os.getcwd(),
+            env=get_suite_env(suite)
+        )
+
+        passed = result.returncode == 0
+        results[suite_name] = (passed, result.stdout, result.stderr)
+
+        if not QUIET:
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+
+        if passed:
+            print_success(f"post_green_command passed for suite '{suite_name}'")
+        else:
+            print_error(f"post_green_command failed for suite '{suite_name}'")
+            all_passed = False
+
+    return all_passed, results
+
+
+def fix_failing_build(
+    todo: dict,
+    suite_test_files: dict[str, list[str]],
+    all_test_artifacts: list[str],
+    build_results: dict[str, tuple[bool, str, str]]
+) -> tuple[bool, str, str]:
+    """
+    Run claude code to fix failing build/post_green_command.
+
+    Args:
+        todo: The todo item
+        suite_test_files: Dict mapping suite name -> list of test files
+        all_test_artifacts: List of all test files to lock (disallow writes)
+        build_results: Results from post_green_commands (suite_name -> (passed, stdout, stderr))
+
+    Returns:
+        Tuple of (success, stdout, stderr)
+    """
+    todo_text = todo.get("todo", "")
+
+    # Build test locations string for prompt
+    test_locations = []
+    for suite_name, files in suite_test_files.items():
+        test_locations.append(f"- {suite_name}: {', '.join(files)}")
+    test_locations_str = "\n".join(test_locations)
+
+    # Build failure output from all failing build commands
+    failure_output_lines = []
+    for suite_name, (passed, stdout, stderr) in build_results.items():
+        if not passed:
+            suite = get_suite_by_name(suite_name)
+            cmd = suite.get("post_green_command", "unknown") if suite else "unknown"
+            failure_output_lines.append(f"=== {suite_name}: {cmd} ===")
+            failure_output_lines.append(f"STDOUT:\n{stdout}")
+            if stderr:
+                failure_output_lines.append(f"STDERR:\n{stderr}")
+    failure_output = "\n\n".join(failure_output_lines)
+
+    # Collect disallow paths from all affected suites + test artifacts
+    extra_disallow = list(all_test_artifacts)
+    for suite_name in suite_test_files.keys():
+        suite = get_suite_by_name(suite_name)
+        if suite:
+            extra_disallow.extend(get_disallowed_paths(suite))
+    extra_disallow = list(set(extra_disallow))  # Deduplicate
+
+    prompt = f"""The build/validation command is failing. Fix the code to make it pass.
+
+Original task: {todo_text}
+
+Test files (DO NOT MODIFY):
+{test_locations_str}
+
+Build failures:
+{failure_output}
+
+Analyze the build failures and fix the implementation code. The tests are already passing,
+so ensure your fix does not break the tests. Common issues include:
+- TypeScript compilation errors (unused variables, type mismatches)
+- Linting errors
+- Build configuration issues"""
+
+    returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
+
+    return returncode == 0, stdout, stderr
+
+
 def process_todo_no_tests(todo: dict, data: dict) -> bool:
     """
     Process a non-testable todo using semantic verification.
@@ -1742,8 +1876,44 @@ def process_todo(todo: dict, data: dict) -> bool:
         # Step 3: Run tests for all affected suites
         all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
 
-        if all_passed:
-            print_success("All tests passed!")
+        if not all_passed:
+            # Tests failed, enter test fix loop
+            print_warning("Tests failed, entering fix loop...")
+
+            for fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+                print_phase("FIX", f"Test fix attempt {fix_iter}/{MAX_FIX_ATTEMPTS}")
+
+                success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
+
+                if not success:
+                    print_error("Claude Code returned error during fix", indent=1)
+                    continue
+
+                # Run tests again for all affected suites
+                all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
+
+                if all_passed:
+                    print_success("All tests passed after fix!")
+                    break  # Exit test fix loop, proceed to post_green check
+
+            if not all_passed:
+                # Test fix loop exhausted without passing
+                print_warning("Test fix loop exhausted, reverting changes...")
+                if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
+                    git_revert_changes(baseline_files)
+                else:
+                    print_info("Keeping changes for inspection (final attempt)")
+                continue  # Retry GREEN phase
+
+        # Tests passed (either initially or after fixes)
+        print_success("All tests passed!")
+
+        # Step 4: Run post_green_commands for all affected suites
+        print_phase("BUILD", "Running post_green_commands...")
+        build_passed, build_results = run_post_green_commands(suite_test_files)
+
+        if build_passed:
+            # All checks passed - commit
             try:
                 commit_hash = git_commit_and_tag(f"chief: {todo_text}")
                 git_push_with_tags()  # Non-fatal
@@ -1756,23 +1926,44 @@ def process_todo(todo: dict, data: dict) -> bool:
                 git_revert_changes(baseline_files)
                 continue
 
-        # Tests failed, enter tertiary loop
-        print_warning("Tests failed, entering fix loop...")
+        # post_green_command failed, enter build fix loop
+        print_warning("post_green_command failed, entering build fix loop...")
 
-        for tertiary_iter in range(1, MAX_FIX_ATTEMPTS + 1):
-            print_phase("FIX", f"Fix attempt {tertiary_iter}/{MAX_FIX_ATTEMPTS}")
+        for build_fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+            print_phase("BUILD-FIX", f"Build fix attempt {build_fix_iter}/{MAX_FIX_ATTEMPTS}")
 
-            success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
+            success, _, _ = fix_failing_build(todo, suite_test_files, all_test_artifacts, build_results)
 
             if not success:
-                print_error("Claude Code returned error during fix", indent=1)
+                print_error("Claude Code returned error during build fix", indent=1)
                 continue
 
-            # Run tests again for all affected suites
+            # Re-run tests first (fix might have broken them)
+            print_info("Re-running tests after build fix...")
             all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
 
-            if all_passed:
-                print_success("All tests passed after fix!")
+            if not all_passed:
+                print_warning("Tests failed after build fix, need to fix tests too")
+                # Re-enter a mini test fix loop
+                for test_fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+                    print_phase("FIX", f"Test fix attempt {test_fix_iter}/{MAX_FIX_ATTEMPTS} (during build fix)")
+                    success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
+                    if not success:
+                        print_error("Claude Code returned error during test fix", indent=1)
+                        continue
+                    all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
+                    if all_passed:
+                        break
+                if not all_passed:
+                    print_warning("Could not fix tests during build fix loop")
+                    continue  # Continue build fix loop
+
+            # Tests pass, now check post_green again
+            print_info("Re-running post_green_commands...")
+            build_passed, build_results = run_post_green_commands(suite_test_files)
+
+            if build_passed:
+                print_success("All tests and post_green_commands passed!")
                 try:
                     commit_hash = git_commit_and_tag(f"chief: {todo_text}")
                     git_push_with_tags()  # Non-fatal
@@ -1782,10 +1973,10 @@ def process_todo(todo: dict, data: dict) -> bool:
                     return True
                 except subprocess.CalledProcessError as e:
                     print_error(f"Git commit failed: {e}", indent=1)
-                    break  # Break tertiary, will revert in secondary
+                    break  # Break build fix loop, will revert in secondary
 
-        # Tertiary loop exhausted, revert and retry secondary
-        print_warning("Fix loop exhausted, reverting changes...")
+        # Build fix loop exhausted, revert and retry secondary
+        print_warning("Build fix loop exhausted, reverting changes...")
         if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
             git_revert_changes(baseline_files)
         else:
@@ -1822,7 +2013,7 @@ def main():
     print_info(f"Loaded {color(str(len(CONFIG['suites'])), Colors.YELLOW, Colors.BOLD)} test suite(s):")
     for suite in CONFIG["suites"]:
         print(f"  {color('•', Colors.CYAN)} {color(suite['name'], Colors.MAGENTA, Colors.BOLD)}: "
-              f"{suite['language']}/{suite['framework']} (root: {suite['root']})")
+              f"{suite['language']}/{suite['framework']} (test_root: {suite['test_root']})")
     print()
 
     # Validate suite environments before processing
