@@ -1287,23 +1287,26 @@ Only write/modify the tests, do not implement the feature."""
         # Build refinement prompt with file paths (Claude Code can read them)
         file_list = "\n".join(f"- {f}" for f in files_to_monitor)
 
-        refine_prompt = f"""Review and refine the tests for this task:
+        refine_prompt = f"""We are in the RED PHASE for this task:
 
 Task: {todo_text}
 {expectations_section}
 
-Test file(s) to review:
+There are already these related test file(s) (that fail as expected, because we are in RED phase, no implementation yet):
 {file_list}
 
-Instructions:
+Your instructions are:
 1. Read the test file(s) listed above
 2. Check if the tests accurately represent the task description
 3. Check for any bugs, typos, or logic errors in the tests
-4. Ensure test coverage is comprehensive (happy path, edge cases, error conditions)
+4. Ensure test coverage is comprehensive (happy path, edge cases, error conditions) and strict (not overly permissive)
 5. If improvements are needed, edit the test file(s)
 6. If the tests are already correct and complete, make NO changes
 
-Only modify the tests if there are actual issues to fix."""
+Only modify the tests if there are actual issues to fix.
+
+DO NOT attempt to make the tests pass. They SHOULD fail at this point.
+"""
 
         # Run Claude to review/refine
         returncode, stdout, stderr = run_claude_code(refine_prompt)
@@ -1898,34 +1901,9 @@ def process_todo(todo: dict, data: dict) -> bool:
     all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
     if all_passed:
         print_warning("All tests passed before implementation (expected to fail)")
-        print_info("Feature may already exist — marking as done")
-        # Could be that feature already exists, mark as done
-        try:
-            dirty_files = get_dirty_files()
-            if dirty_files - {"todos.json"}:
-                # There are changes to commit (excluding todos.json)
-                commit_hash = git_commit_and_tag(f"chief: {todo_text} (test already passing)")
-                git_push_with_tags()  # Non-fatal
-            else:
-                # No changes - feature was already committed, use current HEAD
-                print_info("No changes to commit — using existing HEAD commit")
-                result = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                commit_hash = result.stdout.strip()
-
-            todo["done_at_commit"] = commit_hash
-            save_todos(data)
-            git_commit_todos(todo_text)
-            return True
-        except subprocess.CalledProcessError as e:
-            print_error(f"Git commit failed: {e}")
-            return False
-
-    print_success("Tests fail as expected (Red phase complete)")
+        print_info("Proceeding to GREEN phase anyway")
+    else:
+        print_success("Tests fail as expected (Red phase complete)")
 
     # Secondary loop: implement and verify
     for secondary_iter in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
