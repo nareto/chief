@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 import os
+import textwrap
 import tomllib
 from pathlib import Path
 from datetime import datetime
@@ -181,11 +182,14 @@ def log_prompt(prompt: str, label: str = "PROMPT TO CLAUDE") -> None:
     log_write("┌" + "─" * 78 + "┐\n")
     log_write("│" + f" {label} ".center(78) + "│\n")
     log_write("├" + "─" * 78 + "┤\n")
-    # Indent each line of the prompt for readability
+    # Wrap each line to fit in box (74 chars content width)
     for line in prompt.split('\n'):
-        # Truncate long lines to fit in box
-        display_line = line[:74] if len(line) > 74 else line
-        log_write(f"│  {display_line.ljust(75)} │\n")
+        if len(line) <= 74:
+            log_write(f"│  {line.ljust(75)} │\n")
+        else:
+            wrapped_lines = textwrap.wrap(line, width=74)
+            for wrapped in wrapped_lines:
+                log_write(f"│  {wrapped.ljust(75)} │\n")
     log_write("└" + "─" * 78 + "┘\n")
     log_write("\n")
 
