@@ -22,8 +22,8 @@ from typing import Optional
 
 TODOS_FILE = "todos.json"
 CONFIG_FILE = "chief.toml"
-MAX_SECONDARY_ITERATIONS = 6
-MAX_TERTIARY_ITERATIONS = 6
+MAX_IMPLEMENTATION_ATTEMPTS = 6
+MAX_FIX_ATTEMPTS = 6
 MAX_TEST_REFINEMENT_ITERATIONS = 6
 STABILITY_ITERATIONS = 2  # Times Claude must give consistent answer before accepting
 
@@ -1318,8 +1318,8 @@ Is the task fully completed? Output ONLY 'YES' or 'NO'."""
 
     consecutive_yes = 0
 
-    for i in range(MAX_TERTIARY_ITERATIONS):
-        print_info(f"Verification attempt {i + 1}/{MAX_TERTIARY_ITERATIONS}...")
+    for i in range(MAX_FIX_ATTEMPTS):
+        print_info(f"Verification attempt {i + 1}/{MAX_FIX_ATTEMPTS}...")
 
         returncode, stdout, stderr = run_claude_code(prompt)
 
@@ -1361,7 +1361,7 @@ Is the task fully completed? Output ONLY 'YES' or 'NO'."""
             print_warning("Verification: NO - task not complete")
             return False  # Fail immediately on NO
 
-    print_warning(f"Verification did not stabilize after {MAX_TERTIARY_ITERATIONS} attempts")
+    print_warning(f"Verification did not stabilize after {MAX_FIX_ATTEMPTS} attempts")
     return False
 
 
@@ -1493,8 +1493,8 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
     todo_text = todo.get("todo", "")
 
     # Outer retry loop
-    for attempt in range(1, MAX_SECONDARY_ITERATIONS + 1):
-        print_phase("GREEN", f"Implementation attempt {attempt}/{MAX_SECONDARY_ITERATIONS}")
+    for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
+        print_phase("GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}")
 
         # Snapshot dirty files before implementation
         baseline_dirty = get_dirty_files()
@@ -1504,7 +1504,7 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
 
         if not success:
             print_error("Claude Code returned error during implementation")
-            if attempt < MAX_SECONDARY_ITERATIONS:
+            if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
                 git_revert_changes(baseline_dirty)
             else:
                 print_info("Keeping changes for inspection (final attempt)")
@@ -1530,12 +1530,12 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
         else:
             # Verification failed
             print_warning("Semantic verification failed, will retry implementation...")
-            if attempt < MAX_SECONDARY_ITERATIONS:
+            if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
                 git_revert_changes(baseline_dirty)
             else:
                 print_info("Keeping changes for inspection (final attempt)")
 
-    print_error(f"Failed to complete todo after {MAX_SECONDARY_ITERATIONS} attempts")
+    print_error(f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts")
     return False
 
 
@@ -1612,8 +1612,8 @@ def process_todo(todo: dict, data: dict) -> bool:
     print_success("Tests fail as expected (Red phase complete)")
 
     # Secondary loop: implement and verify
-    for secondary_iter in range(1, MAX_SECONDARY_ITERATIONS + 1):
-        print_phase("GREEN", f"Implementation attempt {secondary_iter}/{MAX_SECONDARY_ITERATIONS}")
+    for secondary_iter in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
+        print_phase("GREEN", f"Implementation attempt {secondary_iter}/{MAX_IMPLEMENTATION_ATTEMPTS}")
 
         # Snapshot dirty files before implementation so we only revert what we change
         baseline_files = get_dirty_files()
@@ -1623,7 +1623,7 @@ def process_todo(todo: dict, data: dict) -> bool:
 
         if not success:
             print_error("Claude Code returned error during implementation")
-            if secondary_iter < MAX_SECONDARY_ITERATIONS:
+            if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
                 git_revert_changes(baseline_files)
             else:
                 print_info("Keeping changes for inspection (final attempt)")
@@ -1649,8 +1649,8 @@ def process_todo(todo: dict, data: dict) -> bool:
         # Tests failed, enter tertiary loop
         print_warning("Tests failed, entering fix loop...")
 
-        for tertiary_iter in range(1, MAX_TERTIARY_ITERATIONS + 1):
-            print_phase("FIX", f"Fix attempt {tertiary_iter}/{MAX_TERTIARY_ITERATIONS}")
+        for tertiary_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+            print_phase("FIX", f"Fix attempt {tertiary_iter}/{MAX_FIX_ATTEMPTS}")
 
             success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
 
@@ -1676,13 +1676,13 @@ def process_todo(todo: dict, data: dict) -> bool:
 
         # Tertiary loop exhausted, revert and retry secondary
         print_warning("Fix loop exhausted, reverting changes...")
-        if secondary_iter < MAX_SECONDARY_ITERATIONS:
+        if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
             git_revert_changes(baseline_files)
         else:
             print_info("Keeping changes for inspection (final attempt)")
 
     # Secondary loop exhausted
-    print_error(f"Failed to complete todo after {MAX_SECONDARY_ITERATIONS} attempts")
+    print_error(f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts")
     return False
 
 
