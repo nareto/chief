@@ -90,7 +90,10 @@ def print_banner(text: str, char: str = "=", width: int = 60) -> None:
     print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
     print(color(text.center(width), Colors.BRIGHT_CYAN, Colors.BOLD))
     print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
-    log_write(f"{line}\n{text.center(width)}\n{line}\n")
+    # Log with box-drawing characters for readability
+    log_write("┏" + "━" * 78 + "┓\n")
+    log_write("┃" + text.center(78) + "┃\n")
+    log_write("┗" + "━" * 78 + "┛\n")
 
 
 def print_phase(phase: str, description: str) -> None:
@@ -105,7 +108,11 @@ def print_phase(phase: str, description: str) -> None:
     }
     phase_color = phase_colors.get(phase, Colors.CYAN)
     print(f"\n{color(f'[{phase}]', phase_color, Colors.BOLD)} {color(description, Colors.WHITE)}")
-    log_write(f"\n[{phase}] {description}\n")
+    # Log with visual separator for phases
+    log_write("\n")
+    log_write("─" * 80 + "\n")
+    log_write(f"▶ [{phase}] {description}\n")
+    log_write("─" * 80 + "\n")
 
 
 def print_info(msg: str, indent: int = 0) -> None:
@@ -138,12 +145,49 @@ def print_error(msg: str, indent: int = 0) -> None:
 
 def print_claude_start() -> None:
     """Print marker for start of Claude Code output (log only)."""
-    log_write("─" * 40 + " Claude Code " + "─" * 40 + "\n")
+    log_write("\n")
+    log_write("╔" + "═" * 78 + "╗\n")
+    log_write("║" + " CLAUDE OUTPUT ".center(78) + "║\n")
+    log_write("╚" + "═" * 78 + "╝\n")
+    log_write("\n")
 
 
 def print_claude_end() -> None:
     """Print marker for end of Claude Code output (log only)."""
-    log_write("─" * 93 + "\n")
+    log_write("\n")
+    log_write("╔" + "═" * 78 + "╗\n")
+    log_write("║" + " END CLAUDE OUTPUT ".center(78) + "║\n")
+    log_write("╚" + "═" * 78 + "╝\n")
+    log_write("\n")
+
+
+def log_section_divider(label: str = "") -> None:
+    """Write a section divider to the log file for readability."""
+    if label:
+        # Centered label in divider
+        padding = (80 - len(label) - 4) // 2
+        line = "─" * padding + f"┤ {label} ├" + "─" * padding
+        # Ensure consistent width
+        if len(line) < 80:
+            line += "─" * (80 - len(line))
+    else:
+        line = "─" * 80
+    log_write(f"\n{line}\n")
+
+
+def log_prompt(prompt: str, label: str = "PROMPT TO CLAUDE") -> None:
+    """Log a prompt being sent to Claude with clear visual demarcation."""
+    log_write("\n")
+    log_write("┌" + "─" * 78 + "┐\n")
+    log_write("│" + f" {label} ".center(78) + "│\n")
+    log_write("├" + "─" * 78 + "┤\n")
+    # Indent each line of the prompt for readability
+    for line in prompt.split('\n'):
+        # Truncate long lines to fit in box
+        display_line = line[:74] if len(line) > 74 else line
+        log_write(f"│  {display_line.ljust(75)} │\n")
+    log_write("└" + "─" * 78 + "┘\n")
+    log_write("\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -726,6 +770,7 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
         cmd.extend(["--disallowedTools", f"Edit:{path}", "--disallowedTools", f"Write:{path}"])
 
     print_info("Invoking Claude Code...")
+    log_prompt(prompt)
     print_claude_start()
 
     # Stream output to log file while capturing for parsing
@@ -2030,6 +2075,7 @@ FAILURE 2:
 Did both failures occur for the same underlying reason?
 Answer ONLY 'YES' or 'NO'."""
 
+    log_prompt(prompt, "FAILURE COMPARISON PROMPT")
     result = subprocess.run(
         ["claude", "-p", prompt, "--no-input"],
         capture_output=True,
@@ -2124,9 +2170,13 @@ def main():
     atexit.register(LOG_FILE.close)
 
     # Write timestamp separator for this run
-    log_write(f"\n\n{'='*60}\n")
-    log_write(f"CHIEF RUN: {datetime.now().isoformat()}\n")
-    log_write(f"{'='*60}\n\n")
+    log_write("\n\n")
+    log_write("╔" + "═" * 78 + "╗\n")
+    log_write("║" + "".center(78) + "║\n")
+    log_write("║" + f"CHIEF RUN: {datetime.now().isoformat()}".center(78) + "║\n")
+    log_write("║" + "".center(78) + "║\n")
+    log_write("╚" + "═" * 78 + "╝\n")
+    log_write("\n")
 
     print_banner("CHIEF - TDD Orchestrator for Claude Code")
     print()
