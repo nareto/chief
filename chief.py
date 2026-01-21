@@ -271,7 +271,7 @@ def validate_suite_environments():
             capture_output=True,
             text=True,
             shell=True,
-            cwd=os.getcwd(),
+            cwd=suite.get("root") or os.getcwd(),
             env=suite_env,
             timeout=60
         )
@@ -286,7 +286,7 @@ def validate_suite_environments():
                 capture_output=False,  # Show init output
                 text=True,
                 shell=True,
-                cwd=os.getcwd(),
+                cwd=suite.get("root") or os.getcwd(),
                 env=suite_env
             )
 
@@ -300,7 +300,7 @@ def validate_suite_environments():
                 capture_output=True,
                 text=True,
                 shell=True,
-                cwd=os.getcwd(),
+                cwd=suite.get("root") or os.getcwd(),
                 env=suite_env,
                 timeout=60
             )
@@ -1147,6 +1147,7 @@ Only write/modify the tests, do not implement the feature."""
 
     # Check if Claude found existing tests (before checking git changes)
     existing_tests = extract_existing_tests(stdout)
+    verified_existing = False
     if existing_tests:
         print_info("Claude reports tests already exist, verifying...")
         stable_tests = verify_existing_tests_stable(todo, existing_tests, suite_info)
@@ -1156,27 +1157,30 @@ Only write/modify the tests, do not implement the feature."""
             if suite_test_files:
                 for suite_name, files in suite_test_files.items():
                     print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
-                return suite_test_files, stable_tests
+                all_test_artifacts = stable_tests
+                verified_existing = True
+                # Fall through to refinement loop (don't return early)
             else:
                 print_warning("Existing test files don't match any suite patterns")
         # If stability failed or no suite match, fall through to normal git-based detection
 
-    # Detect new/modified files via git and map to suites
-    new_files = git_detect_new_files(baseline)
-    suite_test_files = filter_test_files_all_suites(new_files)
+    if not verified_existing:
+        # Detect new/modified files via git and map to suites
+        new_files = git_detect_new_files(baseline)
+        suite_test_files = filter_test_files_all_suites(new_files)
 
-    # Flatten all test artifacts for locking
-    all_test_artifacts = []
-    for files in suite_test_files.values():
-        all_test_artifacts.extend(files)
+        # Flatten all test artifacts for locking
+        all_test_artifacts = []
+        for files in suite_test_files.values():
+            all_test_artifacts.extend(files)
 
-    if not suite_test_files:
-        print_warning("No test files detected after RED phase")
-        return {}, []
+        if not suite_test_files:
+            print_warning("No test files detected after RED phase")
+            return {}, []
 
-    # Report which suites were affected
-    for suite_name, files in suite_test_files.items():
-        print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
+        # Report which suites were affected
+        for suite_name, files in suite_test_files.items():
+            print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
 
     # --- REFINEMENT LOOP ---
     files_to_monitor = list(all_test_artifacts)
