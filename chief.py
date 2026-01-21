@@ -997,72 +997,57 @@ def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
     return test_files
 
 
-def git_get_baseline() -> set[str]:
+def git_get_status_snapshot() -> dict[str, str]:
     """
-    Capture baseline of all tracked and untracked files in git.
-
-    Returns:
-        Set of file paths that exist in the working tree
-    """
-    # Get all files known to git (tracked)
-    result = subprocess.run(
-        ["git", "ls-files"],
-        capture_output=True,
-        text=True,
-        cwd=os.getcwd()
-    )
-    tracked = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
-
-    # Get untracked files
-    result = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        capture_output=True,
-        text=True,
-        cwd=os.getcwd()
-    )
-    untracked = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
-
-    return tracked | untracked
-
-
-def git_detect_new_files(baseline: set[str]) -> list[str]:
-    """
-    Detect files that are new or modified since the baseline.
+    Capture current git status as a snapshot of {filepath: status_code}.
 
     Uses git status --porcelain=v1 for stable parseable output.
 
-    Args:
-        baseline: Set of file paths from git_get_baseline()
-
     Returns:
-        List of new file paths (not in baseline)
+        Dict mapping file paths to their git status codes (e.g., 'M ', '??', 'A ')
     """
-    # Get current state using porcelain format
     result = subprocess.run(
         ["git", "status", "--porcelain=v1"],
         capture_output=True,
         text=True,
         cwd=os.getcwd()
     )
-
-    new_files = []
+    snapshot = {}
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
-        # Porcelain format: XY filename (where X=staged, Y=unstaged)
-        # ?? = untracked, A = added, M = modified
-        # status = line[:2]  # Not used but kept for reference
+        status = line[:2]
         filepath = line[3:].strip()
-
-        # Handle renamed files (R  old -> new)
         if " -> " in filepath:
             filepath = filepath.split(" -> ")[1]
+        snapshot[filepath] = status
+    return snapshot
 
-        # Check if this is a new file (not in baseline)
-        if filepath not in baseline and Path(filepath).exists():
-            new_files.append(filepath)
 
-    return new_files
+def git_detect_changed_files(baseline_snapshot: dict[str, str]) -> list[str]:
+    """
+    Detect files that have changed since the baseline snapshot.
+
+    A file is considered changed if:
+    - It's new in git status (wasn't in the baseline snapshot)
+    - OR its status code changed (e.g., from clean to modified)
+
+    Args:
+        baseline_snapshot: Dict from git_get_status_snapshot() captured before changes
+
+    Returns:
+        List of file paths that changed since the baseline
+    """
+    current_snapshot = git_get_status_snapshot()
+    changed_files = []
+
+    for filepath, status in current_snapshot.items():
+        # File is new to git status OR has different status than before
+        if filepath not in baseline_snapshot or baseline_snapshot[filepath] != status:
+            if Path(filepath).exists():
+                changed_files.append(filepath)
+
+    return changed_files
 
 
 def filter_test_files(files: list[str], suite: dict) -> list[str]:
@@ -1220,7 +1205,7 @@ Instructions:
 Only write/modify the tests, do not implement the feature."""
 
     # Capture git baseline before RED phase
-    baseline = git_get_baseline()
+    baseline_snapshot = git_get_status_snapshot()
 
     returncode, stdout, stderr = run_claude_code(prompt)
 
@@ -1249,8 +1234,8 @@ Only write/modify the tests, do not implement the feature."""
 
     if not verified_existing:
         # Detect new/modified files via git and map to suites
-        new_files = git_detect_new_files(baseline)
-        suite_test_files = filter_test_files_all_suites(new_files)
+        changed_files = git_detect_changed_files(baseline_snapshot)
+        suite_test_files = filter_test_files_all_suites(changed_files)
 
         # Flatten all test artifacts for locking
         all_test_artifacts = []
