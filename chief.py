@@ -1164,7 +1164,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
     expectations = todo.get("expectations", "")
     expectations_section = ""
     if expectations:
-        expectations_section = f"\n\nExpected outcome (from product manager):\n{expectations}"
+        expectations_section = f"\nExpected outcome (from product manager):\n{expectations}"
 
     # Build suite info section listing all available suites
     suite_info_lines = []
@@ -1284,23 +1284,24 @@ Only write/modify the tests, do not implement the feature."""
         # Capture state before
         hashes_before = get_file_hashes(files_to_monitor)
 
-        # Read test file contents for review
-        test_contents = read_test_file_contents(files_to_monitor)
+        # Build refinement prompt with file paths (Claude Code can read them)
+        file_list = "\n".join(f"- {f}" for f in files_to_monitor)
 
-        # Build refinement prompt
-        refine_prompt = f"""Review and refine the following tests for this task:
+        refine_prompt = f"""Review and refine the tests for this task:
 
 Task: {todo_text}
+{expectations_section}
 
-Current test file(s):
-{test_contents}
+Test file(s) to review:
+{file_list}
 
 Instructions:
-1. Check if the tests accurately represent the task description
-2. Check for any bugs, typos, or logic errors in the tests
-3. Ensure test coverage is comprehensive (happy path, edge cases, error conditions)
-4. If improvements are needed, edit the test file(s)
-5. If the tests are already correct and complete, make NO changes
+1. Read the test file(s) listed above
+2. Check if the tests accurately represent the task description
+3. Check for any bugs, typos, or logic errors in the tests
+4. Ensure test coverage is comprehensive (happy path, edge cases, error conditions)
+5. If improvements are needed, edit the test file(s)
+6. If the tests are already correct and complete, make NO changes
 
 Only modify the tests if there are actual issues to fix."""
 
