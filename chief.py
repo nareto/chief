@@ -146,6 +146,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Remove completed todos (non-null done_at_commit) from todos.json and exit"
     )
+    parser.add_argument(
+        "--test-suite",
+        metavar="NAME",
+        help="Test a suite's configuration by running setup and a test command, then exit"
+    )
     return parser.parse_args()
 
 
@@ -158,7 +163,7 @@ def load_config() -> dict:
         name = "backend"
         language = "Python"
         framework = "pytest"
-        root = "backend/"
+        root = "backend/"           # Working directory for commands; also strips this prefix from {target}
         command = "pytest {target} -v"
         target_type = "file"
         file_patterns = ["test_*.py", "*_test.py"]
@@ -355,6 +360,107 @@ def run_suite_setup(suite: dict) -> None:
 
     SETUP_COMPLETED.add(name)
     print_success(f"Setup complete for suite '{name}'")
+
+
+def test_suite_config(suite_name: str) -> int:
+    """
+    Test a suite's configuration by running setup and a test command.
+
+    Uses the same path stripping and cwd logic as run_tests() to verify
+    the configuration is correct.
+
+    Args:
+        suite_name: Name of the suite to test
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    suite = get_suite_by_name(suite_name)
+    if not suite:
+        print_error(f"Suite '{suite_name}' not found")
+        print_info("Available suites:")
+        for s in CONFIG["suites"]:
+            print(f"  • {s['name']}")
+        return 1
+
+    print_banner(f"Testing suite: {suite_name}")
+    print()
+
+    # Show configuration
+    print_info("Configuration:")
+    print(f"  root: {color(suite.get('root', '.'), Colors.CYAN)}")
+    print(f"  command: {color(suite['command'], Colors.CYAN)}")
+    print(f"  default_target: {color(suite.get('default_target', '.'), Colors.CYAN)}")
+    print(f"  strip_root_from_target: {color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}")
+    print()
+
+    # Run setup if configured
+    setup_cmd = suite.get("setup")
+    if setup_cmd:
+        print_info(f"Running setup: {setup_cmd}")
+        result = subprocess.run(
+            setup_cmd,
+            capture_output=False,
+            text=True,
+            shell=True,
+            cwd=os.getcwd(),
+            env=get_suite_env(suite)
+        )
+        if result.returncode != 0:
+            print_error("Setup failed")
+            return 1
+        print_success("Setup complete")
+        print()
+
+    # Build test command using same logic as run_tests()
+    target = suite.get("default_target", ".")
+    command_template = suite["command"]
+    root = suite.get("root", "")
+    strip_root = suite.get("strip_root_from_target", True)
+
+    # Show the path transformation
+    print_info("Path resolution:")
+    print(f"  Original target: {color(target, Colors.CYAN)}")
+
+    transformed_target = target
+    if strip_root and root and root != ".":
+        normalized_root = root if root.endswith("/") else root + "/"
+        if target.startswith(normalized_root):
+            transformed_target = target[len(normalized_root):]
+            print(f"  After stripping '{normalized_root}': {color(transformed_target, Colors.CYAN)}")
+        else:
+            print(f"  (target doesn't start with root, not stripped)")
+
+    cwd = root or os.getcwd()
+    print(f"  Working directory: {color(cwd, Colors.CYAN)}")
+
+    # Build and show final command
+    if "{target}" in command_template:
+        test_command = command_template.format(target=transformed_target)
+    else:
+        test_command = command_template
+
+    print(f"  Final command: {color(test_command, Colors.YELLOW)}")
+    print()
+
+    # Run the test command
+    print_info("Running test command...")
+    result = subprocess.run(
+        test_command,
+        capture_output=False,
+        text=True,
+        shell=True,
+        cwd=cwd,
+        env=get_suite_env(suite)
+    )
+
+    print()
+    if result.returncode == 0:
+        print_success(f"Suite '{suite_name}' configuration is valid")
+        return 0
+    else:
+        print_error(f"Test command failed with exit code {result.returncode}")
+        return 1
 
 
 def load_todos() -> dict:
@@ -646,7 +752,7 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
         capture_output=True,
         text=True,
         shell=True,
-        cwd=os.getcwd(),
+        cwd=suite.get("root") or os.getcwd(),
         env=get_suite_env(suite)
     )
 
@@ -1704,6 +1810,11 @@ def main():
 
     # Load configuration
     CONFIG = load_config()
+
+    # Handle --test-suite (needs config but not todos)
+    if args.test_suite:
+        return test_suite_config(args.test_suite)
+
     print_info(f"Loaded {color(str(len(CONFIG['suites'])), Colors.YELLOW, Colors.BOLD)} test suite(s):")
     for suite in CONFIG["suites"]:
         print(f"  {color('•', Colors.CYAN)} {color(suite['name'], Colors.MAGENTA, Colors.BOLD)}: "
