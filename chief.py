@@ -17,7 +17,8 @@ import os
 import tomllib
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TextIO
+import atexit
 
 
 TODOS_FILE = "todos.json"
@@ -29,12 +30,12 @@ STABILITY_ITERATIONS = 2  # Times Claude must give consistent answer before acce
 
 # Global config loaded at startup
 CONFIG: dict = {}
-# Quiet mode: suppress Claude Code output (verbose is default)
-QUIET: bool = False
 # Track which suites have had their setup run
 SETUP_COMPLETED: set[str] = set()
 # Auto-push commits to remote (can be disabled with --no-autopush)
 AUTOPUSH: bool = True
+# Log file for verbose output (console shows essentials only)
+LOG_FILE: Optional[TextIO] = None
 
 # ============================================================================
 # ANSI Color Codes (stdlib-only terminal styling)
@@ -70,12 +71,26 @@ def color(text: str, *codes: str) -> str:
     return "".join(codes) + text + Colors.RESET
 
 
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    import re
+    return re.sub(r'\033\[[0-9;]*m', '', text)
+
+
+def log_write(text: str) -> None:
+    """Write text to log file (without ANSI codes)."""
+    if LOG_FILE:
+        LOG_FILE.write(strip_ansi(text))
+        LOG_FILE.flush()
+
+
 def print_banner(text: str, char: str = "=", width: int = 60) -> None:
     """Print a prominent banner."""
     line = char * width
     print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
     print(color(text.center(width), Colors.BRIGHT_CYAN, Colors.BOLD))
     print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
+    log_write(f"{line}\n{text.center(width)}\n{line}\n")
 
 
 def print_phase(phase: str, description: str) -> None:
@@ -90,53 +105,51 @@ def print_phase(phase: str, description: str) -> None:
     }
     phase_color = phase_colors.get(phase, Colors.CYAN)
     print(f"\n{color(f'[{phase}]', phase_color, Colors.BOLD)} {color(description, Colors.WHITE)}")
+    log_write(f"\n[{phase}] {description}\n")
 
 
 def print_info(msg: str, indent: int = 0) -> None:
     """Print an informational message from the script."""
     prefix = "  " * indent
     print(f"{prefix}{color('▸', Colors.CYAN)} {msg}")
+    log_write(f"{prefix}> {msg}\n")
 
 
 def print_success(msg: str, indent: int = 0) -> None:
     """Print a success message."""
     prefix = "  " * indent
     print(f"{prefix}{color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {color(msg, Colors.GREEN)}")
+    log_write(f"{prefix}[OK] {msg}\n")
 
 
 def print_warning(msg: str, indent: int = 0) -> None:
     """Print a warning message."""
     prefix = "  " * indent
     print(f"{prefix}{color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {color(msg, Colors.YELLOW)}")
+    log_write(f"{prefix}[WARN] {msg}\n")
 
 
 def print_error(msg: str, indent: int = 0) -> None:
     """Print an error message."""
     prefix = "  " * indent
     print(f"{prefix}{color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {color(msg, Colors.RED)}")
+    log_write(f"{prefix}[ERROR] {msg}\n")
 
 
 def print_claude_start() -> None:
-    """Print marker for start of Claude Code output."""
-    if not QUIET:
-        print(color("─" * 40 + " Claude Code " + "─" * 40, Colors.DIM))
+    """Print marker for start of Claude Code output (log only)."""
+    log_write("─" * 40 + " Claude Code " + "─" * 40 + "\n")
 
 
 def print_claude_end() -> None:
-    """Print marker for end of Claude Code output."""
-    if not QUIET:
-        print(color("─" * 93, Colors.DIM))
+    """Print marker for end of Claude Code output (log only)."""
+    log_write("─" * 93 + "\n")
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="TDD Orchestrator for Claude Code - runs Red-Green-Refactor cycle"
-    )
-    parser.add_argument(
-        "-q", "--quiet",
-        action="store_true",
-        help="Suppress Claude Code output (only show status messages)"
     )
     parser.add_argument(
         "--no-autopush",
@@ -152,6 +165,11 @@ def parse_args() -> argparse.Namespace:
         "--test-suite",
         metavar="NAME",
         help="Test a suite's configuration by running setup and a test command, then exit"
+    )
+    parser.add_argument(
+        "--no-retry",
+        action="store_true",
+        help="Disable automatic retry on transient failures (retry is enabled by default)"
     )
     return parser.parse_args()
 
@@ -290,12 +308,16 @@ def validate_suite_environments():
             # test_init runs in test_root
             init_result = subprocess.run(
                 init_cmd,
-                capture_output=False,  # Show init output
+                capture_output=True,
                 text=True,
                 shell=True,
                 cwd=suite.get("test_root") or os.getcwd(),
                 env=suite_env
             )
+            if init_result.stdout:
+                log_write(init_result.stdout)
+            if init_result.stderr:
+                log_write(init_result.stderr)
 
             if init_result.returncode != 0:
                 print_error(f"Suite '{name}': test_init command failed")
@@ -356,12 +378,16 @@ def run_suite_setup(suite: dict) -> None:
     # test_setup runs in PROJECT ROOT (not test_root)
     result = subprocess.run(
         setup_cmd,
-        capture_output=False,  # Show setup output
+        capture_output=True,
         text=True,
         shell=True,
         cwd=os.getcwd(),
         env=get_suite_env(suite)
     )
+    if result.stdout:
+        log_write(result.stdout)
+    if result.stderr:
+        log_write(result.stderr)
 
     if result.returncode != 0:
         print_error(f"test_setup failed for suite '{name}'")
@@ -411,12 +437,16 @@ def test_suite_config(suite_name: str) -> int:
         print_info(f"Running test_setup (in project root): {setup_cmd}")
         result = subprocess.run(
             setup_cmd,
-            capture_output=False,
+            capture_output=True,
             text=True,
             shell=True,
             cwd=os.getcwd(),
             env=get_suite_env(suite)
         )
+        if result.stdout:
+            log_write(result.stdout)
+        if result.stderr:
+            log_write(result.stderr)
         if result.returncode != 0:
             print_error("test_setup failed")
             return 1
@@ -458,12 +488,16 @@ def test_suite_config(suite_name: str) -> int:
     print_info("Running test_command...")
     result = subprocess.run(
         test_command,
-        capture_output=False,
+        capture_output=True,
         text=True,
         shell=True,
         cwd=cwd,
         env=get_suite_env(suite)
     )
+    if result.stdout:
+        log_write(result.stdout)
+    if result.stderr:
+        log_write(result.stderr)
 
     print()
     if result.returncode == 0:
@@ -694,34 +728,23 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
     print_info("Invoking Claude Code...")
     print_claude_start()
 
-    if QUIET:
-        # Original quiet behavior - capture and hide output
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=os.getcwd()
-        )
-        print_claude_end()
-        return result.returncode, result.stdout, result.stderr
-    else:
-        # Stream output in real-time while capturing for parsing
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Merge stderr into stdout
-            text=True,
-            cwd=os.getcwd()
-        )
+    # Stream output to log file while capturing for parsing
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+        text=True,
+        cwd=os.getcwd()
+    )
 
-        stdout_lines = []
-        for line in process.stdout:
-            print(line, end="")  # Real-time output
-            stdout_lines.append(line)
+    stdout_lines = []
+    for line in process.stdout:
+        log_write(line)  # Write to log file only
+        stdout_lines.append(line)
 
-        process.wait()
-        print_claude_end()
-        return process.returncode, "".join(stdout_lines), ""
+    process.wait()
+    print_claude_end()
+    return process.returncode, "".join(stdout_lines), ""
 
 
 def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
@@ -768,12 +791,11 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
         env=get_suite_env(suite)
     )
 
-    # Show test output by default (unless quiet mode)
-    if not QUIET:
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
+    # Log test output
+    if result.stdout:
+        log_write(result.stdout)
+    if result.stderr:
+        log_write(result.stderr)
 
     passed = result.returncode == 0
     return passed, result.stdout, result.stderr
@@ -1637,11 +1659,11 @@ def run_post_green_commands(
         passed = result.returncode == 0
         results[suite_name] = (passed, result.stdout, result.stderr)
 
-        if not QUIET:
-            if result.stdout:
-                print(result.stdout)
-            if result.stderr:
-                print(result.stderr, file=sys.stderr)
+        # Log output
+        if result.stdout:
+            log_write(result.stdout)
+        if result.stderr:
+            log_write(result.stderr)
 
         if passed:
             print_success(f"post_green_command passed for suite '{suite_name}'")
@@ -1987,18 +2009,124 @@ def process_todo(todo: dict, data: dict) -> bool:
     return False
 
 
+# ============================================================================
+# Retry Wrapper (handles transient failures by re-running)
+# ============================================================================
+
+def failures_same_reason(tail1: str, tail2: str) -> bool:
+    """
+    Use Claude to determine if two failure outputs are for the same reason.
+
+    Returns True if same reason (or unparseable), False if different.
+    """
+    prompt = f"""Compare these two script failure outputs and determine if they failed for the SAME reason.
+
+FAILURE 1:
+{tail1}
+
+FAILURE 2:
+{tail2}
+
+Did both failures occur for the same underlying reason?
+Answer ONLY 'YES' or 'NO'."""
+
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--no-input"],
+        capture_output=True,
+        text=True
+    )
+
+    response = result.stdout.strip().upper()
+
+    # Parse response - look for YES/NO
+    for line in response.split('\n'):
+        line = line.strip()
+        if line == 'YES':
+            return True
+        elif line == 'NO':
+            return False
+
+    # Unparseable - assume same reason, exit
+    print("[RETRY WRAPPER] Could not parse Claude response, assuming same reason")
+    return True
+
+
+def run_with_retry(max_retries: int = 10, tail_lines: int = 150) -> int:
+    """
+    Run chief.py in a retry loop until failures stabilize or succeeds.
+
+    Uses Claude to semantically compare failure outputs.
+    Stops when:
+    - Exit code is 0 (success)
+    - Claude says two consecutive failures are for the same reason
+    - Max retries reached
+    """
+    # Build command: same script with --no-retry to avoid infinite recursion
+    cmd = [sys.executable, __file__] + [
+        arg for arg in sys.argv[1:] if arg != "--no-retry"
+    ] + ["--no-retry"]
+
+    last_tail: str | None = None
+
+    for attempt in range(1, max_retries + 1):
+        print(f"\n{'='*60}")
+        print(f"RETRY WRAPPER: Attempt {attempt}/{max_retries}")
+        print(f"{'='*60}\n")
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # Print output to console
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+
+        # Success - done
+        if result.returncode == 0:
+            return 0
+
+        # Get last N lines for comparison
+        lines = result.stdout.strip().split('\n')
+        current_tail = '\n'.join(lines[-tail_lines:])
+
+        # Check if same failure reason as last run
+        if last_tail is not None:
+            print("\n[RETRY WRAPPER] Asking Claude if failures are same reason...")
+            if failures_same_reason(last_tail, current_tail):
+                print("[RETRY WRAPPER] Same failure reason detected - stopping")
+                return result.returncode
+            print("[RETRY WRAPPER] Different failure reason - will retry...")
+
+        last_tail = current_tail
+
+    print(f"\n[RETRY WRAPPER] Max retries ({max_retries}) reached")
+    return 1
+
+
 def main():
     """Main orchestration loop."""
-    global CONFIG, QUIET, AUTOPUSH
+    global CONFIG, AUTOPUSH, LOG_FILE
 
     # Parse command-line arguments
     args = parse_args()
-    QUIET = args.quiet or os.environ.get("CHIEF_QUIET", "").lower() in ("1", "true", "yes")
     AUTOPUSH = not args.no_autopush
 
-    # Handle --clean-done early (doesn't need config)
+    # Handle --clean-done early (doesn't need config or log file)
     if args.clean_done:
         return clean_done_todos()
+
+    # If retry is enabled (default), run via wrapper
+    if not args.no_retry:
+        return run_with_retry()
+
+    # Open log file for verbose output (append mode)
+    LOG_FILE = open("chief.log", "a")
+    atexit.register(LOG_FILE.close)
+
+    # Write timestamp separator for this run
+    log_write(f"\n\n{'='*60}\n")
+    log_write(f"CHIEF RUN: {datetime.now().isoformat()}\n")
+    log_write(f"{'='*60}\n\n")
 
     print_banner("CHIEF - TDD Orchestrator for Claude Code")
     print()
