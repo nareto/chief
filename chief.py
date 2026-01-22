@@ -78,6 +78,11 @@ def strip_ansi(text: str) -> str:
     return re.sub(r'\033\[[0-9;]*m', '', text)
 
 
+def timestamp() -> str:
+    """Return current timestamp in HH:MM:SS format for log entries."""
+    return datetime.now().strftime("%H:%M:%S")
+
+
 def log_write(text: str) -> None:
     """Write text to log file (without ANSI codes)."""
     if LOG_FILE:
@@ -92,9 +97,10 @@ def print_banner(text: str, char: str = "=", width: int = 60) -> None:
     print(color(text.center(width), Colors.BRIGHT_CYAN, Colors.BOLD))
     print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
     # Log with box-drawing characters for readability
-    log_write("┏" + "━" * 78 + "┓\n")
-    log_write("┃" + text.center(78) + "┃\n")
-    log_write("┗" + "━" * 78 + "┛\n")
+    ts = timestamp()
+    log_write(f"[{ts}] ┏" + "━" * 78 + "┓\n")
+    log_write(f"[{ts}] ┃" + text.center(78) + "┃\n")
+    log_write(f"[{ts}] ┗" + "━" * 78 + "┛\n")
 
 
 def print_phase(phase: str, description: str) -> None:
@@ -112,7 +118,7 @@ def print_phase(phase: str, description: str) -> None:
     # Log with visual separator for phases
     log_write("\n")
     log_write("─" * 80 + "\n")
-    log_write(f"▶ [{phase}] {description}\n")
+    log_write(f"[{timestamp()}] ▶ [{phase}] {description}\n")
     log_write("─" * 80 + "\n")
 
 
@@ -120,45 +126,47 @@ def print_info(msg: str, indent: int = 0) -> None:
     """Print an informational message from the script."""
     prefix = "  " * indent
     print(f"{prefix}{color('▸', Colors.CYAN)} {msg}")
-    log_write(f"{prefix}> {msg}\n")
+    log_write(f"[{timestamp()}] {prefix}> {msg}\n")
 
 
 def print_success(msg: str, indent: int = 0) -> None:
     """Print a success message."""
     prefix = "  " * indent
     print(f"{prefix}{color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {color(msg, Colors.GREEN)}")
-    log_write(f"{prefix}[OK] {msg}\n")
+    log_write(f"[{timestamp()}] {prefix}[OK] {msg}\n")
 
 
 def print_warning(msg: str, indent: int = 0) -> None:
     """Print a warning message."""
     prefix = "  " * indent
     print(f"{prefix}{color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {color(msg, Colors.YELLOW)}")
-    log_write(f"{prefix}[WARN] {msg}\n")
+    log_write(f"[{timestamp()}] {prefix}[WARN] {msg}\n")
 
 
 def print_error(msg: str, indent: int = 0) -> None:
     """Print an error message."""
     prefix = "  " * indent
     print(f"{prefix}{color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {color(msg, Colors.RED)}")
-    log_write(f"{prefix}[ERROR] {msg}\n")
+    log_write(f"[{timestamp()}] {prefix}[ERROR] {msg}\n")
 
 
 def print_claude_start() -> None:
     """Print marker for start of Claude Code output (log only)."""
+    ts = timestamp()
     log_write("\n")
-    log_write("╔" + "═" * 78 + "╗\n")
-    log_write("║" + " CLAUDE OUTPUT ".center(78) + "║\n")
-    log_write("╚" + "═" * 78 + "╝\n")
+    log_write(f"[{ts}] ╔" + "═" * 78 + "╗\n")
+    log_write(f"[{ts}] ║" + " CLAUDE OUTPUT ".center(78) + "║\n")
+    log_write(f"[{ts}] ╚" + "═" * 78 + "╝\n")
     log_write("\n")
 
 
 def print_claude_end() -> None:
     """Print marker for end of Claude Code output (log only)."""
+    ts = timestamp()
     log_write("\n")
-    log_write("╔" + "═" * 78 + "╗\n")
-    log_write("║" + " END CLAUDE OUTPUT ".center(78) + "║\n")
-    log_write("╚" + "═" * 78 + "╝\n")
+    log_write(f"[{ts}] ╔" + "═" * 78 + "╗\n")
+    log_write(f"[{ts}] ║" + " END CLAUDE OUTPUT ".center(78) + "║\n")
+    log_write(f"[{ts}] ╚" + "═" * 78 + "╝\n")
     log_write("\n")
 
 
@@ -178,19 +186,20 @@ def log_section_divider(label: str = "") -> None:
 
 def log_prompt(prompt: str, label: str = "PROMPT TO CLAUDE") -> None:
     """Log a prompt being sent to Claude with clear visual demarcation."""
+    ts = timestamp()
     log_write("\n")
-    log_write("┌" + "─" * 78 + "┐\n")
-    log_write("│" + f" {label} ".center(78) + "│\n")
-    log_write("├" + "─" * 78 + "┤\n")
+    log_write(f"[{ts}] ┌" + "─" * 78 + "┐\n")
+    log_write(f"[{ts}] │" + f" {label} ".center(78) + "│\n")
+    log_write(f"[{ts}] ├" + "─" * 78 + "┤\n")
     # Wrap each line to fit in box (74 chars content width)
     for line in prompt.split('\n'):
         if len(line) <= 74:
-            log_write(f"│  {line.ljust(75)} │\n")
+            log_write(f"[{ts}] │  {line.ljust(75)} │\n")
         else:
             wrapped_lines = textwrap.wrap(line, width=74)
             for wrapped in wrapped_lines:
-                log_write(f"│  {wrapped.ljust(75)} │\n")
-    log_write("└" + "─" * 78 + "┘\n")
+                log_write(f"[{ts}] │  {wrapped.ljust(75)} │\n")
+    log_write(f"[{ts}] └" + "─" * 78 + "┘\n")
     log_write("\n")
 
 
