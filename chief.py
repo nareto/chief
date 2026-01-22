@@ -765,9 +765,9 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
     Returns:
         Tuple of (return_code, stdout, stderr)
     """
-    # Prompt must be positional argument right after -p (not via stdin)
+    # Pass prompt via stdin using "-p -" to avoid ARG_MAX limit on large prompts
     # --verbose shows real-time tool calls and agent activity
-    cmd = ["claude", "-p", prompt, "--permission-mode", "acceptEdits", "--verbose"]
+    cmd = ["claude", "-p", "-", "--permission-mode", "acceptEdits", "--verbose"]
 
     # Add disallowed paths if any
     for path in (disallow_paths or []):
@@ -780,11 +780,16 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
     # Stream output to log file while capturing for parsing
     process = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,  # Merge stderr into stdout
         text=True,
         cwd=os.getcwd()
     )
+
+    # Write prompt to stdin and close to signal EOF
+    process.stdin.write(prompt)
+    process.stdin.close()
 
     stdout_lines = []
     for line in process.stdout:
