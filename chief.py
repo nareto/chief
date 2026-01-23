@@ -18,8 +18,158 @@ import textwrap
 import tomllib
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, TextIO
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Optional, TextIO
 import atexit
+
+
+# ============================================================================
+# Prompt System - All Claude Prompt Types in One Place
+# ============================================================================
+
+
+class PromptType(Enum):
+    """All Claude prompts - easy to find and audit."""
+
+    RED_WRITE_TESTS = "red_write_tests"
+    RED_REFINE_TESTS = "red_refine_tests"
+    RED_VERIFY_EXISTING = "red_verify_existing"
+    GREEN_IMPLEMENT = "green_implement"
+    GREEN_IMPLEMENT_NO_TESTS = "green_implement_no_tests"
+    FIX_FAILING_TESTS = "fix_failing_tests"
+    FIX_FAILING_BUILD = "fix_failing_build"
+    VERIFY_COMPLETION = "verify_completion"
+    COMPARE_FAILURES = "compare_failures"
+
+
+# ============================================================================
+# PROMPT_TEMPLATES - All Claude Prompts in One Place
+# ============================================================================
+
+PROMPT_TEMPLATES: dict[PromptType, str] = {
+    PromptType.RED_WRITE_TESTS: """Write or modify tests (Red phase of TDD) for the following task:
+
+Task: {task}
+{expectations_section}
+
+Available test suites in this project:
+{suite_info}
+
+Instructions:
+1. Analyze the task and determine which test suite(s) are appropriate
+2. First, search for existing tests related to this functionality
+3. **If comprehensive tests already exist for this task:**
+   - Output a single line: TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
+   - List all relevant existing test files (comma-separated)
+   - Do NOT create or modify any files
+   - Stop here - do not proceed with further instructions
+4. Follow the patterns and conventions used in existing tests (fixtures, configuration, setup/teardown, naming conventions)
+5. Determine the nature of this task:
+
+   **If MODIFYING existing behavior:**
+   - Find and update existing tests to reflect the new expected behavior
+   - The modified tests should FAIL until the implementation is updated
+   - Keep test names/structure where possible, just update expectations
+
+   **If ADDING new functionality:**
+   - Write new failing tests for the new feature
+   - Place them in the appropriate existing test file if one exists, or create a new one
+
+   **If FIXING a bug:**
+   - Add a regression test that currently FAILS (demonstrates the bug)
+   - If existing tests have incorrect expectations, fix them
+
+6. Write COMPREHENSIVE tests covering:
+   - Happy path (normal expected usage)
+   - Edge cases (empty input, boundary values)
+   - Error conditions (invalid input, missing data)
+   - Security considerations if applicable
+7. Multiple test functions in one test file is expected and encouraged
+8. Write tests in the correct location based on the suite conventions above
+
+Only write/modify the tests, do not implement the feature.""",
+    PromptType.RED_REFINE_TESTS: """We are in the RED PHASE for this task:
+
+Task: {task}
+{expectations_section}
+
+There are already these related test file(s) (that fail as expected, because we are in RED phase, no implementation yet):
+{file_list}
+
+Your instructions are:
+1. Read the test file(s) listed above
+2. Check if the tests accurately represent the task description
+3. Check for any bugs, typos, or logic errors in the tests
+4. Ensure test coverage is comprehensive (happy path, edge cases, error conditions) and strict (not overly permissive)
+5. If improvements are needed, edit the test file(s)
+6. If the tests are already correct and complete, make NO changes
+
+Only modify the tests if there are actual issues to fix.
+
+DO NOT attempt to make the tests pass. They SHOULD fail at this point.""",
+    PromptType.RED_VERIFY_EXISTING: """For this task, verify whether comprehensive tests already exist:
+
+Task: {task}
+{expectations_section}
+
+Available test suites:
+{suite_info}
+
+If tests already exist that cover this task, output a single line:
+TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
+
+If tests need to be written or modified, proceed to write them.""",
+    PromptType.GREEN_IMPLEMENT: """Implement the following task:
+
+Task: {task}
+
+Tests have been created in the following locations:
+{test_locations_str}
+
+Do NOT modify any test files. Only implement the code to make ALL tests pass.
+
+Implement the minimal code needed to pass the tests.""",
+    PromptType.GREEN_IMPLEMENT_NO_TESTS: """Implement the following task:
+
+Task: {task}
+{expectations_section}
+{retry_context}
+
+Implement the task completely.""",
+    PromptType.FIX_FAILING_TESTS: """The tests are failing. Fix the code to make them pass.
+
+Original task: {task}
+
+Test files (DO NOT MODIFY):
+{test_locations_str}
+
+Test failures:
+{failure_output}
+
+Analyze the test failures and fix the implementation code to make ALL tests pass.""",
+    PromptType.FIX_FAILING_BUILD: """The build/validation command is failing. Fix the code to make it pass.
+
+Original task: {task}
+
+Test files (DO NOT MODIFY):
+{test_locations_str}
+
+Build failures:
+{failure_output}
+
+Analyze the build failures and fix the implementation code. The tests are already passing,
+so ensure your fix does not break the tests. Common issues include:
+- TypeScript compilation errors (unused variables, type mismatches)
+- Linting errors
+- Build configuration issues""",
+    PromptType.VERIFY_COMPLETION: """Review the current state of the files for this task:
+
+Task: {task}
+{expectations_section}
+
+Is the task fully completed? Output ONLY 'YES' or 'NO'.""",
+}
 
 
 TODOS_FILE = "todos.json"
@@ -38,11 +188,13 @@ AUTOPUSH: bool = True
 # Log file for verbose output (console shows essentials only)
 LOG_FILE: Optional[TextIO] = None
 
+
 # ============================================================================
 # ANSI Color Codes (stdlib-only terminal styling)
 # ============================================================================
 class Colors:
     """ANSI escape codes for terminal colors."""
+
     # Reset
     RESET = "\033[0m"
     # Styles
@@ -75,7 +227,8 @@ def color(text: str, *codes: str) -> str:
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     import re
-    return re.sub(r'\033\[[0-9;]*m', '', text)
+
+    return re.sub(r"\033\[[0-9;]*m", "", text)
 
 
 def timestamp() -> str:
@@ -114,7 +267,9 @@ def print_phase(phase: str, description: str) -> None:
         "FIX": Colors.BRIGHT_MAGENTA,
     }
     phase_color = phase_colors.get(phase, Colors.CYAN)
-    print(f"\n{color(f'[{phase}]', phase_color, Colors.BOLD)} {color(description, Colors.WHITE)}")
+    print(
+        f"\n{color(f'[{phase}]', phase_color, Colors.BOLD)} {color(description, Colors.WHITE)}"
+    )
     # Log with visual separator for phases
     log_write("\n")
     log_write("─" * 80 + "\n")
@@ -132,21 +287,27 @@ def print_info(msg: str, indent: int = 0) -> None:
 def print_success(msg: str, indent: int = 0) -> None:
     """Print a success message."""
     prefix = "  " * indent
-    print(f"{prefix}{color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {color(msg, Colors.GREEN)}")
+    print(
+        f"{prefix}{color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {color(msg, Colors.GREEN)}"
+    )
     log_write(f"[{timestamp()}] {prefix}[OK] {msg}\n")
 
 
 def print_warning(msg: str, indent: int = 0) -> None:
     """Print a warning message."""
     prefix = "  " * indent
-    print(f"{prefix}{color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {color(msg, Colors.YELLOW)}")
+    print(
+        f"{prefix}{color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {color(msg, Colors.YELLOW)}"
+    )
     log_write(f"[{timestamp()}] {prefix}[WARN] {msg}\n")
 
 
 def print_error(msg: str, indent: int = 0) -> None:
     """Print an error message."""
     prefix = "  " * indent
-    print(f"{prefix}{color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {color(msg, Colors.RED)}")
+    print(
+        f"{prefix}{color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {color(msg, Colors.RED)}"
+    )
     log_write(f"[{timestamp()}] {prefix}[ERROR] {msg}\n")
 
 
@@ -192,7 +353,7 @@ def log_prompt(prompt: str, label: str = "PROMPT TO CLAUDE") -> None:
     log_write(f"[{ts}] │" + f" {label} ".center(78) + "│\n")
     log_write(f"[{ts}] ├" + "─" * 78 + "┤\n")
     # Wrap each line to fit in box (74 chars content width)
-    for line in prompt.split('\n'):
+    for line in prompt.split("\n"):
         if len(line) <= 74:
             log_write(f"[{ts}] │  {line.ljust(75)} │\n")
         else:
@@ -211,22 +372,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-autopush",
         action="store_true",
-        help="Disable automatic git push after commits (commits are still created locally)"
+        help="Disable automatic git push after commits (commits are still created locally)",
     )
     parser.add_argument(
         "--clean-done",
         action="store_true",
-        help="Remove completed todos (non-null done_at_commit) from todos.json and exit"
+        help="Remove completed todos (non-null done_at_commit) from todos.json and exit",
     )
     parser.add_argument(
         "--test-suite",
         metavar="NAME",
-        help="Test a suite's configuration by running setup and a test command, then exit"
+        help="Test a suite's configuration by running setup and a test command, then exit",
     )
     parser.add_argument(
         "--no-retry",
         action="store_true",
-        help="Disable automatic retry on transient failures (retry is enabled by default)"
+        help="Disable automatic retry on transient failures (retry is enabled by default)",
     )
     return parser.parse_args()
 
@@ -267,7 +428,7 @@ def load_config() -> dict:
         print_info("Please create a chief.toml configuration file.")
         print()
         print(color("Example chief.toml:", Colors.DIM))
-        print(color('[[suites]]', Colors.DIM))
+        print(color("[[suites]]", Colors.DIM))
         print(color('name = "backend"', Colors.DIM))
         print(color('language = "Python"', Colors.DIM))
         print(color('framework = "pytest"', Colors.DIM))
@@ -287,7 +448,14 @@ def load_config() -> dict:
         sys.exit(1)
 
     # Validate each suite
-    required_suite_keys = ["name", "language", "framework", "test_root", "test_command", "target_type"]
+    required_suite_keys = [
+        "name",
+        "language",
+        "framework",
+        "test_root",
+        "test_command",
+        "target_type",
+    ]
     for i, suite in enumerate(config["suites"]):
         missing = [k for k in required_suite_keys if k not in suite]
         if missing:
@@ -298,10 +466,16 @@ def load_config() -> dict:
         suite.setdefault("default_target", ".")
         suite.setdefault("file_patterns", [])
         suite.setdefault("disallow_write_globs", [])
-        suite.setdefault("test_init", None)           # One-time dev env setup (run in test_root if validation fails)
-        suite.setdefault("test_setup", None)          # Pre-test setup (run in PROJECT ROOT once per suite)
-        suite.setdefault("post_green_command", None)  # Post-test validation (run in PROJECT ROOT after tests pass)
-        suite.setdefault("env", {})                   # Environment variables for all commands
+        suite.setdefault(
+            "test_init", None
+        )  # One-time dev env setup (run in test_root if validation fails)
+        suite.setdefault(
+            "test_setup", None
+        )  # Pre-test setup (run in PROJECT ROOT once per suite)
+        suite.setdefault(
+            "post_green_command", None
+        )  # Post-test validation (run in PROJECT ROOT after tests pass)
+        suite.setdefault("env", {})  # Environment variables for all commands
 
     return config
 
@@ -342,7 +516,9 @@ def validate_suite_environments():
 
         # Build validation command - use --version as a quick check
         if "{target}" in command:
-            validation_cmd = command.replace("{target}", "--version 2>/dev/null || true")
+            validation_cmd = command.replace(
+                "{target}", "--version 2>/dev/null || true"
+            )
         else:
             validation_cmd = command
 
@@ -354,7 +530,7 @@ def validate_suite_environments():
             shell=True,
             cwd=suite.get("test_root") or os.getcwd(),
             env=suite_env,
-            timeout=60
+            timeout=60,
         )
 
         # If validation fails and we have an init command, try running it
@@ -369,7 +545,7 @@ def validate_suite_environments():
                 text=True,
                 shell=True,
                 cwd=suite.get("test_root") or os.getcwd(),
-                env=suite_env
+                env=suite_env,
             )
             if init_result.stdout:
                 log_write(init_result.stdout)
@@ -388,7 +564,7 @@ def validate_suite_environments():
                 shell=True,
                 cwd=suite.get("test_root") or os.getcwd(),
                 env=suite_env,
-                timeout=60
+                timeout=60,
             )
 
             if result.returncode != 0:
@@ -400,7 +576,9 @@ def validate_suite_environments():
                     print(result.stdout)
                 sys.exit(1)
         elif result.returncode != 0:
-            print_error(f"Suite '{name}': environment validation failed (no test_init command defined)")
+            print_error(
+                f"Suite '{name}': environment validation failed (no test_init command defined)"
+            )
             print_error(f"  Command: {validation_cmd}")
             if result.stderr:
                 print(result.stderr)
@@ -439,7 +617,7 @@ def run_suite_setup(suite: dict) -> None:
         text=True,
         shell=True,
         cwd=os.getcwd(),
-        env=get_suite_env(suite)
+        env=get_suite_env(suite),
     )
     if result.stdout:
         log_write(result.stdout)
@@ -483,9 +661,13 @@ def test_suite_config(suite_name: str) -> int:
     print(f"  test_root: {color(suite.get('test_root', '.'), Colors.CYAN)}")
     print(f"  test_command: {color(suite['test_command'], Colors.CYAN)}")
     print(f"  default_target: {color(suite.get('default_target', '.'), Colors.CYAN)}")
-    print(f"  strip_root_from_target: {color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}")
+    print(
+        f"  strip_root_from_target: {color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}"
+    )
     if suite.get("post_green_command"):
-        print(f"  post_green_command: {color(suite['post_green_command'], Colors.CYAN)}")
+        print(
+            f"  post_green_command: {color(suite['post_green_command'], Colors.CYAN)}"
+        )
     print()
 
     # Run test_setup if configured (runs in PROJECT ROOT)
@@ -498,7 +680,7 @@ def test_suite_config(suite_name: str) -> int:
             text=True,
             shell=True,
             cwd=os.getcwd(),
-            env=get_suite_env(suite)
+            env=get_suite_env(suite),
         )
         if result.stdout:
             log_write(result.stdout)
@@ -524,8 +706,10 @@ def test_suite_config(suite_name: str) -> int:
     if strip_root and root and root != ".":
         normalized_root = root if root.endswith("/") else root + "/"
         if target.startswith(normalized_root):
-            transformed_target = target[len(normalized_root):]
-            print(f"  After stripping '{normalized_root}': {color(transformed_target, Colors.CYAN)}")
+            transformed_target = target[len(normalized_root) :]
+            print(
+                f"  After stripping '{normalized_root}': {color(transformed_target, Colors.CYAN)}"
+            )
         else:
             print(f"  (target doesn't start with test_root, not stripped)")
 
@@ -549,7 +733,7 @@ def test_suite_config(suite_name: str) -> int:
         text=True,
         shell=True,
         cwd=cwd,
-        env=get_suite_env(suite)
+        env=get_suite_env(suite),
     )
     if result.stdout:
         log_write(result.stdout)
@@ -692,7 +876,7 @@ def filter_test_files_all_suites(files: list[str]) -> dict[str, list[str]]:
 
 
 def run_tests_for_all_affected_suites(
-    suite_test_files: dict[str, list[str]]
+    suite_test_files: dict[str, list[str]],
 ) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
     """
     Run tests for all affected suites.
@@ -763,7 +947,9 @@ def get_disallowed_paths(suite: dict) -> list[str]:
     return paths
 
 
-def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tuple[int, str, str]:
+def run_claude_code(
+    prompt: str, disallow_paths: list[str] | None = None
+) -> tuple[int, str, str]:
     """
     Run claude code with the given prompt.
 
@@ -779,8 +965,10 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
     cmd = ["claude", "-p", "-", "--permission-mode", "acceptEdits", "--verbose"]
 
     # Add disallowed paths if any
-    for path in (disallow_paths or []):
-        cmd.extend(["--disallowedTools", f"Edit:{path}", "--disallowedTools", f"Write:{path}"])
+    for path in disallow_paths or []:
+        cmd.extend(
+            ["--disallowedTools", f"Edit:{path}", "--disallowedTools", f"Write:{path}"]
+        )
 
     print_info("Invoking Claude Code...")
     log_prompt(prompt)
@@ -793,7 +981,7 @@ def run_claude_code(prompt: str, disallow_paths: list[str] | None = None) -> tup
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,  # Merge stderr into stdout
         text=True,
-        cwd=os.getcwd()
+        cwd=os.getcwd(),
     )
 
     # Write prompt to stdin and close to signal EOF
@@ -821,7 +1009,9 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
     Returns:
         Tuple of (passed, stdout, stderr)
     """
-    print_info(f"Running tests: {color(target, Colors.WHITE, Colors.BOLD)} (suite: {suite['name']})")
+    print_info(
+        f"Running tests: {color(target, Colors.WHITE, Colors.BOLD)} (suite: {suite['name']})"
+    )
 
     command_template = suite["test_command"]
 
@@ -834,7 +1024,7 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
         # Normalize root to end with /
         normalized_root = root if root.endswith("/") else root + "/"
         if target.startswith(normalized_root):
-            transformed_target = target[len(normalized_root):]
+            transformed_target = target[len(normalized_root) :]
 
     # Substitute {target} with the (possibly transformed) path
     if "{target}" in command_template:
@@ -851,7 +1041,7 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
         text=True,
         shell=True,
         cwd=suite.get("test_root") or os.getcwd(),
-        env=get_suite_env(suite)
+        env=get_suite_env(suite),
     )
 
     # Log test output
@@ -882,10 +1072,7 @@ def git_commit_and_tag(message: str) -> str:
 
     # Get commit hash
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     )
     commit_hash = result.stdout.strip()
 
@@ -924,7 +1111,7 @@ def git_commit_todos(todo_text: str) -> None:
     subprocess.run(
         ["git", "commit", "-m", f"chief: mark done - {todo_text[:50]}"],
         check=True,
-        capture_output=True
+        capture_output=True,
     )
     # Push is non-fatal for todos commit
     git_push_with_tags()
@@ -933,9 +1120,7 @@ def git_commit_todos(todo_text: str) -> None:
 def get_dirty_files() -> set[str]:
     """Get set of currently modified, staged, or untracked files."""
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True
+        ["git", "status", "--porcelain"], capture_output=True, text=True
     )
     files = set()
     for line in result.stdout.rstrip("\n").split("\n"):
@@ -952,8 +1137,12 @@ def git_revert_changes(baseline_files: set[str] | None = None) -> None:
 
     if baseline_files is None:
         # Revert everything except todos.json (legacy behavior)
-        subprocess.run(["git", "checkout", "--", ".", ":!todos.json"], capture_output=True)
-        subprocess.run(["git", "clean", "-fd", "--exclude=todos.json"], capture_output=True)
+        subprocess.run(
+            ["git", "checkout", "--", ".", ":!todos.json"], capture_output=True
+        )
+        subprocess.run(
+            ["git", "clean", "-fd", "--exclude=todos.json"], capture_output=True
+        )
         return
 
     # Only revert files that weren't dirty before
@@ -968,15 +1157,19 @@ def git_revert_changes(baseline_files: set[str] | None = None) -> None:
     result = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
         capture_output=True,
-        text=True
+        text=True,
     )
-    untracked = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+    untracked = (
+        set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+    )
 
     tracked_to_revert = [f for f in files_to_revert if f not in untracked]
     untracked_to_revert = [f for f in files_to_revert if f in untracked]
 
     if tracked_to_revert:
-        subprocess.run(["git", "checkout", "--"] + tracked_to_revert, capture_output=True)
+        subprocess.run(
+            ["git", "checkout", "--"] + tracked_to_revert, capture_output=True
+        )
 
     for f in untracked_to_revert:
         try:
@@ -1024,7 +1217,7 @@ def git_get_status_snapshot() -> dict[str, str]:
         ["git", "status", "--porcelain=v1"],
         capture_output=True,
         text=True,
-        cwd=os.getcwd()
+        cwd=os.getcwd(),
     )
     snapshot = {}
     for line in result.stdout.rstrip("\n").split("\n"):
@@ -1145,6 +1338,405 @@ def get_target_type_description(suite: dict) -> str:
     return descriptions.get(target_type, descriptions["file"])
 
 
+# ============================================================================
+# Stability Loop Abstraction
+# ============================================================================
+
+
+@dataclass
+class StabilityResult:
+    """Result from checking one iteration of a stability loop."""
+
+    is_stable: bool  # Does this iteration meet the stability criterion?
+    should_fail: bool  # Early exit with failure? (e.g., NO response)
+    value: Any  # Extracted value from this iteration
+
+
+def run_stability_loop(
+    prompt_builder: Callable[[int], str],
+    stability_checker: Callable[[int, str, Any], StabilityResult],
+    max_iterations: int = MAX_FIX_ATTEMPTS,
+    stability_threshold: int = STABILITY_ITERATIONS,
+    before_call: Callable[[int], Any] | None = None,
+    phase_name: str = "STABILITY",
+) -> tuple[bool, Any]:
+    """
+    Generic stability loop - calls Claude until output/side-effects stabilize.
+
+    This is the core abstraction for:
+    - "Stability loops": Wait for consistent output (same response N times)
+    - "Refinement loops": Wait for side effects to stop (no file changes N times)
+
+    Args:
+        prompt_builder: (iteration) -> prompt string
+        stability_checker: (iteration, stdout, pre_state) -> StabilityResult
+        max_iterations: Maximum iterations before giving up
+        stability_threshold: Consecutive stable iterations required
+        before_call: Optional (iteration) -> pre_state, called before each Claude call
+                     (used for capturing file hashes before Claude modifies files)
+        phase_name: Name for logging
+
+    Returns:
+        (success, final_value) - success is True if stability was reached
+    """
+    stable_count = 0
+    last_value: Any = None
+
+    for i in range(1, max_iterations + 1):
+        # Optional pre-call hook (e.g., capture file hashes)
+        pre_state = before_call(i) if before_call else None
+
+        prompt = prompt_builder(i)
+        returncode, stdout, stderr = run_claude_code(prompt)
+
+        if returncode != 0:
+            print_warning(f"Claude error in {phase_name}: {stderr}", indent=1)
+            stable_count = 0
+            continue
+
+        result = stability_checker(i, stdout, pre_state)
+
+        if result.should_fail:
+            return (False, result.value)
+
+        if result.is_stable:
+            stable_count += 1
+            print_info(
+                f"{phase_name}: stable ({stable_count}/{stability_threshold})", indent=1
+            )
+            if stable_count >= stability_threshold:
+                print_success(f"{phase_name}: stabilized")
+                return (True, result.value)
+        else:
+            stable_count = 0
+            print_info(f"{phase_name}: not stable yet", indent=1)
+
+        last_value = result.value
+
+    print_warning(f"{phase_name}: did not stabilize after {max_iterations} iterations")
+    return (False, last_value)
+
+
+# ============================================================================
+# ContextWindow - Structured input to Claude prompts
+# ============================================================================
+
+
+@dataclass
+class ContextWindow:
+    """
+    Represents what we're sending to Claude's context window.
+    Think of it as an array of sections we allocate to.
+    """
+
+    task: str  # The todo text (always present)
+    expectations: str | None = None  # PM expectations (optional)
+    suite_info: str | None = None  # Available test suites
+    test_files: list[str] | None = None  # Test file paths
+    test_locations_str: str | None = None  # Formatted test locations
+    failure_output: str | None = None  # Test/build failure details
+    retry_context: str | None = None  # Previous attempt info
+
+    def expectations_section(self) -> str:
+        """Format expectations for inclusion in prompt."""
+        if self.expectations:
+            return f"\n\nExpected outcome:\n{self.expectations}"
+        return ""
+
+    def build_prompt(self, prompt_type: PromptType) -> str:
+        """Build prompt from template + context fields."""
+        template = PROMPT_TEMPLATES[prompt_type]
+        return template.format(
+            task=self.task,
+            expectations_section=self.expectations_section(),
+            suite_info=self.suite_info or "",
+            test_locations_str=self.test_locations_str or "",
+            failure_output=self.failure_output or "",
+            retry_context=self.retry_context or "",
+            file_list="\n".join(f"- {f}" for f in (self.test_files or [])),
+        )
+
+
+# ============================================================================
+# TodoProcessor - Orchestrates TDD cycle for a single todo
+# ============================================================================
+
+
+class TodoProcessor:
+    """
+    Orchestrates the TDD cycle for a single todo item.
+
+    This class provides the ONE PLACE where the core TDD logic is crystal clear:
+    1. RED phase: Write failing tests
+    2. GREEN phase: Implement until tests pass
+    3. BUILD phase: Post-green validation
+    4. Commit on success
+    """
+
+    def __init__(self, todo: dict, data: dict):
+        self.todo = todo
+        self.data = data
+        self.todo_text = todo.get("todo", "")
+        self.testable = todo.get("testable", True)
+
+        # State populated during phases
+        self.suite_test_files: dict[str, list[str]] = {}  # suite -> files
+        self.all_test_artifacts: list[str] = []  # all test files
+        self.test_results: dict[str, tuple[bool, str, str]] = {}
+        self.build_results: dict[str, tuple[bool, str, str]] = {}
+        self.baseline_files: set[str] = set()  # for revert
+        self.success = False
+
+    def process(self) -> bool:
+        """
+        Main TDD cycle - the ONE PLACE where core logic is clear.
+
+        Returns:
+            True if todo was completed successfully, False otherwise
+        """
+        self._print_banner()
+
+        # Non-testable tasks use different flow
+        if not self.testable:
+            return self._process_no_tests()
+
+        # === RED PHASE: Write failing tests ===
+        if not self._run_red_phase():
+            return False
+
+        # === GREEN + BUILD PHASES with retry ===
+        for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
+            self.baseline_files = get_dirty_files()
+
+            if self._run_green_phase(attempt):
+                if self._run_build_phase():
+                    self.success = True
+                    break
+
+            self._revert_if_not_final(attempt)
+
+        if not self.success:
+            print_error(
+                f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts"
+            )
+            return False
+
+        # === COMMIT ===
+        return self._commit()
+
+    # -------------------------------------------------------------------------
+    # Phase Methods
+    # -------------------------------------------------------------------------
+
+    def _run_red_phase(self) -> bool:
+        """Generate failing tests with stability + refinement loops."""
+        print_phase("RED", "Writing failing tests...")
+
+        self.suite_test_files, self.all_test_artifacts = write_test_for_todo(self.todo)
+
+        if not self.suite_test_files:
+            print_error("Failed to create tests, skipping todo")
+            return False
+
+        # Run setup for each affected suite
+        for suite_name in self.suite_test_files.keys():
+            suite = get_suite_by_name(suite_name)
+            if suite:
+                run_suite_setup(suite)
+
+        # Verify tests fail (as expected for Red phase)
+        all_passed, self.test_results = run_tests_for_all_affected_suites(
+            self.suite_test_files
+        )
+        if all_passed:
+            print_warning("All tests passed before implementation (expected to fail)")
+            print_info("Proceeding to GREEN phase anyway")
+        else:
+            print_success("Tests fail as expected (Red phase complete)")
+
+        return True
+
+    def _run_green_phase(self, attempt: int) -> bool:
+        """Implement code and run fix loop if tests fail."""
+        print_phase(
+            "GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}"
+        )
+
+        success, _, _ = implement_todo(
+            self.todo, self.suite_test_files, self.all_test_artifacts
+        )
+
+        if not success:
+            print_error("Claude Code returned error during implementation")
+            return False
+
+        # Run tests for all affected suites
+        all_passed, self.test_results = run_tests_for_all_affected_suites(
+            self.suite_test_files
+        )
+
+        if not all_passed:
+            # Tests failed, enter test fix loop
+            print_warning("Tests failed, entering fix loop...")
+            all_passed = self._run_test_fix_loop()
+
+        if all_passed:
+            print_success("All tests passed!")
+
+        return all_passed
+
+    def _run_test_fix_loop(self) -> bool:
+        """Fix failing tests until pass or attempts exhausted."""
+        for fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+            print_phase("FIX", f"Test fix attempt {fix_iter}/{MAX_FIX_ATTEMPTS}")
+
+            success, _, _ = fix_failing_tests(
+                self.todo,
+                self.suite_test_files,
+                self.all_test_artifacts,
+                self.test_results,
+            )
+
+            if not success:
+                print_error("Claude Code returned error during fix", indent=1)
+                continue
+
+            all_passed, self.test_results = run_tests_for_all_affected_suites(
+                self.suite_test_files
+            )
+
+            if all_passed:
+                print_success("All tests passed after fix!")
+                return True
+
+        print_warning("Test fix loop exhausted")
+        return False
+
+    def _run_build_phase(self) -> bool:
+        """Run post-green commands with build-fix loop."""
+        print_phase("BUILD", "Running post_green_commands...")
+        build_passed, self.build_results = run_post_green_commands(
+            self.suite_test_files
+        )
+
+        if build_passed:
+            return True
+
+        # Build failed, enter build fix loop
+        print_warning("post_green_command failed, entering build fix loop...")
+
+        for build_fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+            print_phase(
+                "BUILD-FIX", f"Build fix attempt {build_fix_iter}/{MAX_FIX_ATTEMPTS}"
+            )
+
+            success, _, _ = fix_failing_build(
+                self.todo,
+                self.suite_test_files,
+                self.all_test_artifacts,
+                self.build_results,
+            )
+
+            if not success:
+                print_error("Claude Code returned error during build fix", indent=1)
+                continue
+
+            # Re-run tests first (fix might have broken them)
+            print_info("Re-running tests after build fix...")
+            all_passed, self.test_results = run_tests_for_all_affected_suites(
+                self.suite_test_files
+            )
+
+            if not all_passed:
+                print_warning("Tests failed after build fix, need to fix tests too")
+                all_passed = self._run_test_fix_loop_during_build()
+                if not all_passed:
+                    continue
+
+            # Tests pass, now check post_green again
+            print_info("Re-running post_green_commands...")
+            build_passed, self.build_results = run_post_green_commands(
+                self.suite_test_files
+            )
+
+            if build_passed:
+                print_success("All tests and post_green_commands passed!")
+                return True
+
+        print_warning("Build fix loop exhausted")
+        return False
+
+    def _run_test_fix_loop_during_build(self) -> bool:
+        """Mini test fix loop during build fix phase."""
+        for test_fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
+            print_phase(
+                "FIX",
+                f"Test fix attempt {test_fix_iter}/{MAX_FIX_ATTEMPTS} (during build fix)",
+            )
+
+            success, _, _ = fix_failing_tests(
+                self.todo,
+                self.suite_test_files,
+                self.all_test_artifacts,
+                self.test_results,
+            )
+
+            if not success:
+                print_error("Claude Code returned error during test fix", indent=1)
+                continue
+
+            all_passed, self.test_results = run_tests_for_all_affected_suites(
+                self.suite_test_files
+            )
+
+            if all_passed:
+                return True
+
+        print_warning("Could not fix tests during build fix loop")
+        return False
+
+    # -------------------------------------------------------------------------
+    # Helper Methods
+    # -------------------------------------------------------------------------
+
+    def _print_banner(self) -> None:
+        """Print the todo banner."""
+        print()
+        print_banner(
+            f"TODO: {self.todo_text[:50]}{'...' if len(self.todo_text) > 50 else ''}"
+        )
+        print_info(f"Full task: {self.todo_text}")
+        print_info(
+            f"Priority: {color(str(self.todo.get('priority', 0)), Colors.YELLOW, Colors.BOLD)}"
+        )
+
+    def _revert_if_not_final(self, attempt: int) -> None:
+        """Revert changes unless this was the final attempt."""
+        if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
+            print_warning("Reverting changes...")
+            git_revert_changes(self.baseline_files)
+        else:
+            print_info("Keeping changes for inspection (final attempt)")
+
+    def _commit(self) -> bool:
+        """Git commit and tag on success."""
+        try:
+            commit_hash = git_commit_and_tag(f"chief: {self.todo_text}")
+            git_push_with_tags()  # Non-fatal
+            self.todo["done_at_commit"] = commit_hash
+            save_todos(self.data)
+            git_commit_todos(self.todo_text)
+            return True
+        except subprocess.CalledProcessError as e:
+            print_error(f"Git commit failed: {e}")
+            git_revert_changes(self.baseline_files)
+            return False
+
+    def _process_no_tests(self) -> bool:
+        """Process a non-testable todo using semantic verification."""
+        return process_todo_no_tests(self.todo, self.data)
+
+
 def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
     """
     Run claude code to write failing tests for the todo.
@@ -1158,13 +1750,6 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
         - suite_test_files: Dict mapping suite name -> list of test files
         - all_test_artifacts: List of all test files created (for locking)
     """
-    todo_text = todo.get("todo", "")
-
-    expectations = todo.get("expectations", "")
-    expectations_section = ""
-    if expectations:
-        expectations_section = f"\nExpected outcome (from product manager):\n{expectations}"
-
     # Build suite info section listing all available suites
     suite_info_lines = []
     for suite in CONFIG["suites"]:
@@ -1176,47 +1761,12 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
         )
     suite_info = "\n".join(suite_info_lines)
 
-    prompt = f"""Write or modify tests (Red phase of TDD) for the following task:
-
-Task: {todo_text}
-{expectations_section}
-
-Available test suites in this project:
-{suite_info}
-
-Instructions:
-1. Analyze the task and determine which test suite(s) are appropriate
-2. First, search for existing tests related to this functionality
-3. **If comprehensive tests already exist for this task:**
-   - Output a single line: TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
-   - List all relevant existing test files (comma-separated)
-   - Do NOT create or modify any files
-   - Stop here - do not proceed with further instructions
-4. Follow the patterns and conventions used in existing tests (fixtures, configuration, setup/teardown, naming conventions)
-5. Determine the nature of this task:
-
-   **If MODIFYING existing behavior:**
-   - Find and update existing tests to reflect the new expected behavior
-   - The modified tests should FAIL until the implementation is updated
-   - Keep test names/structure where possible, just update expectations
-
-   **If ADDING new functionality:**
-   - Write new failing tests for the new feature
-   - Place them in the appropriate existing test file if one exists, or create a new one
-
-   **If FIXING a bug:**
-   - Add a regression test that currently FAILS (demonstrates the bug)
-   - If existing tests have incorrect expectations, fix them
-
-6. Write COMPREHENSIVE tests covering:
-   - Happy path (normal expected usage)
-   - Edge cases (empty input, boundary values)
-   - Error conditions (invalid input, missing data)
-   - Security considerations if applicable
-7. Multiple test functions in one test file is expected and encouraged
-8. Write tests in the correct location based on the suite conventions above
-
-Only write/modify the tests, do not implement the feature."""
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        expectations=todo.get("expectations", ""),
+        suite_info=suite_info,
+    )
+    prompt = context.build_prompt(PromptType.RED_WRITE_TESTS)
 
     # Capture git baseline before RED phase
     baseline_snapshot = git_get_status_snapshot()
@@ -1238,7 +1788,9 @@ Only write/modify the tests, do not implement the feature."""
             suite_test_files = filter_test_files_all_suites(stable_tests)
             if suite_test_files:
                 for suite_name, files in suite_test_files.items():
-                    print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
+                    print_info(
+                        f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}"
+                    )
                 all_test_artifacts = stable_tests
                 verified_existing = True
                 # Fall through to refinement loop (don't return early)
@@ -1262,72 +1814,64 @@ Only write/modify the tests, do not implement the feature."""
 
         # Report which suites were affected
         for suite_name, files in suite_test_files.items():
-            print_info(f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}")
+            print_info(
+                f"Suite '{color(suite_name, Colors.MAGENTA)}': {', '.join(files)}"
+            )
 
-    # --- REFINEMENT LOOP ---
+    # --- REFINEMENT LOOP (using stability loop abstraction) ---
     files_to_monitor = list(all_test_artifacts)
 
     if not files_to_monitor:
         print_warning("No test files to refine, skipping refinement loop")
         return suite_test_files, all_test_artifacts
 
-    no_change_count = 0
-    for refine_iter in range(1, MAX_TEST_REFINEMENT_ITERATIONS + 1):
-        if no_change_count >= STABILITY_ITERATIONS:
-            print_success(f"Tests stable (no changes for {STABILITY_ITERATIONS} consecutive iterations)")
-            break
+    # Build context for refinement prompts
+    refinement_context = ContextWindow(
+        task=todo.get("todo", ""),
+        expectations=todo.get("expectations", ""),
+        test_files=files_to_monitor,
+    )
+    refinement_prompt = refinement_context.build_prompt(PromptType.RED_REFINE_TESTS)
 
-        print_phase("REFINE", f"Test refinement iteration {refine_iter}/{MAX_TEST_REFINEMENT_ITERATIONS}")
-        print_info(f"Monitoring {len(files_to_monitor)} file(s) for changes: {', '.join(files_to_monitor)}")
+    def refinement_prompt_builder(iteration: int) -> str:
+        print_phase(
+            "REFINE",
+            f"Test refinement iteration {iteration}/{MAX_TEST_REFINEMENT_ITERATIONS}",
+        )
+        print_info(
+            f"Monitoring {len(files_to_monitor)} file(s) for changes: {', '.join(files_to_monitor)}"
+        )
+        return refinement_prompt
 
-        # Capture state before
-        hashes_before = get_file_hashes(files_to_monitor)
+    def refinement_before_call(iteration: int) -> dict[str, str | None]:
+        return get_file_hashes(files_to_monitor)
 
-        # Build refinement prompt with file paths (Claude Code can read them)
-        file_list = "\n".join(f"- {f}" for f in files_to_monitor)
-
-        refine_prompt = f"""We are in the RED PHASE for this task:
-
-Task: {todo_text}
-{expectations_section}
-
-There are already these related test file(s) (that fail as expected, because we are in RED phase, no implementation yet):
-{file_list}
-
-Your instructions are:
-1. Read the test file(s) listed above
-2. Check if the tests accurately represent the task description
-3. Check for any bugs, typos, or logic errors in the tests
-4. Ensure test coverage is comprehensive (happy path, edge cases, error conditions) and strict (not overly permissive)
-5. If improvements are needed, edit the test file(s)
-6. If the tests are already correct and complete, make NO changes
-
-Only modify the tests if there are actual issues to fix.
-
-DO NOT attempt to make the tests pass. They SHOULD fail at this point.
-"""
-
-        # Run Claude to review/refine
-        returncode, stdout, stderr = run_claude_code(refine_prompt)
-
-        if returncode != 0:
-            print_warning(f"Claude returned error during refinement: {stderr}", indent=1)
-            # Continue anyway - tests might still be usable
-
-        # Capture state after
+    def refinement_stability_checker(
+        iteration: int, stdout: str, hashes_before: dict[str, str | None]
+    ) -> StabilityResult:
         hashes_after = get_file_hashes(files_to_monitor)
+        is_stable = hashes_before == hashes_after
+        if not is_stable:
+            changed_files = [
+                f
+                for f in files_to_monitor
+                if hashes_before.get(f) != hashes_after.get(f)
+            ]
+            print_warning(
+                f"Test files modified: {', '.join(changed_files)} — will refine again",
+                indent=1,
+            )
+        return StabilityResult(
+            is_stable=is_stable, should_fail=False, value=hashes_after
+        )
 
-        # Deterministic change detection
-        if hashes_before == hashes_after:
-            no_change_count += 1
-            print_info(f"No changes detected (stable count: {no_change_count}/{STABILITY_ITERATIONS})", indent=1)
-        else:
-            no_change_count = 0
-            changed_files = [f for f in files_to_monitor if hashes_before.get(f) != hashes_after.get(f)]
-            print_warning(f"Test files modified: {', '.join(changed_files)} — will refine again", indent=1)
-
-    if no_change_count < STABILITY_ITERATIONS:
-        print_warning("Refinement loop hit max iterations without stabilizing")
+    run_stability_loop(
+        prompt_builder=refinement_prompt_builder,
+        stability_checker=refinement_stability_checker,
+        before_call=refinement_before_call,
+        max_iterations=MAX_TEST_REFINEMENT_ITERATIONS,
+        phase_name="REFINE",
+    )
     # --- END REFINEMENT LOOP ---
 
     return suite_test_files, all_test_artifacts
@@ -1341,7 +1885,7 @@ def extract_test_target(output: str) -> Optional[str]:
     for line in output.split("\n"):
         line = line.strip()
         if line.startswith("TEST_TARGET:"):
-            target = line[len("TEST_TARGET:"):].strip()
+            target = line[len("TEST_TARGET:") :].strip()
             # Remove any backticks or quotes
             target = target.strip("`\"'")
             if target:
@@ -1357,13 +1901,15 @@ def extract_existing_tests(output: str) -> list[str]:
     for line in output.split("\n"):
         line = line.strip()
         if line.startswith("TESTS_ALREADY_EXIST:"):
-            files_str = line[len("TESTS_ALREADY_EXIST:"):].strip()
+            files_str = line[len("TESTS_ALREADY_EXIST:") :].strip()
             files = [f.strip().strip("`\"'") for f in files_str.split(",")]
             return [f for f in files if f]
     return []
 
 
-def verify_existing_tests_stable(todo: dict, initial_tests: list[str], suite_info: str) -> list[str]:
+def verify_existing_tests_stable(
+    todo: dict, initial_tests: list[str], suite_info: str
+) -> list[str]:
     """
     Verify TESTS_ALREADY_EXIST answer is stable using intersection-based approach.
 
@@ -1380,43 +1926,32 @@ def verify_existing_tests_stable(todo: dict, initial_tests: list[str], suite_inf
     Returns:
         List of confirmed test paths (intersection), or empty list if unstable
     """
-    todo_text = todo.get("todo", "")
-    expectations = todo.get("expectations", "")
-    expectations_section = ""
-    if expectations:
-        expectations_section = f"\n\nExpected outcome:\n{expectations}"
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        expectations=todo.get("expectations", ""),
+        suite_info=suite_info,
+    )
+    prompt = context.build_prompt(PromptType.RED_VERIFY_EXISTING)
 
     # Track all responses as sets for intersection computation
     all_responses: list[set[str]] = [set(initial_tests)]
+    prev_intersection: set[str] | None = None
 
-    prompt = f"""For this task, verify whether comprehensive tests already exist:
+    def intersection_prompt_builder(iteration: int) -> str:
+        return prompt
 
-Task: {todo_text}
-{expectations_section}
-
-Available test suites:
-{suite_info}
-
-If tests already exist that cover this task, output a single line:
-TESTS_ALREADY_EXIST: path/to/test1.py, path/to/test2.py
-
-If tests need to be written or modified, proceed to write them."""
-
-    previous_intersection: set[str] | None = None
-    stable_count = 0
-
-    for i in range(STABILITY_ITERATIONS + 1):
-        returncode, stdout, stderr = run_claude_code(prompt)
-
-        if returncode != 0:
-            print_warning(f"Claude returned error: {stderr}", indent=1)
-            continue
+    def intersection_stability_checker(
+        iteration: int, stdout: str, pre_state: Any
+    ) -> StabilityResult:
+        nonlocal prev_intersection
 
         current_tests = extract_existing_tests(stdout)
 
         if not current_tests:
-            print_warning("Claude did not confirm existing tests, will write new tests", indent=1)
-            return []
+            print_warning(
+                "Claude did not confirm existing tests, will write new tests", indent=1
+            )
+            return StabilityResult(is_stable=False, should_fail=True, value=[])
 
         # Add this response to our collection
         all_responses.append(set(current_tests))
@@ -1428,28 +1963,38 @@ If tests need to be written or modified, proceed to write them."""
 
         # Check if intersection is empty - no common files across all responses
         if not current_intersection:
-            print_warning("No common tests across responses, will write new tests", indent=1)
-            return []
+            print_warning(
+                "No common tests across responses, will write new tests", indent=1
+            )
+            return StabilityResult(is_stable=False, should_fail=True, value=[])
 
         # Check if intersection is stable (same as previous iteration)
-        if current_intersection == previous_intersection:
-            stable_count += 1
-            print_info(f"Intersection stable ({stable_count}/{STABILITY_ITERATIONS}): {', '.join(sorted(current_intersection))}", indent=1)
-        else:
-            stable_count = 1
-            previous_intersection = current_intersection
-            print_info(f"Intersection: {', '.join(sorted(current_intersection))}", indent=1)
+        is_stable = current_intersection == prev_intersection
+        if not is_stable:
+            print_info(
+                f"Intersection: {', '.join(sorted(current_intersection))}", indent=1
+            )
+        prev_intersection = current_intersection
+        return StabilityResult(
+            is_stable=is_stable, should_fail=False, value=sorted(current_intersection)
+        )
 
-        if stable_count >= STABILITY_ITERATIONS:
-            result = sorted(current_intersection)
-            print_success(f"Existing tests confirmed: {', '.join(result)}")
-            return result
+    success, result = run_stability_loop(
+        prompt_builder=intersection_prompt_builder,
+        stability_checker=intersection_stability_checker,
+        max_iterations=STABILITY_ITERATIONS + 1,
+        phase_name="VERIFY_EXISTING",
+    )
 
-    print_warning("Failed to stabilize existing tests intersection, will write new tests")
+    if success and result:
+        print_success(f"Existing tests confirmed: {', '.join(result)}")
+        return result
     return []
 
 
-def implement_todo_no_tests(todo: dict, is_retry: bool = False) -> tuple[bool, str, str]:
+def implement_todo_no_tests(
+    todo: dict, is_retry: bool = False
+) -> tuple[bool, str, str]:
     """
     Run claude code to implement a non-testable todo.
 
@@ -1460,24 +2005,18 @@ def implement_todo_no_tests(todo: dict, is_retry: bool = False) -> tuple[bool, s
     Returns:
         Tuple of (success, stdout, stderr)
     """
-    todo_text = todo.get("todo", "")
-    expectations = todo.get("expectations", "")
-
-    expectations_section = ""
-    if expectations:
-        expectations_section = f"\n\nExpected outcome:\n{expectations}"
-
-    retry_section = ""
+    retry_context = ""
     if is_retry:
-        retry_section = "\n\nPrevious verification failed. Please fix outstanding issues."
+        retry_context = (
+            "\n\nPrevious verification failed. Please fix outstanding issues."
+        )
 
-    prompt = f"""Implement the following task:
-
-Task: {todo_text}
-{expectations_section}
-{retry_section}
-
-Implement the task completely."""
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        expectations=todo.get("expectations", ""),
+        retry_context=retry_context,
+    )
+    prompt = context.build_prompt(PromptType.GREEN_IMPLEMENT_NO_TESTS)
 
     returncode, stdout, stderr = run_claude_code(prompt)
 
@@ -1498,73 +2037,59 @@ def verify_completion_stable(todo: dict) -> bool:
     Returns:
         True if task verified complete (stable YES), False otherwise
     """
-    todo_text = todo.get("todo", "")
-    expectations = todo.get("expectations", "")
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        expectations=todo.get("expectations", ""),
+    )
+    prompt = context.build_prompt(PromptType.VERIFY_COMPLETION)
 
-    expectations_section = ""
-    if expectations:
-        expectations_section = f"\n\nExpected outcome:\n{expectations}"
+    def completion_prompt_builder(iteration: int) -> str:
+        print_info(f"Verification attempt {iteration}/{MAX_FIX_ATTEMPTS}...")
+        return prompt
 
-    prompt = f"""Review the current state of the files for this task:
-
-Task: {todo_text}
-{expectations_section}
-
-Is the task fully completed? Output ONLY 'YES' or 'NO'."""
-
-    consecutive_yes = 0
-
-    for i in range(MAX_FIX_ATTEMPTS):
-        print_info(f"Verification attempt {i + 1}/{MAX_FIX_ATTEMPTS}...")
-
-        returncode, stdout, stderr = run_claude_code(prompt)
-
-        if returncode != 0:
-            print_warning("Claude returned error during verification")
-            consecutive_yes = 0
-            continue
-
+    def completion_stability_checker(
+        iteration: int, stdout: str, pre_state: Any
+    ) -> StabilityResult:
         # Parse response - normalize and scan for YES/NO
         response = stdout.strip().upper()
         verified = None
-        for line in response.split('\n'):
+        for line in response.split("\n"):
             line = line.strip()
-            if line == 'YES':
+            if line == "YES":
                 verified = True
                 break
-            elif line == 'NO':
+            elif line == "NO":
                 verified = False
                 break
 
         if verified is None:
-            if response == 'YES':
+            if response == "YES":
                 verified = True
-            elif response == 'NO':
+            elif response == "NO":
                 verified = False
 
         if verified is None:
             print_warning(f"Unexpected response (not YES/NO): {stdout[:100]}")
-            consecutive_yes = 0
-            continue
+            return StabilityResult(is_stable=False, should_fail=False, value=None)
 
-        if verified:
-            consecutive_yes += 1
-            print_info(f"Verification: YES ({consecutive_yes}/{STABILITY_ITERATIONS})")
-            if consecutive_yes >= STABILITY_ITERATIONS:
-                print_success("Task verified complete (stable)")
-                return True
-        else:
+        if verified is False:
             print_warning("Verification: NO - task not complete")
-            return False  # Fail immediately on NO
+            return StabilityResult(is_stable=False, should_fail=True, value=False)
 
-    print_warning(f"Verification did not stabilize after {MAX_FIX_ATTEMPTS} attempts")
-    return False
+        # YES response - counts as stable
+        return StabilityResult(is_stable=True, should_fail=False, value=True)
+
+    success, _ = run_stability_loop(
+        prompt_builder=completion_prompt_builder,
+        stability_checker=completion_stability_checker,
+        max_iterations=MAX_FIX_ATTEMPTS,
+        phase_name="VERIFY_COMPLETE",
+    )
+    return success
 
 
 def implement_todo(
-    todo: dict,
-    suite_test_files: dict[str, list[str]],
-    all_test_artifacts: list[str]
+    todo: dict, suite_test_files: dict[str, list[str]], all_test_artifacts: list[str]
 ) -> tuple[bool, str, str]:
     """
     Run claude code to implement the todo.
@@ -1578,8 +2103,6 @@ def implement_todo(
     Returns:
         Tuple of (success, stdout, stderr)
     """
-    todo_text = todo.get("todo", "")
-
     # Build test locations string for prompt
     test_locations = []
     for suite_name, files in suite_test_files.items():
@@ -1594,16 +2117,11 @@ def implement_todo(
             extra_disallow.extend(get_disallowed_paths(suite))
     extra_disallow = list(set(extra_disallow))  # Deduplicate
 
-    prompt = f"""Implement the following task:
-
-Task: {todo_text}
-
-Tests have been created in the following locations:
-{test_locations_str}
-
-Do NOT modify any test files. Only implement the code to make ALL tests pass.
-
-Implement the minimal code needed to pass the tests."""
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        test_locations_str=test_locations_str,
+    )
+    prompt = context.build_prompt(PromptType.GREEN_IMPLEMENT)
 
     returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
 
@@ -1614,7 +2132,7 @@ def fix_failing_tests(
     todo: dict,
     suite_test_files: dict[str, list[str]],
     all_test_artifacts: list[str],
-    test_results: dict[str, tuple[bool, str, str]]
+    test_results: dict[str, tuple[bool, str, str]],
 ) -> tuple[bool, str, str]:
     """
     Run claude code to fix failing tests.
@@ -1628,8 +2146,6 @@ def fix_failing_tests(
     Returns:
         Tuple of (success, stdout, stderr)
     """
-    todo_text = todo.get("todo", "")
-
     # Build test locations string for prompt
     test_locations = []
     for suite_name, files in suite_test_files.items():
@@ -1654,17 +2170,12 @@ def fix_failing_tests(
             extra_disallow.extend(get_disallowed_paths(suite))
     extra_disallow = list(set(extra_disallow))  # Deduplicate
 
-    prompt = f"""The tests are failing. Fix the code to make them pass.
-
-Original task: {todo_text}
-
-Test files (DO NOT MODIFY):
-{test_locations_str}
-
-Test failures:
-{failure_output}
-
-Analyze the test failures and fix the implementation code to make ALL tests pass."""
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        test_locations_str=test_locations_str,
+        failure_output=failure_output,
+    )
+    prompt = context.build_prompt(PromptType.FIX_FAILING_TESTS)
 
     returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
 
@@ -1672,7 +2183,7 @@ Analyze the test failures and fix the implementation code to make ALL tests pass
 
 
 def run_post_green_commands(
-    suite_test_files: dict[str, list[str]]
+    suite_test_files: dict[str, list[str]],
 ) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
     """
     Run post_green_command for all affected suites.
@@ -1696,7 +2207,9 @@ def run_post_green_commands(
         if not post_green_cmd:
             continue
 
-        print_info(f"Running post_green_command for suite '{suite_name}': {post_green_cmd}")
+        print_info(
+            f"Running post_green_command for suite '{suite_name}': {post_green_cmd}"
+        )
 
         # post_green_command runs in PROJECT ROOT (not test_root)
         result = subprocess.run(
@@ -1705,7 +2218,7 @@ def run_post_green_commands(
             text=True,
             shell=True,
             cwd=os.getcwd(),
-            env=get_suite_env(suite)
+            env=get_suite_env(suite),
         )
 
         passed = result.returncode == 0
@@ -1730,7 +2243,7 @@ def fix_failing_build(
     todo: dict,
     suite_test_files: dict[str, list[str]],
     all_test_artifacts: list[str],
-    build_results: dict[str, tuple[bool, str, str]]
+    build_results: dict[str, tuple[bool, str, str]],
 ) -> tuple[bool, str, str]:
     """
     Run claude code to fix failing build/post_green_command.
@@ -1744,8 +2257,6 @@ def fix_failing_build(
     Returns:
         Tuple of (success, stdout, stderr)
     """
-    todo_text = todo.get("todo", "")
-
     # Build test locations string for prompt
     test_locations = []
     for suite_name, files in suite_test_files.items():
@@ -1772,21 +2283,12 @@ def fix_failing_build(
             extra_disallow.extend(get_disallowed_paths(suite))
     extra_disallow = list(set(extra_disallow))  # Deduplicate
 
-    prompt = f"""The build/validation command is failing. Fix the code to make it pass.
-
-Original task: {todo_text}
-
-Test files (DO NOT MODIFY):
-{test_locations_str}
-
-Build failures:
-{failure_output}
-
-Analyze the build failures and fix the implementation code. The tests are already passing,
-so ensure your fix does not break the tests. Common issues include:
-- TypeScript compilation errors (unused variables, type mismatches)
-- Linting errors
-- Build configuration issues"""
+    context = ContextWindow(
+        task=todo.get("todo", ""),
+        test_locations_str=test_locations_str,
+        failure_output=failure_output,
+    )
+    prompt = context.build_prompt(PromptType.FIX_FAILING_BUILD)
 
     returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
 
@@ -1812,7 +2314,9 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
 
     # Outer retry loop
     for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
-        print_phase("GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}")
+        print_phase(
+            "GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}"
+        )
 
         # Snapshot dirty files before implementation
         baseline_dirty = get_dirty_files()
@@ -1857,188 +2361,10 @@ def process_todo_no_tests(todo: dict, data: dict) -> bool:
     return False
 
 
-def process_todo(todo: dict, data: dict) -> bool:
-    """
-    Process a single todo through the TDD cycle.
-    Suites are detected automatically from the test files Claude creates.
-
-    Args:
-        todo: The todo item
-        data: The full todos data structure
-
-    Returns:
-        True if todo was completed successfully, False otherwise
-    """
-    todo_text = todo.get("todo", "")
-    print()
-    print_banner(f"TODO: {todo_text[:50]}{'...' if len(todo_text) > 50 else ''}")
-    print_info(f"Full task: {todo_text}")
-    print_info(f"Priority: {color(str(todo.get('priority', 0)), Colors.YELLOW, Colors.BOLD)}")
-
-    # Check if this todo is testable
-    testable = todo.get("testable", True)
-
-    if not testable:
-        # Non-testable task: use file-change verification instead of tests
-        return process_todo_no_tests(todo, data)
-
-    # Step 1: Write failing tests (Red) - Claude chooses which suite(s)
-    print_phase("RED", "Writing failing tests...")
-    suite_test_files, all_test_artifacts = write_test_for_todo(todo)
-
-    if not suite_test_files:
-        print_error("Failed to create tests, skipping todo")
-        return False
-
-    # Run setup for each affected suite
-    for suite_name in suite_test_files.keys():
-        suite = get_suite_by_name(suite_name)
-        if suite:
-            run_suite_setup(suite)
-
-    # Verify tests fail (as expected for Red phase)
-    all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
-    if all_passed:
-        print_warning("All tests passed before implementation (expected to fail)")
-        print_info("Proceeding to GREEN phase anyway")
-    else:
-        print_success("Tests fail as expected (Red phase complete)")
-
-    # Secondary loop: implement and verify
-    for secondary_iter in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
-        print_phase("GREEN", f"Implementation attempt {secondary_iter}/{MAX_IMPLEMENTATION_ATTEMPTS}")
-
-        # Snapshot dirty files before implementation so we only revert what we change
-        baseline_files = get_dirty_files()
-
-        # Step 2: Implement the todo (pass test_artifacts to lock test files)
-        success, _, _ = implement_todo(todo, suite_test_files, all_test_artifacts)
-
-        if not success:
-            print_error("Claude Code returned error during implementation")
-            if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
-                git_revert_changes(baseline_files)
-            else:
-                print_info("Keeping changes for inspection (final attempt)")
-            continue
-
-        # Step 3: Run tests for all affected suites
-        all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
-
-        if not all_passed:
-            # Tests failed, enter test fix loop
-            print_warning("Tests failed, entering fix loop...")
-
-            for fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
-                print_phase("FIX", f"Test fix attempt {fix_iter}/{MAX_FIX_ATTEMPTS}")
-
-                success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
-
-                if not success:
-                    print_error("Claude Code returned error during fix", indent=1)
-                    continue
-
-                # Run tests again for all affected suites
-                all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
-
-                if all_passed:
-                    print_success("All tests passed after fix!")
-                    break  # Exit test fix loop, proceed to post_green check
-
-            if not all_passed:
-                # Test fix loop exhausted without passing
-                print_warning("Test fix loop exhausted, reverting changes...")
-                if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
-                    git_revert_changes(baseline_files)
-                else:
-                    print_info("Keeping changes for inspection (final attempt)")
-                continue  # Retry GREEN phase
-
-        # Tests passed (either initially or after fixes)
-        print_success("All tests passed!")
-
-        # Step 4: Run post_green_commands for all affected suites
-        print_phase("BUILD", "Running post_green_commands...")
-        build_passed, build_results = run_post_green_commands(suite_test_files)
-
-        if build_passed:
-            # All checks passed - commit
-            try:
-                commit_hash = git_commit_and_tag(f"chief: {todo_text}")
-                git_push_with_tags()  # Non-fatal
-                todo["done_at_commit"] = commit_hash
-                save_todos(data)
-                git_commit_todos(todo_text)
-                return True
-            except subprocess.CalledProcessError as e:
-                print_error(f"Git commit failed: {e}")
-                git_revert_changes(baseline_files)
-                continue
-
-        # post_green_command failed, enter build fix loop
-        print_warning("post_green_command failed, entering build fix loop...")
-
-        for build_fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
-            print_phase("BUILD-FIX", f"Build fix attempt {build_fix_iter}/{MAX_FIX_ATTEMPTS}")
-
-            success, _, _ = fix_failing_build(todo, suite_test_files, all_test_artifacts, build_results)
-
-            if not success:
-                print_error("Claude Code returned error during build fix", indent=1)
-                continue
-
-            # Re-run tests first (fix might have broken them)
-            print_info("Re-running tests after build fix...")
-            all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
-
-            if not all_passed:
-                print_warning("Tests failed after build fix, need to fix tests too")
-                # Re-enter a mini test fix loop
-                for test_fix_iter in range(1, MAX_FIX_ATTEMPTS + 1):
-                    print_phase("FIX", f"Test fix attempt {test_fix_iter}/{MAX_FIX_ATTEMPTS} (during build fix)")
-                    success, _, _ = fix_failing_tests(todo, suite_test_files, all_test_artifacts, results)
-                    if not success:
-                        print_error("Claude Code returned error during test fix", indent=1)
-                        continue
-                    all_passed, results = run_tests_for_all_affected_suites(suite_test_files)
-                    if all_passed:
-                        break
-                if not all_passed:
-                    print_warning("Could not fix tests during build fix loop")
-                    continue  # Continue build fix loop
-
-            # Tests pass, now check post_green again
-            print_info("Re-running post_green_commands...")
-            build_passed, build_results = run_post_green_commands(suite_test_files)
-
-            if build_passed:
-                print_success("All tests and post_green_commands passed!")
-                try:
-                    commit_hash = git_commit_and_tag(f"chief: {todo_text}")
-                    git_push_with_tags()  # Non-fatal
-                    todo["done_at_commit"] = commit_hash
-                    save_todos(data)
-                    git_commit_todos(todo_text)
-                    return True
-                except subprocess.CalledProcessError as e:
-                    print_error(f"Git commit failed: {e}", indent=1)
-                    break  # Break build fix loop, will revert in secondary
-
-        # Build fix loop exhausted, revert and retry secondary
-        print_warning("Build fix loop exhausted, reverting changes...")
-        if secondary_iter < MAX_IMPLEMENTATION_ATTEMPTS:
-            git_revert_changes(baseline_files)
-        else:
-            print_info("Keeping changes for inspection (final attempt)")
-
-    # Secondary loop exhausted
-    print_error(f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts")
-    return False
-
-
 # ============================================================================
 # Retry Wrapper (handles transient failures by re-running)
 # ============================================================================
+
 
 def failures_same_reason(tail1: str, tail2: str) -> bool:
     """
@@ -2059,19 +2385,17 @@ Answer ONLY 'YES' or 'NO'."""
 
     log_prompt(prompt, "FAILURE COMPARISON PROMPT")
     result = subprocess.run(
-        ["claude", "-p", prompt, "--no-input"],
-        capture_output=True,
-        text=True
+        ["claude", "-p", prompt, "--no-input"], capture_output=True, text=True
     )
 
     response = result.stdout.strip().upper()
 
     # Parse response - look for YES/NO
-    for line in response.split('\n'):
+    for line in response.split("\n"):
         line = line.strip()
-        if line == 'YES':
+        if line == "YES":
             return True
-        elif line == 'NO':
+        elif line == "NO":
             return False
 
     # Unparseable - assume same reason, exit
@@ -2090,9 +2414,11 @@ def run_with_retry(max_retries: int = 10, tail_lines: int = 150) -> int:
     - Max retries reached
     """
     # Build command: same script with --no-retry to avoid infinite recursion
-    cmd = [sys.executable, __file__] + [
-        arg for arg in sys.argv[1:] if arg != "--no-retry"
-    ] + ["--no-retry"]
+    cmd = (
+        [sys.executable, __file__]
+        + [arg for arg in sys.argv[1:] if arg != "--no-retry"]
+        + ["--no-retry"]
+    )
 
     last_tail: str | None = None
 
@@ -2114,8 +2440,8 @@ def run_with_retry(max_retries: int = 10, tail_lines: int = 150) -> int:
             return 0
 
         # Get last N lines for comparison
-        lines = result.stdout.strip().split('\n')
-        current_tail = '\n'.join(lines[-tail_lines:])
+        lines = result.stdout.strip().split("\n")
+        current_tail = "\n".join(lines[-tail_lines:])
 
         # Check if same failure reason as last run
         if last_tail is not None:
@@ -2170,10 +2496,14 @@ def main():
     if args.test_suite:
         return test_suite_config(args.test_suite)
 
-    print_info(f"Loaded {color(str(len(CONFIG['suites'])), Colors.YELLOW, Colors.BOLD)} test suite(s):")
+    print_info(
+        f"Loaded {color(str(len(CONFIG['suites'])), Colors.YELLOW, Colors.BOLD)} test suite(s):"
+    )
     for suite in CONFIG["suites"]:
-        print(f"  {color('•', Colors.CYAN)} {color(suite['name'], Colors.MAGENTA, Colors.BOLD)}: "
-              f"{suite['language']}/{suite['framework']} (test_root: {suite['test_root']})")
+        print(
+            f"  {color('•', Colors.CYAN)} {color(suite['name'], Colors.MAGENTA, Colors.BOLD)}: "
+            f"{suite['language']}/{suite['framework']} (test_root: {suite['test_root']})"
+        )
     print()
 
     # Validate suite environments before processing
@@ -2188,8 +2518,10 @@ def main():
 
     pending_count = len([t for t in data["todos"] if t.get("done_at_commit") is None])
     total_count = len(data["todos"])
-    print_info(f"Loaded {color(str(total_count), Colors.YELLOW)} todos "
-               f"({color(str(pending_count), Colors.BRIGHT_GREEN, Colors.BOLD)} pending)")
+    print_info(
+        f"Loaded {color(str(total_count), Colors.YELLOW)} todos "
+        f"({color(str(pending_count), Colors.BRIGHT_GREEN, Colors.BOLD)} pending)"
+    )
 
     if pending_count == 0:
         print()
@@ -2209,7 +2541,8 @@ def main():
             print_success(f"Completed {completed_count} todo(s) this session")
             break
 
-        success = process_todo(todo, data)
+        processor = TodoProcessor(todo, data)
+        success = processor.process()
 
         if not success:
             print()
