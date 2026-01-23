@@ -938,7 +938,7 @@ def get_dirty_files() -> set[str]:
         text=True
     )
     files = set()
-    for line in result.stdout.strip().split("\n"):
+    for line in result.stdout.rstrip("\n").split("\n"):
         if line:
             # Format is "XY filename" or "XY filename -> newname" for renames
             parts = line[3:].split(" -> ")
@@ -1027,7 +1027,7 @@ def git_get_status_snapshot() -> dict[str, str]:
         cwd=os.getcwd()
     )
     snapshot = {}
-    for line in result.stdout.strip().split("\n"):
+    for line in result.stdout.rstrip("\n").split("\n"):
         if not line:
             continue
         status = line[:2]
