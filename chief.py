@@ -1054,128 +1054,185 @@ def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
     return passed, result.stdout, result.stderr
 
 
-def git_commit_and_tag(message: str) -> str:
-    """
-    Commit changes and create a tag (does not push).
+class GitOperations:
+    """Collection of git-related operations."""
 
-    Returns:
-        The commit hash
+    @staticmethod
+    def commit_and_tag(message: str) -> str:
+        """
+        Commit changes and create a tag (does not push).
 
-    Raises:
-        subprocess.CalledProcessError if commit fails
-    """
-    # Stage all changes
-    subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
+        Returns:
+            The commit hash
 
-    # Commit
-    subprocess.run(["git", "commit", "-m", message], check=True, capture_output=True)
+        Raises:
+            subprocess.CalledProcessError if commit fails
+        """
+        # Stage all changes
+        subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
 
-    # Get commit hash
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    )
-    commit_hash = result.stdout.strip()
+        # Commit
+        subprocess.run(["git", "commit", "-m", message], check=True, capture_output=True)
 
-    # Create tag with timestamp
-    tag_name = f"chief-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    subprocess.run(["git", "tag", tag_name], check=True, capture_output=True)
-
-    print_success(f"Committed: {commit_hash[:8]} (tag: {tag_name})")
-    return commit_hash
-
-
-def git_push_with_tags() -> bool:
-    """
-    Push commits and tags to remote.
-
-    Returns:
-        True if push succeeded, False if failed (non-fatal)
-    """
-    if not AUTOPUSH:
-        print_info("Auto-push disabled, skipping push")
-        return True
-
-    try:
-        subprocess.run(["git", "push"], check=True, capture_output=True)
-        subprocess.run(["git", "push", "--tags"], check=True, capture_output=True)
-        print_success("Pushed to remote")
-        return True
-    except subprocess.CalledProcessError as e:
-        print_warning(f"Push failed (commit is saved locally): {e}")
-        return False
-
-
-def git_commit_todos(todo_text: str) -> None:
-    """Commit todos.json update after marking a todo as done."""
-    subprocess.run(["git", "add", "todos.json"], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", f"chief: mark done - {todo_text[:50]}"],
-        check=True,
-        capture_output=True,
-    )
-    # Push is non-fatal for todos commit
-    git_push_with_tags()
-
-
-def get_dirty_files() -> set[str]:
-    """Get set of currently modified, staged, or untracked files."""
-    result = subprocess.run(
-        ["git", "status", "--porcelain"], capture_output=True, text=True
-    )
-    files = set()
-    for line in result.stdout.rstrip("\n").split("\n"):
-        if line:
-            # Format is "XY filename" or "XY filename -> newname" for renames
-            parts = line[3:].split(" -> ")
-            files.add(parts[-1])  # Use the destination name for renames
-    return files
-
-
-def git_revert_changes(baseline_files: set[str] | None = None) -> None:
-    """Revert uncommitted changes made since baseline (or all except todos.json if no baseline)."""
-    print_warning("Reverting uncommitted changes...")
-
-    if baseline_files is None:
-        # Revert everything except todos.json (legacy behavior)
-        subprocess.run(
-            ["git", "checkout", "--", ".", ":!todos.json"], capture_output=True
+        # Get commit hash
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
         )
-        subprocess.run(
-            ["git", "clean", "-fd", "--exclude=todos.json"], capture_output=True
-        )
-        return
+        commit_hash = result.stdout.strip()
 
-    # Only revert files that weren't dirty before
-    current_files = get_dirty_files()
-    files_to_revert = current_files - baseline_files - {"todos.json"}
+        # Create tag with timestamp
+        tag_name = f"chief-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        subprocess.run(["git", "tag", tag_name], check=True, capture_output=True)
 
-    if not files_to_revert:
-        print_info("No new changes to revert")
-        return
+        print_success(f"Committed: {commit_hash[:8]} (tag: {tag_name})")
+        return commit_hash
 
-    # Separate tracked (checkout) vs untracked (clean) files
-    result = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        capture_output=True,
-        text=True,
-    )
-    untracked = (
-        set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
-    )
+    @staticmethod
+    def push_with_tags() -> bool:
+        """
+        Push commits and tags to remote.
 
-    tracked_to_revert = [f for f in files_to_revert if f not in untracked]
-    untracked_to_revert = [f for f in files_to_revert if f in untracked]
+        Returns:
+            True if push succeeded, False if failed (non-fatal)
+        """
+        if not AUTOPUSH:
+            print_info("Auto-push disabled, skipping push")
+            return True
 
-    if tracked_to_revert:
-        subprocess.run(
-            ["git", "checkout", "--"] + tracked_to_revert, capture_output=True
-        )
-
-    for f in untracked_to_revert:
         try:
-            Path(f).unlink(missing_ok=True)
-        except (OSError, IsADirectoryError):
-            subprocess.run(["rm", "-rf", f], capture_output=True)
+            subprocess.run(["git", "push"], check=True, capture_output=True)
+            subprocess.run(["git", "push", "--tags"], check=True, capture_output=True)
+            print_success("Pushed to remote")
+            return True
+        except subprocess.CalledProcessError as e:
+            print_warning(f"Push failed (commit is saved locally): {e}")
+            return False
+
+    @staticmethod
+    def commit_todos(todo_text: str) -> None:
+        """Commit todos.json update after marking a todo as done."""
+        subprocess.run(["git", "add", "todos.json"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"chief: mark done - {todo_text[:50]}"],
+            check=True,
+            capture_output=True,
+        )
+        # Push is non-fatal for todos commit
+        GitOperations.push_with_tags()
+
+    @staticmethod
+    def get_dirty_files() -> set[str]:
+        """Get set of currently modified, staged, or untracked files."""
+        result = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True
+        )
+        files = set()
+        for line in result.stdout.rstrip("\n").split("\n"):
+            if line:
+                # Format is "XY filename" or "XY filename -> newname" for renames
+                parts = line[3:].split(" -> ")
+                files.add(parts[-1])  # Use the destination name for renames
+        return files
+
+    @staticmethod
+    def revert_changes(baseline_files: set[str] | None = None) -> None:
+        """Revert uncommitted changes made since baseline (or all except todos.json if no baseline)."""
+        print_warning("Reverting uncommitted changes...")
+
+        if baseline_files is None:
+            # Revert everything except todos.json (legacy behavior)
+            subprocess.run(
+                ["git", "checkout", "--", ".", ":!todos.json"], capture_output=True
+            )
+            subprocess.run(
+                ["git", "clean", "-fd", "--exclude=todos.json"], capture_output=True
+            )
+            return
+
+        # Only revert files that weren't dirty before
+        current_files = GitOperations.get_dirty_files()
+        files_to_revert = current_files - baseline_files - {"todos.json"}
+
+        if not files_to_revert:
+            print_info("No new changes to revert")
+            return
+
+        # Separate tracked (checkout) vs untracked (clean) files
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True,
+            text=True,
+        )
+        untracked = (
+            set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+        )
+
+        tracked_to_revert = [f for f in files_to_revert if f not in untracked]
+        untracked_to_revert = [f for f in files_to_revert if f in untracked]
+
+        if tracked_to_revert:
+            subprocess.run(
+                ["git", "checkout", "--"] + tracked_to_revert, capture_output=True
+            )
+
+        for f in untracked_to_revert:
+            try:
+                Path(f).unlink(missing_ok=True)
+            except (OSError, IsADirectoryError):
+                subprocess.run(["rm", "-rf", f], capture_output=True)
+
+    @staticmethod
+    def get_status_snapshot() -> dict[str, str]:
+        """
+        Capture current git status as a snapshot of {filepath: status_code}.
+
+        Uses git status --porcelain=v1 for stable parseable output.
+
+        Returns:
+            Dict mapping file paths to their git status codes (e.g., 'M ', '??', 'A ')
+        """
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd(),
+        )
+        snapshot = {}
+        for line in result.stdout.rstrip("\n").split("\n"):
+            if not line:
+                continue
+            status = line[:2]
+            filepath = line[3:].strip()
+            if " -> " in filepath:
+                filepath = filepath.split(" -> ")[1]
+            snapshot[filepath] = status
+        return snapshot
+
+    @staticmethod
+    def detect_changed_files(baseline_snapshot: dict[str, str]) -> list[str]:
+        """
+        Detect files that have changed since the baseline snapshot.
+
+        A file is considered changed if:
+        - It's new in git status (wasn't in the baseline snapshot)
+        - OR its status code changed (e.g., from clean to modified)
+
+        Args:
+            baseline_snapshot: Dict from get_status_snapshot() captured before changes
+
+        Returns:
+            List of file paths that changed since the baseline
+        """
+        current_snapshot = GitOperations.get_status_snapshot()
+        changed_files = []
+
+        for filepath, status in current_snapshot.items():
+            # File is new to git status OR has different status than before
+            if filepath not in baseline_snapshot or baseline_snapshot[filepath] != status:
+                if Path(filepath).exists():
+                    changed_files.append(filepath)
+
+        return changed_files
 
 
 def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
@@ -1202,59 +1259,6 @@ def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
                 test_files.append(str(path))
 
     return test_files
-
-
-def git_get_status_snapshot() -> dict[str, str]:
-    """
-    Capture current git status as a snapshot of {filepath: status_code}.
-
-    Uses git status --porcelain=v1 for stable parseable output.
-
-    Returns:
-        Dict mapping file paths to their git status codes (e.g., 'M ', '??', 'A ')
-    """
-    result = subprocess.run(
-        ["git", "status", "--porcelain=v1"],
-        capture_output=True,
-        text=True,
-        cwd=os.getcwd(),
-    )
-    snapshot = {}
-    for line in result.stdout.rstrip("\n").split("\n"):
-        if not line:
-            continue
-        status = line[:2]
-        filepath = line[3:].strip()
-        if " -> " in filepath:
-            filepath = filepath.split(" -> ")[1]
-        snapshot[filepath] = status
-    return snapshot
-
-
-def git_detect_changed_files(baseline_snapshot: dict[str, str]) -> list[str]:
-    """
-    Detect files that have changed since the baseline snapshot.
-
-    A file is considered changed if:
-    - It's new in git status (wasn't in the baseline snapshot)
-    - OR its status code changed (e.g., from clean to modified)
-
-    Args:
-        baseline_snapshot: Dict from git_get_status_snapshot() captured before changes
-
-    Returns:
-        List of file paths that changed since the baseline
-    """
-    current_snapshot = git_get_status_snapshot()
-    changed_files = []
-
-    for filepath, status in current_snapshot.items():
-        # File is new to git status OR has different status than before
-        if filepath not in baseline_snapshot or baseline_snapshot[filepath] != status:
-            if Path(filepath).exists():
-                changed_files.append(filepath)
-
-    return changed_files
 
 
 def filter_test_files(files: list[str], suite: dict) -> list[str]:
@@ -1506,7 +1510,7 @@ class TodoProcessor:
 
         # === GREEN + BUILD PHASES with retry ===
         for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
-            self.baseline_files = get_dirty_files()
+            self.baseline_files = GitOperations.get_dirty_files()
 
             if self._run_green_phase(attempt):
                 if self._run_build_phase():
@@ -1714,27 +1718,79 @@ class TodoProcessor:
         """Revert changes unless this was the final attempt."""
         if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
             print_warning("Reverting changes...")
-            git_revert_changes(self.baseline_files)
+            GitOperations.revert_changes(self.baseline_files)
         else:
             print_info("Keeping changes for inspection (final attempt)")
 
     def _commit(self) -> bool:
         """Git commit and tag on success."""
         try:
-            commit_hash = git_commit_and_tag(f"chief: {self.todo_text}")
-            git_push_with_tags()  # Non-fatal
+            commit_hash = GitOperations.commit_and_tag(f"chief: {self.todo_text}")
+            GitOperations.push_with_tags()  # Non-fatal
             self.todo["done_at_commit"] = commit_hash
             save_todos(self.data)
-            git_commit_todos(self.todo_text)
+            GitOperations.commit_todos(self.todo_text)
             return True
         except subprocess.CalledProcessError as e:
             print_error(f"Git commit failed: {e}")
-            git_revert_changes(self.baseline_files)
+            GitOperations.revert_changes(self.baseline_files)
             return False
 
     def _process_no_tests(self) -> bool:
-        """Process a non-testable todo using semantic verification."""
-        return process_todo_no_tests(self.todo, self.data)
+        """
+        Process a non-testable todo using semantic verification.
+
+        Instead of TDD, this:
+        1. Has Claude implement the task
+        2. Verifies completion via semantic review with stability check
+        """
+        # Outer retry loop
+        for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
+            print_phase(
+                "GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}"
+            )
+
+            # Snapshot dirty files before implementation
+            baseline_dirty = GitOperations.get_dirty_files()
+
+            # Step A: Implementation (with retry message on attempt 2+)
+            success, _, _ = implement_todo_no_tests(self.todo, is_retry=(attempt > 1))
+
+            if not success:
+                print_error("Claude Code returned error during implementation")
+                if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
+                    GitOperations.revert_changes(baseline_dirty)
+                else:
+                    print_info("Keeping changes for inspection (final attempt)")
+                continue
+
+            # Step B: Verification
+            print_phase("VERIFY", f"Semantic verification (attempt {attempt})")
+
+            # Step C: Decision
+            if verify_completion_stable(self.todo):
+                # Verified complete - commit and mark done
+                try:
+                    commit_hash = GitOperations.commit_and_tag(f"chief: {self.todo_text}")
+                    GitOperations.push_with_tags()  # Non-fatal
+                    self.todo["done_at_commit"] = commit_hash
+                    save_todos(self.data)
+                    GitOperations.commit_todos(self.todo_text)
+                    return True
+                except subprocess.CalledProcessError as e:
+                    print_error(f"Git operation failed: {e}")
+                    GitOperations.revert_changes(baseline_dirty)
+                    continue
+            else:
+                # Verification failed
+                print_warning("Semantic verification failed, will retry implementation...")
+                if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
+                    GitOperations.revert_changes(baseline_dirty)
+                else:
+                    print_info("Keeping changes for inspection (final attempt)")
+
+        print_error(f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts")
+        return False
 
 
 def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
@@ -1769,7 +1825,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
     prompt = context.build_prompt(PromptType.RED_WRITE_TESTS)
 
     # Capture git baseline before RED phase
-    baseline_snapshot = git_get_status_snapshot()
+    baseline_snapshot = GitOperations.get_status_snapshot()
 
     returncode, stdout, stderr = run_claude_code(prompt)
 
@@ -1800,7 +1856,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
 
     if not verified_existing:
         # Detect new/modified files via git and map to suites
-        changed_files = git_detect_changed_files(baseline_snapshot)
+        changed_files = GitOperations.detect_changed_files(baseline_snapshot)
         suite_test_files = filter_test_files_all_suites(changed_files)
 
         # Flatten all test artifacts for locking
@@ -2293,72 +2349,6 @@ def fix_failing_build(
     returncode, stdout, stderr = run_claude_code(prompt, disallow_paths=extra_disallow)
 
     return returncode == 0, stdout, stderr
-
-
-def process_todo_no_tests(todo: dict, data: dict) -> bool:
-    """
-    Process a non-testable todo using semantic verification.
-
-    Instead of TDD, this:
-    1. Has Claude implement the task
-    2. Verifies completion via semantic review with stability check
-
-    Args:
-        todo: The todo item
-        data: The full todos data structure
-
-    Returns:
-        True if todo was completed successfully, False otherwise
-    """
-    todo_text = todo.get("todo", "")
-
-    # Outer retry loop
-    for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
-        print_phase(
-            "GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}"
-        )
-
-        # Snapshot dirty files before implementation
-        baseline_dirty = get_dirty_files()
-
-        # Step A: Implementation (with retry message on attempt 2+)
-        success, _, _ = implement_todo_no_tests(todo, is_retry=(attempt > 1))
-
-        if not success:
-            print_error("Claude Code returned error during implementation")
-            if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
-                git_revert_changes(baseline_dirty)
-            else:
-                print_info("Keeping changes for inspection (final attempt)")
-            continue
-
-        # Step B: Verification
-        print_phase("VERIFY", f"Semantic verification (attempt {attempt})")
-
-        # Step C: Decision
-        if verify_completion_stable(todo):
-            # Verified complete - commit and mark done
-            try:
-                commit_hash = git_commit_and_tag(f"chief: {todo_text}")
-                git_push_with_tags()  # Non-fatal
-                todo["done_at_commit"] = commit_hash
-                save_todos(data)
-                git_commit_todos(todo_text)
-                return True
-            except subprocess.CalledProcessError as e:
-                print_error(f"Git operation failed: {e}")
-                git_revert_changes(baseline_dirty)
-                continue
-        else:
-            # Verification failed
-            print_warning("Semantic verification failed, will retry implementation...")
-            if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
-                git_revert_changes(baseline_dirty)
-            else:
-                print_info("Keeping changes for inspection (final attempt)")
-
-    print_error(f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts")
-    return False
 
 
 # ============================================================================

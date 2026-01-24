@@ -4,14 +4,14 @@ from unittest.mock import MagicMock
 
 
 class TestGetDirtyFiles:
-    """Tests for get_dirty_files() - git porcelain output parsing."""
+    """Tests for GitOperations.get_dirty_files() - git porcelain output parsing."""
 
     def test_modified_file_is_dirty(self, mock_subprocess):
         """Modified file ( M) is included in dirty files."""
         import chief
         mock_subprocess.return_value = MagicMock(stdout=" M src/module.py\n")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert "src/module.py" in result
 
@@ -20,7 +20,7 @@ class TestGetDirtyFiles:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="?? new_file.py\n")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert "new_file.py" in result
 
@@ -29,7 +29,7 @@ class TestGetDirtyFiles:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="A  staged.py\n")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert "staged.py" in result
 
@@ -38,7 +38,7 @@ class TestGetDirtyFiles:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="M  modified_staged.py\n")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert "modified_staged.py" in result
 
@@ -47,7 +47,7 @@ class TestGetDirtyFiles:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="D  deleted.py\n")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert "deleted.py" in result
 
@@ -56,7 +56,7 @@ class TestGetDirtyFiles:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="R  old_name.py -> new_name.py\n")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert "new_name.py" in result
         assert "old_name.py" not in result
@@ -66,7 +66,7 @@ class TestGetDirtyFiles:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="")
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert result == set()
 
@@ -77,7 +77,7 @@ class TestGetDirtyFiles:
             stdout=" M modified.py\n?? untracked.py\nA  added.py\nD  deleted.py\n"
         )
 
-        result = chief.get_dirty_files()
+        result = chief.GitOperations.get_dirty_files()
 
         assert len(result) == 4
         assert "modified.py" in result
@@ -87,7 +87,7 @@ class TestGetDirtyFiles:
 
 
 class TestGitGetStatusSnapshot:
-    """Tests for git_get_status_snapshot() - returns dict of file -> status."""
+    """Tests for GitOperations.get_status_snapshot() - returns dict of file -> status."""
 
     def test_returns_dict_of_status_codes(self, mock_subprocess):
         """Returns dict mapping filepath to status code."""
@@ -96,7 +96,7 @@ class TestGitGetStatusSnapshot:
             stdout=" M src/module.py\n?? new.py\nA  added.py\n"
         )
 
-        result = chief.git_get_status_snapshot()
+        result = chief.GitOperations.get_status_snapshot()
 
         assert result["src/module.py"] == " M"
         assert result["new.py"] == "??"
@@ -107,7 +107,7 @@ class TestGitGetStatusSnapshot:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="R  old.py -> new.py\n")
 
-        result = chief.git_get_status_snapshot()
+        result = chief.GitOperations.get_status_snapshot()
 
         assert "new.py" in result
         assert "old.py" not in result
@@ -117,13 +117,13 @@ class TestGitGetStatusSnapshot:
         import chief
         mock_subprocess.return_value = MagicMock(stdout="")
 
-        result = chief.git_get_status_snapshot()
+        result = chief.GitOperations.get_status_snapshot()
 
         assert result == {}
 
 
 class TestGitDetectChangedFiles:
-    """Tests for git_detect_changed_files() - change detection vs baseline."""
+    """Tests for GitOperations.detect_changed_files() - change detection vs baseline."""
 
     def test_new_file_detected(self, mock_subprocess, tmp_path, monkeypatch):
         """File new to git status (not in baseline) is detected as changed."""
@@ -136,7 +136,7 @@ class TestGitDetectChangedFiles:
         mock_subprocess.return_value = MagicMock(stdout="?? new.py\n")
 
         baseline = {}  # Empty baseline
-        result = chief.git_detect_changed_files(baseline)
+        result = chief.GitOperations.detect_changed_files(baseline)
 
         assert "new.py" in result
 
@@ -150,7 +150,7 @@ class TestGitDetectChangedFiles:
         mock_subprocess.return_value = MagicMock(stdout=" M file.py\n")
 
         baseline = {"file.py": "??"}  # Was untracked, now modified
-        result = chief.git_detect_changed_files(baseline)
+        result = chief.GitOperations.detect_changed_files(baseline)
 
         assert "file.py" in result
 
@@ -164,7 +164,7 @@ class TestGitDetectChangedFiles:
         mock_subprocess.return_value = MagicMock(stdout=" M file.py\n")
 
         baseline = {"file.py": " M"}  # Same status
-        result = chief.git_detect_changed_files(baseline)
+        result = chief.GitOperations.detect_changed_files(baseline)
 
         assert "file.py" not in result
 
@@ -177,6 +177,6 @@ class TestGitDetectChangedFiles:
         mock_subprocess.return_value = MagicMock(stdout="?? ghost.py\n")
 
         baseline = {}
-        result = chief.git_detect_changed_files(baseline)
+        result = chief.GitOperations.detect_changed_files(baseline)
 
         assert "ghost.py" not in result
