@@ -7,44 +7,74 @@ This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralp
 
 ## How It Works
 
-```
-    +------------------+
-    |    todos.json    |  <-- Your task backlog
-    +--------+---------+
-             |
-             v
-    +------------------+
-    |      Chief       |  <-- Orchestrates the cycle
-    +--------+---------+
-             |
-    +--------v---------+
-    |                  |
-    |   RED PHASE      |  Write failing tests
-    |   (Claude Code)  |
-    |                  |
-    +--------+---------+
-             |
-             v
-    +------------------+
-    |   Verify Fails   |  <-- Tests MUST fail
-    +--------+---------+
-             |
-    +--------v---------+
-    |                  |
-    |  GREEN PHASE     |  Implement to pass
-    |  (Claude Code)   |
-    |                  |
-    +--------+---------+
-             |
-             v
-    +------------------+
-    |   Verify Passes  |  <-- Tests MUST pass
-    +--------+---------+
-             |
-             v
-    +------------------+
-    |  Git Commit/Tag  |  <-- Auto-commit on success
-    +------------------+
+```mermaid
+flowchart TB
+    todos["todos.json"]
+    testable{testable?}
+    todos --> testable
+
+    subgraph RedPhase["RED PHASE"]
+        direction TB
+        red_claude["Claude Code"]
+        run_red_tests["Run Tests"]
+        tests_fail{Fail?}
+        refine_claude["Claude Code"]
+
+        red_claude --> run_red_tests
+        run_red_tests --> tests_fail
+        tests_fail -->|"no"| refine_claude
+        refine_claude --> run_red_tests
+    end
+
+    subgraph GreenPhase["GREEN PHASE"]
+        direction TB
+        green_claude["Claude Code"]
+        run_green_tests["Run Tests"]
+        tests_pass{Pass?}
+        fix_claude["Claude Code"]
+        run_build["post_green_commands"]
+        build_pass{Pass?}
+        fix_build_claude["Claude Code"]
+        retest["Run Tests"]
+        retest_pass{Pass?}
+
+        green_claude --> run_green_tests
+        run_green_tests --> tests_pass
+        tests_pass -->|"no"| fix_claude
+        fix_claude --> run_green_tests
+        tests_pass -->|"yes"| run_build
+        run_build --> build_pass
+        build_pass -->|"no"| fix_build_claude
+        fix_build_claude --> retest
+        retest --> retest_pass
+        retest_pass -->|"no"| fix_claude
+        retest_pass -->|"yes"| run_build
+    end
+
+    subgraph NonTestable["NON-TESTABLE PATH"]
+        direction TB
+        impl_claude["Claude Code"]
+        verify_claude["Claude Code"]
+        verified{YES 2x?}
+
+        impl_claude --> verify_claude
+        verify_claude --> verified
+        verified -->|"no"| impl_claude
+    end
+
+    commit["Git Commit + Tag"]
+
+    testable -->|"yes<br/>RED_WRITE_TESTS<br/>(task, expectations, suite_info)"| red_claude
+    testable -->|"no<br/>GREEN_IMPLEMENT_NO_TESTS<br/>(task, expectations, retry_context)"| impl_claude
+
+    tests_fail -->|"yes<br/>GREEN_IMPLEMENT<br/>(task, test_locations)"| green_claude
+    build_pass -->|"yes"| commit
+    verified -->|"yes"| commit
+
+    red_claude -.->|"RED_REFINE_TESTS<br/>(task, expectations, file_list)"| refine_claude
+    fix_claude -.->|"FIX_FAILING_TESTS<br/>(task, test_locations, failure_output)"| run_green_tests
+    fix_build_claude -.->|"FIX_FAILING_BUILD<br/>(task, test_locations, failure_output)"| retest
+    verify_claude -.->|"VERIFY_COMPLETION<br/>(task, expectations)"| verified
 ```
 ## ⚠️ Potential Data Loss Warning
 
