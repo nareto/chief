@@ -179,14 +179,8 @@ MAX_FIX_ATTEMPTS = 6
 MAX_TEST_REFINEMENT_ITERATIONS = 6
 STABILITY_ITERATIONS = 2  # Times Claude must give consistent answer before accepting
 
-# Global config loaded at startup
-CONFIG: dict = {}
-# Track which suites have had their setup run
-SETUP_COMPLETED: set[str] = set()
 # Auto-push commits to remote (can be disabled with --no-autopush)
 AUTOPUSH: bool = True
-# Log file for verbose output (console shows essentials only)
-LOG_FILE: Optional[TextIO] = None
 
 
 # ============================================================================
@@ -217,151 +211,218 @@ class Colors:
     BRIGHT_CYAN = "\033[96m"
 
 
+class Logger:
+    """Centralized logging and output formatting."""
+
+    _log_file: Optional[TextIO] = None
+
+    @classmethod
+    def set_log_file(cls, log_file: Optional[TextIO]) -> None:
+        """Set the log file for verbose output."""
+        cls._log_file = log_file
+
+    @staticmethod
+    def color(text: str, *codes: str) -> str:
+        """Wrap text with ANSI color codes."""
+        if not sys.stdout.isatty():
+            return text  # No colors if not a terminal
+        return "".join(codes) + text + Colors.RESET
+
+    @staticmethod
+    def strip_ansi(text: str) -> str:
+        """Remove ANSI escape codes from text."""
+        import re
+        return re.sub(r"\033\[[0-9;]*m", "", text)
+
+    @staticmethod
+    def timestamp() -> str:
+        """Return current timestamp in HH:MM:SS format for log entries."""
+        return datetime.now().strftime("%H:%M:%S")
+
+    @classmethod
+    def write(cls, text: str) -> None:
+        """Write text to log file (without ANSI codes)."""
+        if cls._log_file:
+            cls._log_file.write(cls.strip_ansi(text))
+            cls._log_file.flush()
+
+    @classmethod
+    def banner(cls, text: str, char: str = "=", width: int = 60) -> None:
+        """Print a prominent banner."""
+        line = char * width
+        print(cls.color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
+        print(cls.color(text.center(width), Colors.BRIGHT_CYAN, Colors.BOLD))
+        print(cls.color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
+        # Log with box-drawing characters for readability
+        ts = cls.timestamp()
+        cls.write(f"[{ts}] ┏" + "━" * 78 + "┓\n")
+        cls.write(f"[{ts}] ┃" + text.center(78) + "┃\n")
+        cls.write(f"[{ts}] ┗" + "━" * 78 + "┛\n")
+
+    @classmethod
+    def phase(cls, phase: str, description: str) -> None:
+        """Print a TDD phase header (RED/GREEN/BUILD/REFINE/FIX)."""
+        phase_colors = {
+            "RED": Colors.BRIGHT_RED,
+            "GREEN": Colors.BRIGHT_GREEN,
+            "BUILD": Colors.BRIGHT_BLUE,
+            "BUILD-FIX": Colors.BRIGHT_BLUE,
+            "REFINE": Colors.BRIGHT_YELLOW,
+            "FIX": Colors.BRIGHT_MAGENTA,
+        }
+        phase_color = phase_colors.get(phase, Colors.CYAN)
+        print(
+            f"\n{cls.color(f'[{phase}]', phase_color, Colors.BOLD)} {cls.color(description, Colors.WHITE)}"
+        )
+        # Log with visual separator for phases
+        cls.write("\n")
+        cls.write("─" * 80 + "\n")
+        cls.write(f"[{cls.timestamp()}] ▶ [{phase}] {description}\n")
+        cls.write("─" * 80 + "\n")
+
+    @classmethod
+    def info(cls, msg: str, indent: int = 0) -> None:
+        """Print an informational message from the script."""
+        prefix = "  " * indent
+        print(f"{prefix}{cls.color('▸', Colors.CYAN)} {msg}")
+        cls.write(f"[{cls.timestamp()}] {prefix}> {msg}\n")
+
+    @classmethod
+    def success(cls, msg: str, indent: int = 0) -> None:
+        """Print a success message."""
+        prefix = "  " * indent
+        print(
+            f"{prefix}{cls.color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {cls.color(msg, Colors.GREEN)}"
+        )
+        cls.write(f"[{cls.timestamp()}] {prefix}[OK] {msg}\n")
+
+    @classmethod
+    def warning(cls, msg: str, indent: int = 0) -> None:
+        """Print a warning message."""
+        prefix = "  " * indent
+        print(
+            f"{prefix}{cls.color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {cls.color(msg, Colors.YELLOW)}"
+        )
+        cls.write(f"[{cls.timestamp()}] {prefix}[WARN] {msg}\n")
+
+    @classmethod
+    def error(cls, msg: str, indent: int = 0) -> None:
+        """Print an error message."""
+        prefix = "  " * indent
+        print(
+            f"{prefix}{cls.color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {cls.color(msg, Colors.RED)}"
+        )
+        cls.write(f"[{cls.timestamp()}] {prefix}[ERROR] {msg}\n")
+
+    @classmethod
+    def claude_start(cls) -> None:
+        """Print marker for start of Claude Code output (log only)."""
+        ts = cls.timestamp()
+        cls.write("\n")
+        cls.write(f"[{ts}] ╔" + "═" * 78 + "╗\n")
+        cls.write(f"[{ts}] ║" + " CLAUDE OUTPUT ".center(78) + "║\n")
+        cls.write(f"[{ts}] ╚" + "═" * 78 + "╝\n")
+        cls.write("\n")
+
+    @classmethod
+    def claude_end(cls) -> None:
+        """Print marker for end of Claude Code output (log only)."""
+        ts = cls.timestamp()
+        cls.write("\n")
+        cls.write(f"[{ts}] ╔" + "═" * 78 + "╗\n")
+        cls.write(f"[{ts}] ║" + " END CLAUDE OUTPUT ".center(78) + "║\n")
+        cls.write(f"[{ts}] ╚" + "═" * 78 + "╝\n")
+        cls.write("\n")
+
+    @classmethod
+    def section_divider(cls, label: str = "") -> None:
+        """Write a section divider to the log file for readability."""
+        if label:
+            # Centered label in divider
+            padding = (80 - len(label) - 4) // 2
+            line = "─" * padding + f"┤ {label} ├" + "─" * padding
+            # Ensure consistent width
+            if len(line) < 80:
+                line += "─" * (80 - len(line))
+        else:
+            line = "─" * 80
+        cls.write(f"\n{line}\n")
+
+    @classmethod
+    def prompt(cls, prompt_text: str, label: str = "PROMPT TO CLAUDE") -> None:
+        """Log a prompt being sent to Claude with clear visual demarcation."""
+        ts = cls.timestamp()
+        cls.write("\n")
+        cls.write(f"[{ts}] ┌" + "─" * 78 + "┐\n")
+        cls.write(f"[{ts}] │" + f" {label} ".center(78) + "│\n")
+        cls.write(f"[{ts}] ├" + "─" * 78 + "┤\n")
+        # Wrap each line to fit in box (74 chars content width)
+        for line in prompt_text.split("\n"):
+            if len(line) <= 74:
+                cls.write(f"[{ts}] │  {line.ljust(75)} │\n")
+            else:
+                wrapped_lines = textwrap.wrap(line, width=74)
+                for wrapped in wrapped_lines:
+                    cls.write(f"[{ts}] │  {wrapped.ljust(75)} │\n")
+        cls.write(f"[{ts}] └" + "─" * 78 + "┘\n")
+        cls.write("\n")
+
+
+# Convenience aliases for backward compatibility
 def color(text: str, *codes: str) -> str:
-    """Wrap text with ANSI color codes."""
-    if not sys.stdout.isatty():
-        return text  # No colors if not a terminal
-    return "".join(codes) + text + Colors.RESET
+    return Logger.color(text, *codes)
 
 
 def strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    import re
-
-    return re.sub(r"\033\[[0-9;]*m", "", text)
+    return Logger.strip_ansi(text)
 
 
 def timestamp() -> str:
-    """Return current timestamp in HH:MM:SS format for log entries."""
-    return datetime.now().strftime("%H:%M:%S")
+    return Logger.timestamp()
 
 
 def log_write(text: str) -> None:
-    """Write text to log file (without ANSI codes)."""
-    if LOG_FILE:
-        LOG_FILE.write(strip_ansi(text))
-        LOG_FILE.flush()
+    Logger.write(text)
 
 
 def print_banner(text: str, char: str = "=", width: int = 60) -> None:
-    """Print a prominent banner."""
-    line = char * width
-    print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
-    print(color(text.center(width), Colors.BRIGHT_CYAN, Colors.BOLD))
-    print(color(line, Colors.BRIGHT_CYAN, Colors.BOLD))
-    # Log with box-drawing characters for readability
-    ts = timestamp()
-    log_write(f"[{ts}] ┏" + "━" * 78 + "┓\n")
-    log_write(f"[{ts}] ┃" + text.center(78) + "┃\n")
-    log_write(f"[{ts}] ┗" + "━" * 78 + "┛\n")
+    Logger.banner(text, char, width)
 
 
 def print_phase(phase: str, description: str) -> None:
-    """Print a TDD phase header (RED/GREEN/BUILD/REFINE/FIX)."""
-    phase_colors = {
-        "RED": Colors.BRIGHT_RED,
-        "GREEN": Colors.BRIGHT_GREEN,
-        "BUILD": Colors.BRIGHT_BLUE,
-        "BUILD-FIX": Colors.BRIGHT_BLUE,
-        "REFINE": Colors.BRIGHT_YELLOW,
-        "FIX": Colors.BRIGHT_MAGENTA,
-    }
-    phase_color = phase_colors.get(phase, Colors.CYAN)
-    print(
-        f"\n{color(f'[{phase}]', phase_color, Colors.BOLD)} {color(description, Colors.WHITE)}"
-    )
-    # Log with visual separator for phases
-    log_write("\n")
-    log_write("─" * 80 + "\n")
-    log_write(f"[{timestamp()}] ▶ [{phase}] {description}\n")
-    log_write("─" * 80 + "\n")
+    Logger.phase(phase, description)
 
 
 def print_info(msg: str, indent: int = 0) -> None:
-    """Print an informational message from the script."""
-    prefix = "  " * indent
-    print(f"{prefix}{color('▸', Colors.CYAN)} {msg}")
-    log_write(f"[{timestamp()}] {prefix}> {msg}\n")
+    Logger.info(msg, indent)
 
 
 def print_success(msg: str, indent: int = 0) -> None:
-    """Print a success message."""
-    prefix = "  " * indent
-    print(
-        f"{prefix}{color('✓', Colors.BRIGHT_GREEN, Colors.BOLD)} {color(msg, Colors.GREEN)}"
-    )
-    log_write(f"[{timestamp()}] {prefix}[OK] {msg}\n")
+    Logger.success(msg, indent)
 
 
 def print_warning(msg: str, indent: int = 0) -> None:
-    """Print a warning message."""
-    prefix = "  " * indent
-    print(
-        f"{prefix}{color('⚠', Colors.BRIGHT_YELLOW, Colors.BOLD)} {color(msg, Colors.YELLOW)}"
-    )
-    log_write(f"[{timestamp()}] {prefix}[WARN] {msg}\n")
+    Logger.warning(msg, indent)
 
 
 def print_error(msg: str, indent: int = 0) -> None:
-    """Print an error message."""
-    prefix = "  " * indent
-    print(
-        f"{prefix}{color('✗', Colors.BRIGHT_RED, Colors.BOLD)} {color(msg, Colors.RED)}"
-    )
-    log_write(f"[{timestamp()}] {prefix}[ERROR] {msg}\n")
+    Logger.error(msg, indent)
 
 
 def print_claude_start() -> None:
-    """Print marker for start of Claude Code output (log only)."""
-    ts = timestamp()
-    log_write("\n")
-    log_write(f"[{ts}] ╔" + "═" * 78 + "╗\n")
-    log_write(f"[{ts}] ║" + " CLAUDE OUTPUT ".center(78) + "║\n")
-    log_write(f"[{ts}] ╚" + "═" * 78 + "╝\n")
-    log_write("\n")
+    Logger.claude_start()
 
 
 def print_claude_end() -> None:
-    """Print marker for end of Claude Code output (log only)."""
-    ts = timestamp()
-    log_write("\n")
-    log_write(f"[{ts}] ╔" + "═" * 78 + "╗\n")
-    log_write(f"[{ts}] ║" + " END CLAUDE OUTPUT ".center(78) + "║\n")
-    log_write(f"[{ts}] ╚" + "═" * 78 + "╝\n")
-    log_write("\n")
+    Logger.claude_end()
 
 
 def log_section_divider(label: str = "") -> None:
-    """Write a section divider to the log file for readability."""
-    if label:
-        # Centered label in divider
-        padding = (80 - len(label) - 4) // 2
-        line = "─" * padding + f"┤ {label} ├" + "─" * padding
-        # Ensure consistent width
-        if len(line) < 80:
-            line += "─" * (80 - len(line))
-    else:
-        line = "─" * 80
-    log_write(f"\n{line}\n")
+    Logger.section_divider(label)
 
 
 def log_prompt(prompt: str, label: str = "PROMPT TO CLAUDE") -> None:
-    """Log a prompt being sent to Claude with clear visual demarcation."""
-    ts = timestamp()
-    log_write("\n")
-    log_write(f"[{ts}] ┌" + "─" * 78 + "┐\n")
-    log_write(f"[{ts}] │" + f" {label} ".center(78) + "│\n")
-    log_write(f"[{ts}] ├" + "─" * 78 + "┤\n")
-    # Wrap each line to fit in box (74 chars content width)
-    for line in prompt.split("\n"):
-        if len(line) <= 74:
-            log_write(f"[{ts}] │  {line.ljust(75)} │\n")
-        else:
-            wrapped_lines = textwrap.wrap(line, width=74)
-            for wrapped in wrapped_lines:
-                log_write(f"[{ts}] │  {wrapped.ljust(75)} │\n")
-    log_write(f"[{ts}] └" + "─" * 78 + "┘\n")
-    log_write("\n")
+    Logger.prompt(prompt, label)
 
 
 def parse_args() -> argparse.Namespace:
@@ -392,171 +453,139 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config() -> dict:
-    """
-    Load configuration from chief.toml.
+class ConfigManager:
+    """Manages configuration loading and suite environment setup."""
 
-    Expected structure (multi-suite format):
-        [[suites]]
-        name = "backend"
-        language = "Python"
-        framework = "pytest"
-        test_root = "backend/"           # Working directory for test_init and test_command
-        test_command = "pytest {target} -v"
-        target_type = "file"
-        file_patterns = ["test_*.py", "*_test.py"]
-        disallow_write_globs = ["backend/tests/**"]
-        test_init = "pip install -r requirements.txt"  # Runs in test_root
-        test_setup = "docker compose up -d db"         # Runs in PROJECT ROOT
-        post_green_command = "docker compose build"    # Runs in PROJECT ROOT after tests pass
+    _config: dict = {}
+    _setup_completed: set[str] = set()
+    _file_path: str = CONFIG_FILE
 
-        [[suites]]
-        name = "frontend"
-        language = "TypeScript"
-        framework = "vitest"
-        test_root = "frontend/"
-        test_command = "npm test -- {target}"
-        target_type = "file"
-        file_patterns = ["*.test.ts", "*.spec.ts"]
-        disallow_write_globs = ["frontend/**/*.test.ts"]
+    @classmethod
+    def set_file_path(cls, path: str) -> None:
+        """Set the path to the config file."""
+        cls._file_path = path
 
-    Returns:
-        Configuration dictionary with 'suites' array
-    """
-    if not Path(CONFIG_FILE).exists():
-        print_error(f"{CONFIG_FILE} not found")
-        print_info("Please create a chief.toml configuration file.")
-        print()
-        print(color("Example chief.toml:", Colors.DIM))
-        print(color("[[suites]]", Colors.DIM))
-        print(color('name = "backend"', Colors.DIM))
-        print(color('language = "Python"', Colors.DIM))
-        print(color('framework = "pytest"', Colors.DIM))
-        print(color('test_root = "."', Colors.DIM))
-        print(color('test_command = "pytest {target} -v"', Colors.DIM))
-        print(color('target_type = "file"', Colors.DIM))
-        print(color('file_patterns = ["test_*.py", "*_test.py"]', Colors.DIM))
-        print(color('disallow_write_globs = ["tests/**", "test_*.py"]', Colors.DIM))
-        sys.exit(1)
+    @classmethod
+    def get_config(cls) -> dict:
+        """Get the loaded configuration."""
+        return cls._config
 
-    with open(CONFIG_FILE, "rb") as f:
-        config = tomllib.load(f)
+    @classmethod
+    def get_suites(cls) -> list[dict]:
+        """Get the list of test suites."""
+        return cls._config.get("suites", [])
 
-    # Validate suites array exists
-    if "suites" not in config or not config["suites"]:
-        print_error(f"{CONFIG_FILE} must contain at least one [[suites]] entry")
-        sys.exit(1)
+    @classmethod
+    def load(cls) -> dict:
+        """
+        Load configuration from chief.toml.
 
-    # Validate each suite
-    required_suite_keys = [
-        "name",
-        "language",
-        "framework",
-        "test_root",
-        "test_command",
-        "target_type",
-    ]
-    for i, suite in enumerate(config["suites"]):
-        missing = [k for k in required_suite_keys if k not in suite]
-        if missing:
-            print_error(f"Suite {i+1} missing required keys: {', '.join(missing)}")
+        Expected structure (multi-suite format):
+            [[suites]]
+            name = "backend"
+            language = "Python"
+            framework = "pytest"
+            test_root = "backend/"
+            test_command = "pytest {target} -v"
+            target_type = "file"
+            file_patterns = ["test_*.py", "*_test.py"]
+            disallow_write_globs = ["backend/tests/**"]
+            test_init = "pip install -r requirements.txt"
+            test_setup = "docker compose up -d db"
+            post_green_command = "docker compose build"
+
+        Returns:
+            Configuration dictionary with 'suites' array
+        """
+        if not Path(cls._file_path).exists():
+            Logger.error(f"{cls._file_path} not found")
+            Logger.info("Please create a chief.toml configuration file.")
+            print()
+            print(Logger.color("Example chief.toml:", Colors.DIM))
+            print(Logger.color("[[suites]]", Colors.DIM))
+            print(Logger.color('name = "backend"', Colors.DIM))
+            print(Logger.color('language = "Python"', Colors.DIM))
+            print(Logger.color('framework = "pytest"', Colors.DIM))
+            print(Logger.color('test_root = "."', Colors.DIM))
+            print(Logger.color('test_command = "pytest {target} -v"', Colors.DIM))
+            print(Logger.color('target_type = "file"', Colors.DIM))
+            print(Logger.color('file_patterns = ["test_*.py", "*_test.py"]', Colors.DIM))
+            print(Logger.color('disallow_write_globs = ["tests/**", "test_*.py"]', Colors.DIM))
             sys.exit(1)
 
-        # Set defaults for optional keys
-        suite.setdefault("default_target", ".")
-        suite.setdefault("file_patterns", [])
-        suite.setdefault("disallow_write_globs", [])
-        suite.setdefault(
-            "test_init", None
-        )  # One-time dev env setup (run in test_root if validation fails)
-        suite.setdefault(
-            "test_setup", None
-        )  # Pre-test setup (run in PROJECT ROOT once per suite)
-        suite.setdefault(
-            "post_green_command", None
-        )  # Post-test validation (run in PROJECT ROOT after tests pass)
-        suite.setdefault("env", {})  # Environment variables for all commands
+        with open(cls._file_path, "rb") as f:
+            config = tomllib.load(f)
 
-    return config
+        # Validate suites array exists
+        if "suites" not in config or not config["suites"]:
+            Logger.error(f"{cls._file_path} must contain at least one [[suites]] entry")
+            sys.exit(1)
 
-
-def get_suite_env(suite: dict) -> dict[str, str]:
-    """
-    Build environment dict for running suite commands.
-
-    Merges the current environment with suite-specific env vars.
-    Suite vars override existing environment vars.
-
-    Args:
-        suite: The suite configuration dict
-
-    Returns:
-        Environment dict to pass to subprocess
-    """
-    env = os.environ.copy()
-    suite_env = suite.get("env", {})
-    for key, value in suite_env.items():
-        env[key] = str(value)
-    return env
-
-
-def validate_suite_environments():
-    """
-    Validate that all test suite commands can execute.
-    If a suite fails validation and has a test_init command, run init and retry.
-    Exits with error if any suite fails validation after init attempt.
-    """
-    print_info("Validating test suite environments...")
-
-    for suite in CONFIG["suites"]:
-        name = suite["name"]
-        command = suite["test_command"]
-        init_cmd = suite.get("test_init")
-        suite_env = get_suite_env(suite)
-
-        # Build validation command - use --version as a quick check
-        if "{target}" in command:
-            validation_cmd = command.replace(
-                "{target}", "--version 2>/dev/null || true"
-            )
-        else:
-            validation_cmd = command
-
-        # First attempt (test_init and test_command run in test_root)
-        result = subprocess.run(
-            validation_cmd,
-            capture_output=True,
-            text=True,
-            shell=True,
-            cwd=suite.get("test_root") or os.getcwd(),
-            env=suite_env,
-            timeout=60,
-        )
-
-        # If validation fails and we have an init command, try running it
-        if result.returncode != 0 and init_cmd:
-            print_warning(f"Suite '{name}' validation failed, running test_init...")
-            print_info(f"  Init: {init_cmd}")
-
-            # test_init runs in test_root
-            init_result = subprocess.run(
-                init_cmd,
-                capture_output=True,
-                text=True,
-                shell=True,
-                cwd=suite.get("test_root") or os.getcwd(),
-                env=suite_env,
-            )
-            if init_result.stdout:
-                log_write(init_result.stdout)
-            if init_result.stderr:
-                log_write(init_result.stderr)
-
-            if init_result.returncode != 0:
-                print_error(f"Suite '{name}': test_init command failed")
+        # Validate each suite
+        required_suite_keys = [
+            "name",
+            "language",
+            "framework",
+            "test_root",
+            "test_command",
+            "target_type",
+        ]
+        for i, suite in enumerate(config["suites"]):
+            missing = [k for k in required_suite_keys if k not in suite]
+            if missing:
+                Logger.error(f"Suite {i+1} missing required keys: {', '.join(missing)}")
                 sys.exit(1)
 
-            # Retry validation
+            # Set defaults for optional keys
+            suite.setdefault("default_target", ".")
+            suite.setdefault("file_patterns", [])
+            suite.setdefault("disallow_write_globs", [])
+            suite.setdefault("test_init", None)
+            suite.setdefault("test_setup", None)
+            suite.setdefault("post_green_command", None)
+            suite.setdefault("env", {})
+
+        cls._config = config
+        return config
+
+    @classmethod
+    def get_suite_env(cls, suite: dict) -> dict[str, str]:
+        """
+        Build environment dict for running suite commands.
+
+        Merges the current environment with suite-specific env vars.
+        Suite vars override existing environment vars.
+        """
+        env = os.environ.copy()
+        suite_env = suite.get("env", {})
+        for key, value in suite_env.items():
+            env[key] = str(value)
+        return env
+
+    @classmethod
+    def validate_environments(cls) -> None:
+        """
+        Validate that all test suite commands can execute.
+        If a suite fails validation and has a test_init command, run init and retry.
+        Exits with error if any suite fails validation after init attempt.
+        """
+        Logger.info("Validating test suite environments...")
+
+        for suite in cls._config["suites"]:
+            name = suite["name"]
+            command = suite["test_command"]
+            init_cmd = suite.get("test_init")
+            suite_env = cls.get_suite_env(suite)
+
+            # Build validation command - use --version as a quick check
+            if "{target}" in command:
+                validation_cmd = command.replace(
+                    "{target}", "--version 2>/dev/null || true"
+                )
+            else:
+                validation_cmd = command
+
+            # First attempt (test_init and test_command run in test_root)
             result = subprocess.run(
                 validation_cmd,
                 capture_output=True,
@@ -567,384 +596,682 @@ def validate_suite_environments():
                 timeout=60,
             )
 
-            if result.returncode != 0:
-                print_error(f"Suite '{name}': still failing after test_init")
-                print_error(f"  Command: {validation_cmd}")
+            # If validation fails and we have an init command, try running it
+            if result.returncode != 0 and init_cmd:
+                Logger.warning(f"Suite '{name}' validation failed, running test_init...")
+                Logger.info(f"  Init: {init_cmd}")
+
+                # test_init runs in test_root
+                init_result = subprocess.run(
+                    init_cmd,
+                    capture_output=True,
+                    text=True,
+                    shell=True,
+                    cwd=suite.get("test_root") or os.getcwd(),
+                    env=suite_env,
+                )
+                if init_result.stdout:
+                    Logger.write(init_result.stdout)
+                if init_result.stderr:
+                    Logger.write(init_result.stderr)
+
+                if init_result.returncode != 0:
+                    Logger.error(f"Suite '{name}': test_init command failed")
+                    sys.exit(1)
+
+                # Retry validation
+                result = subprocess.run(
+                    validation_cmd,
+                    capture_output=True,
+                    text=True,
+                    shell=True,
+                    cwd=suite.get("test_root") or os.getcwd(),
+                    env=suite_env,
+                    timeout=60,
+                )
+
+                if result.returncode != 0:
+                    Logger.error(f"Suite '{name}': still failing after test_init")
+                    Logger.error(f"  Command: {validation_cmd}")
+                    if result.stderr:
+                        print(result.stderr)
+                    if result.stdout:
+                        print(result.stdout)
+                    sys.exit(1)
+            elif result.returncode != 0:
+                Logger.error(
+                    f"Suite '{name}': environment validation failed (no test_init command defined)"
+                )
+                Logger.error(f"  Command: {validation_cmd}")
                 if result.stderr:
                     print(result.stderr)
                 if result.stdout:
                     print(result.stdout)
                 sys.exit(1)
-        elif result.returncode != 0:
-            print_error(
-                f"Suite '{name}': environment validation failed (no test_init command defined)"
-            )
-            print_error(f"  Command: {validation_cmd}")
-            if result.stderr:
-                print(result.stderr)
-            if result.stdout:
-                print(result.stdout)
-            sys.exit(1)
 
-        print(f"  {color('✓', Colors.BRIGHT_GREEN)} {color(name, Colors.MAGENTA)}: OK")
+            print(f"  {Logger.color('✓', Colors.BRIGHT_GREEN)} {Logger.color(name, Colors.MAGENTA)}: OK")
 
-    print()
+        print()
 
+    @classmethod
+    def run_suite_setup(cls, suite: dict) -> None:
+        """
+        Run test_setup command for a suite (once before that suite's tests).
+        Tracks completion to avoid re-running for multiple todos in same suite.
+        Note: test_setup runs in PROJECT ROOT, not test_root.
+        """
+        name = suite["name"]
 
-def run_suite_setup(suite: dict) -> None:
-    """
-    Run test_setup command for a suite (once before that suite's tests).
-    Tracks completion to avoid re-running for multiple todos in same suite.
-    Note: test_setup runs in PROJECT ROOT, not test_root.
-    """
-    name = suite["name"]
+        # Skip if already set up
+        if name in cls._setup_completed:
+            return
 
-    # Skip if already set up
-    if name in SETUP_COMPLETED:
-        return
+        setup_cmd = suite.get("test_setup")
+        if not setup_cmd:
+            cls._setup_completed.add(name)
+            return
 
-    setup_cmd = suite.get("test_setup")
-    if not setup_cmd:
-        SETUP_COMPLETED.add(name)
-        return
+        Logger.info(f"Running test_setup for suite '{name}': {setup_cmd}")
 
-    print_info(f"Running test_setup for suite '{name}': {setup_cmd}")
-
-    # test_setup runs in PROJECT ROOT (not test_root)
-    result = subprocess.run(
-        setup_cmd,
-        capture_output=True,
-        text=True,
-        shell=True,
-        cwd=os.getcwd(),
-        env=get_suite_env(suite),
-    )
-    if result.stdout:
-        log_write(result.stdout)
-    if result.stderr:
-        log_write(result.stderr)
-
-    if result.returncode != 0:
-        print_error(f"test_setup failed for suite '{name}'")
-        sys.exit(1)
-
-    SETUP_COMPLETED.add(name)
-    print_success(f"test_setup complete for suite '{name}'")
-
-
-def test_suite_config(suite_name: str) -> int:
-    """
-    Test a suite's configuration by running test_setup and a test command.
-
-    Uses the same path stripping and cwd logic as run_tests() to verify
-    the configuration is correct.
-
-    Args:
-        suite_name: Name of the suite to test
-
-    Returns:
-        Exit code (0 for success, 1 for failure)
-    """
-    suite = get_suite_by_name(suite_name)
-    if not suite:
-        print_error(f"Suite '{suite_name}' not found")
-        print_info("Available suites:")
-        for s in CONFIG["suites"]:
-            print(f"  • {s['name']}")
-        return 1
-
-    print_banner(f"Testing suite: {suite_name}")
-    print()
-
-    # Show configuration
-    print_info("Configuration:")
-    print(f"  test_root: {color(suite.get('test_root', '.'), Colors.CYAN)}")
-    print(f"  test_command: {color(suite['test_command'], Colors.CYAN)}")
-    print(f"  default_target: {color(suite.get('default_target', '.'), Colors.CYAN)}")
-    print(
-        f"  strip_root_from_target: {color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}"
-    )
-    if suite.get("post_green_command"):
-        print(
-            f"  post_green_command: {color(suite['post_green_command'], Colors.CYAN)}"
-        )
-    print()
-
-    # Run test_setup if configured (runs in PROJECT ROOT)
-    setup_cmd = suite.get("test_setup")
-    if setup_cmd:
-        print_info(f"Running test_setup (in project root): {setup_cmd}")
+        # test_setup runs in PROJECT ROOT (not test_root)
         result = subprocess.run(
             setup_cmd,
             capture_output=True,
             text=True,
             shell=True,
             cwd=os.getcwd(),
-            env=get_suite_env(suite),
+            env=cls.get_suite_env(suite),
         )
         if result.stdout:
-            log_write(result.stdout)
+            Logger.write(result.stdout)
         if result.stderr:
-            log_write(result.stderr)
+            Logger.write(result.stderr)
+
         if result.returncode != 0:
-            print_error("test_setup failed")
+            Logger.error(f"test_setup failed for suite '{name}'")
+            sys.exit(1)
+
+        cls._setup_completed.add(name)
+        Logger.success(f"test_setup complete for suite '{name}'")
+
+
+# Convenience aliases for backward compatibility
+def load_config() -> dict:
+    return ConfigManager.load()
+
+
+def get_suite_env(suite: dict) -> dict[str, str]:
+    return ConfigManager.get_suite_env(suite)
+
+
+def validate_suite_environments() -> None:
+    ConfigManager.validate_environments()
+
+
+def run_suite_setup(suite: dict) -> None:
+    ConfigManager.run_suite_setup(suite)
+
+
+def test_suite_config(suite_name: str) -> int:
+    return TestRunner.test_suite_config(suite_name)
+
+
+class TodoManager:
+    """Manages todo CRUD operations for todos.json."""
+
+    _file_path: str = TODOS_FILE
+
+    @classmethod
+    def set_file_path(cls, path: str) -> None:
+        """Set the path to the todos file."""
+        cls._file_path = path
+
+    @classmethod
+    def load(cls) -> dict:
+        """Load todos from todos.json."""
+        if not Path(cls._file_path).exists():
+            Logger.error(f"{cls._file_path} not found")
+            sys.exit(1)
+
+        with open(cls._file_path, "r") as f:
+            return json.load(f)
+
+    @classmethod
+    def save(cls, data: dict) -> None:
+        """Save todos back to todos.json."""
+        with open(cls._file_path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    @classmethod
+    def clean_done(cls) -> int:
+        """
+        Remove completed todos from todos.json.
+
+        Removes all todos where done_at_commit is not null.
+
+        Returns:
+            Exit code (0 for success)
+        """
+        if not Path(cls._file_path).exists():
+            Logger.error(f"{cls._file_path} not found")
             return 1
-        print_success("test_setup complete")
-        print()
 
-    # Build test command using same logic as run_tests()
-    target = suite.get("default_target", ".")
-    command_template = suite["test_command"]
-    root = suite.get("test_root", "")
-    strip_root = suite.get("strip_root_from_target", True)
+        with open(cls._file_path, "r") as f:
+            data = json.load(f)
 
-    # Show the path transformation
-    print_info("Path resolution:")
-    print(f"  Original target: {color(target, Colors.CYAN)}")
+        if "todos" not in data:
+            Logger.error("todos.json must have a 'todos' array")
+            return 1
 
-    transformed_target = target
-    if strip_root and root and root != ".":
-        normalized_root = root if root.endswith("/") else root + "/"
-        if target.startswith(normalized_root):
-            transformed_target = target[len(normalized_root) :]
-            print(
-                f"  After stripping '{normalized_root}': {color(transformed_target, Colors.CYAN)}"
-            )
-        else:
-            print(f"  (target doesn't start with test_root, not stripped)")
+        original_count = len(data["todos"])
+        data["todos"] = [t for t in data["todos"] if t.get("done_at_commit") is None]
+        removed_count = original_count - len(data["todos"])
 
-    cwd = root or os.getcwd()
-    print(f"  Working directory: {color(cwd, Colors.CYAN)}")
+        if removed_count == 0:
+            Logger.info("No completed todos to remove")
+            return 0
 
-    # Build and show final command
-    if "{target}" in command_template:
-        test_command = command_template.format(target=transformed_target)
-    else:
-        test_command = command_template
+        with open(cls._file_path, "w") as f:
+            json.dump(data, f, indent=2)
 
-    print(f"  Final command: {color(test_command, Colors.YELLOW)}")
-    print()
-
-    # Run the test command (runs in test_root)
-    print_info("Running test_command...")
-    result = subprocess.run(
-        test_command,
-        capture_output=True,
-        text=True,
-        shell=True,
-        cwd=cwd,
-        env=get_suite_env(suite),
-    )
-    if result.stdout:
-        log_write(result.stdout)
-    if result.stderr:
-        log_write(result.stderr)
-
-    print()
-    if result.returncode == 0:
-        print_success(f"Suite '{suite_name}' configuration is valid")
+        Logger.success(f"Removed {removed_count} completed todo(s) from {cls._file_path}")
+        Logger.info(f"Remaining: {len(data['todos'])} pending todo(s)")
         return 0
-    else:
-        print_error(f"test_command failed with exit code {result.returncode}")
-        return 1
+
+    @classmethod
+    def get_next(cls, data: dict) -> Optional[dict]:
+        """Get the highest priority todo that hasn't been completed."""
+        pending = [t for t in data["todos"] if t.get("done_at_commit") is None]
+        if not pending:
+            return None
+        # Sort by priority descending (highest first)
+        pending.sort(key=lambda x: x.get("priority", 0), reverse=True)
+        return pending[0]
 
 
+# Convenience aliases for backward compatibility
 def load_todos() -> dict:
-    """Load todos from todos.json."""
-    if not Path(TODOS_FILE).exists():
-        print_error(f"{TODOS_FILE} not found")
-        sys.exit(1)
-
-    with open(TODOS_FILE, "r") as f:
-        return json.load(f)
+    return TodoManager.load()
 
 
 def save_todos(data: dict) -> None:
-    """Save todos back to todos.json."""
-    with open(TODOS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    TodoManager.save(data)
 
 
 def clean_done_todos() -> int:
-    """
-    Remove completed todos from todos.json.
-
-    Removes all todos where done_at_commit is not null.
-
-    Returns:
-        Exit code (0 for success)
-    """
-    if not Path(TODOS_FILE).exists():
-        print_error(f"{TODOS_FILE} not found")
-        return 1
-
-    with open(TODOS_FILE, "r") as f:
-        data = json.load(f)
-
-    if "todos" not in data:
-        print_error("todos.json must have a 'todos' array")
-        return 1
-
-    original_count = len(data["todos"])
-    data["todos"] = [t for t in data["todos"] if t.get("done_at_commit") is None]
-    removed_count = original_count - len(data["todos"])
-
-    if removed_count == 0:
-        print_info("No completed todos to remove")
-        return 0
-
-    with open(TODOS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-    print_success(f"Removed {removed_count} completed todo(s) from {TODOS_FILE}")
-    print_info(f"Remaining: {len(data['todos'])} pending todo(s)")
-    return 0
+    return TodoManager.clean_done()
 
 
 def get_next_todo(data: dict) -> Optional[dict]:
-    """Get the highest priority todo that hasn't been completed."""
-    pending = [t for t in data["todos"] if t.get("done_at_commit") is None]
-    if not pending:
+    return TodoManager.get_next(data)
+
+
+class SuiteManager:
+    """Manages test suite detection, filtering, and path operations."""
+
+    @classmethod
+    def detect_from_path(cls, file_path: str) -> Optional[dict]:
+        """
+        Determine which suite a file belongs to based on its path.
+
+        Args:
+            file_path: Path to a file
+
+        Returns:
+            The matching suite dict, or None if no match
+        """
+        for suite in ConfigManager.get_suites():
+            root = suite.get("test_root", "")
+            # Normalize: ensure root ends with / for prefix matching (unless empty or ".")
+            if root and root != "." and not root.endswith("/"):
+                root = root + "/"
+            # Check if file is under this root
+            if root == "." or root == "" or file_path.startswith(root):
+                return suite
         return None
-    # Sort by priority descending (highest first)
-    pending.sort(key=lambda x: x.get("priority", 0), reverse=True)
-    return pending[0]
+
+    @classmethod
+    def get_by_name(cls, name: str) -> Optional[dict]:
+        """Get suite configuration by name."""
+        for suite in ConfigManager.get_suites():
+            if suite["name"] == name:
+                return suite
+        return None
+
+    @classmethod
+    def filter_test_files_all_suites(cls, files: list[str]) -> dict[str, list[str]]:
+        """
+        Filter files to test files and group by suite.
+
+        Args:
+            files: List of file paths to check
+
+        Returns:
+            Dict mapping suite name -> list of test files for that suite
+        """
+        suite_test_files: dict[str, list[str]] = {}
+
+        for filepath in files:
+            # First, determine which suite this file belongs to based on path
+            suite = cls.detect_from_path(filepath)
+            if not suite:
+                continue
+
+            # Check if it's a test file for that suite
+            file_patterns = suite.get("file_patterns", [])
+            if not file_patterns:
+                continue
+
+            filename = Path(filepath).name
+            for pattern in file_patterns:
+                if fnmatch.fnmatch(filename, pattern):
+                    suite_name = suite["name"]
+                    if suite_name not in suite_test_files:
+                        suite_test_files[suite_name] = []
+                    suite_test_files[suite_name].append(filepath)
+                    break
+
+        return suite_test_files
+
+    @classmethod
+    def filter_test_files(cls, files: list[str], suite: dict) -> list[str]:
+        """
+        Filter a list of files to only include test files matching suite's patterns.
+
+        Args:
+            files: List of file paths
+            suite: The test suite configuration to use
+
+        Returns:
+            List of file paths matching test file patterns
+        """
+        file_patterns = suite.get("file_patterns", [])
+
+        if not file_patterns:
+            return []
+
+        test_files = []
+        for filepath in files:
+            filename = Path(filepath).name
+            for pattern in file_patterns:
+                if fnmatch.fnmatch(filename, pattern):
+                    test_files.append(filepath)
+                    break
+
+        return test_files
+
+    @classmethod
+    def get_all_disallowed_paths(cls) -> list[str]:
+        """
+        Get disallowed paths from ALL suites for multi-suite protection.
+
+        Returns:
+            Combined list of paths to protect from writes
+        """
+        all_paths = []
+        for suite in ConfigManager.get_suites():
+            all_paths.extend(cls.get_disallowed_paths(suite))
+        return list(set(all_paths))  # Deduplicate
+
+    @classmethod
+    def get_disallowed_paths(cls, suite: dict) -> list[str]:
+        """
+        Get list of paths to disallow writing to, based on suite's disallow_write_globs.
+        Expands globs to actual file paths that exist.
+
+        Args:
+            suite: The suite configuration dict
+        """
+        globs = suite.get("disallow_write_globs", [])
+        paths = []
+
+        for pattern in globs:
+            # Use glob to find matching files
+            if "**" in pattern or "*" in pattern:
+                matched = list(Path(".").glob(pattern))
+                paths.extend(str(p) for p in matched)
+            else:
+                # Literal path
+                if Path(pattern).exists():
+                    paths.append(pattern)
+
+        return paths
+
+    @classmethod
+    def get_target_type_description(cls, suite: dict) -> str:
+        """Get a human-readable description of what kind of test target to create."""
+        target_type = suite["target_type"]
+        language = suite["language"]
+        framework = suite["framework"]
+
+        descriptions = {
+            "file": f"Create a test file using {language} and {framework}.",
+            "package": f"Create tests in the appropriate package directory for {language}/{framework}.",
+            "project": f"Add tests to the project's test directory following {framework} conventions.",
+            "repo": f"Add tests following the repository's {framework} test structure.",
+        }
+
+        return descriptions.get(target_type, descriptions["file"])
 
 
+# Convenience aliases for backward compatibility
 def detect_suite_from_path(file_path: str) -> Optional[dict]:
-    """
-    Determine which suite a file belongs to based on its path.
-
-    Args:
-        file_path: Path to a file
-
-    Returns:
-        The matching suite dict, or None if no match
-    """
-    for suite in CONFIG["suites"]:
-        root = suite.get("test_root", "")
-        # Normalize: ensure root ends with / for prefix matching (unless empty or ".")
-        if root and root != "." and not root.endswith("/"):
-            root = root + "/"
-        # Check if file is under this root
-        if root == "." or root == "" or file_path.startswith(root):
-            return suite
-    return None
+    return SuiteManager.detect_from_path(file_path)
 
 
 def get_suite_by_name(name: str) -> Optional[dict]:
-    """Get suite configuration by name."""
-    for suite in CONFIG["suites"]:
-        if suite["name"] == name:
-            return suite
-    return None
+    return SuiteManager.get_by_name(name)
 
 
 def filter_test_files_all_suites(files: list[str]) -> dict[str, list[str]]:
-    """
-    Filter files to test files and group by suite.
+    return SuiteManager.filter_test_files_all_suites(files)
 
-    Args:
-        files: List of file paths to check
 
-    Returns:
-        Dict mapping suite name -> list of test files for that suite
-    """
-    suite_test_files: dict[str, list[str]] = {}
+class TestRunner:
+    """Manages test execution across suites."""
 
-    for filepath in files:
-        # First, determine which suite this file belongs to based on path
-        suite = detect_suite_from_path(filepath)
-        if not suite:
-            continue
+    @classmethod
+    def run_tests(cls, target: str, suite: dict) -> tuple[bool, str, str]:
+        """
+        Run tests on the specified target using the suite's test_command.
 
-        # Check if it's a test file for that suite
+        Args:
+            target: The test target (file, package, project, or repo path)
+            suite: The test suite configuration to use
+
+        Returns:
+            Tuple of (passed, stdout, stderr)
+        """
+        Logger.info(
+            f"Running tests: {Logger.color(target, Colors.WHITE, Colors.BOLD)} (suite: {suite['name']})"
+        )
+
+        command_template = suite["test_command"]
+
+        # Strip test_root prefix from target by default (configurable via strip_root_from_target)
+        strip_root = suite.get("strip_root_from_target", True)
+        root = suite.get("test_root", "")
+
+        transformed_target = target
+        if strip_root and root and root != ".":
+            # Normalize root to end with /
+            normalized_root = root if root.endswith("/") else root + "/"
+            if target.startswith(normalized_root):
+                transformed_target = target[len(normalized_root):]
+
+        # Substitute {target} with the (possibly transformed) path
+        if "{target}" in command_template:
+            test_command = command_template.format(target=transformed_target)
+        else:
+            test_command = command_template
+
+        # Use shell=True since commands may contain shell builtins (cd, source)
+        # and operators (&&, ||, ;)
+        # test_command runs in test_root
+        result = subprocess.run(
+            test_command,
+            capture_output=True,
+            text=True,
+            shell=True,
+            cwd=suite.get("test_root") or os.getcwd(),
+            env=ConfigManager.get_suite_env(suite),
+        )
+
+        # Log test output
+        if result.stdout:
+            Logger.write(result.stdout)
+        if result.stderr:
+            Logger.write(result.stderr)
+
+        passed = result.returncode == 0
+        return passed, result.stdout, result.stderr
+
+    @classmethod
+    def run_for_all_affected_suites(
+        cls, suite_test_files: dict[str, list[str]]
+    ) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
+        """
+        Run tests for all affected suites.
+
+        Args:
+            suite_test_files: Dict mapping suite name -> list of test files
+
+        Returns:
+            Tuple of (all_passed, results_by_suite)
+            where results_by_suite maps suite_name:test_file -> (passed, stdout, stderr)
+        """
+        all_passed = True
+        results: dict[str, tuple[bool, str, str]] = {}
+
+        for suite_name, test_files in suite_test_files.items():
+            suite = SuiteManager.get_by_name(suite_name)
+            if not suite:
+                Logger.warning(f"Suite '{suite_name}' not found, skipping")
+                continue
+
+            # Run setup for this suite
+            ConfigManager.run_suite_setup(suite)
+
+            # Run tests for each test file in this suite
+            for test_file in test_files:
+                passed, stdout, stderr = cls.run_tests(test_file, suite)
+                results[f"{suite_name}:{test_file}"] = (passed, stdout, stderr)
+                if not passed:
+                    all_passed = False
+
+        return all_passed, results
+
+    @classmethod
+    def run_post_green_commands(
+        cls, suite_test_files: dict[str, list[str]]
+    ) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
+        """
+        Run post_green_command for all affected suites.
+
+        Args:
+            suite_test_files: Dict mapping suite name -> list of test files
+
+        Returns:
+            Tuple of (all_passed, results_by_suite)
+            where results_by_suite maps suite_name -> (passed, stdout, stderr)
+        """
+        all_passed = True
+        results: dict[str, tuple[bool, str, str]] = {}
+
+        for suite_name in suite_test_files.keys():
+            suite = SuiteManager.get_by_name(suite_name)
+            if not suite:
+                continue
+
+            post_green_cmd = suite.get("post_green_command")
+            if not post_green_cmd:
+                continue
+
+            Logger.info(
+                f"Running post_green_command for suite '{suite_name}': {post_green_cmd}"
+            )
+
+            # post_green_command runs in PROJECT ROOT (not test_root)
+            result = subprocess.run(
+                post_green_cmd,
+                capture_output=True,
+                text=True,
+                shell=True,
+                cwd=os.getcwd(),
+                env=ConfigManager.get_suite_env(suite),
+            )
+
+            passed = result.returncode == 0
+            results[suite_name] = (passed, result.stdout, result.stderr)
+
+            # Log output
+            if result.stdout:
+                Logger.write(result.stdout)
+            if result.stderr:
+                Logger.write(result.stderr)
+
+            if passed:
+                Logger.success(f"post_green_command passed for suite '{suite_name}'")
+            else:
+                Logger.error(f"post_green_command failed for suite '{suite_name}'")
+                all_passed = False
+
+        return all_passed, results
+
+    @classmethod
+    def find_recent_test_files(cls, since_mtime: float, suite: dict) -> list[str]:
+        """
+        Find test files modified after the given timestamp.
+
+        Args:
+            since_mtime: Unix timestamp; only return files modified after this
+            suite: The test suite configuration to use
+
+        Returns:
+            List of test file paths modified since the timestamp
+        """
         file_patterns = suite.get("file_patterns", [])
+
         if not file_patterns:
-            continue
+            return []
 
-        filename = Path(filepath).name
+        test_files = []
         for pattern in file_patterns:
-            if fnmatch.fnmatch(filename, pattern):
-                suite_name = suite["name"]
-                if suite_name not in suite_test_files:
-                    suite_test_files[suite_name] = []
-                suite_test_files[suite_name].append(filepath)
-                break
+            glob_pattern = pattern if pattern.startswith("**/") else f"**/{pattern}"
+            for path in Path(".").glob(glob_pattern):
+                if path.stat().st_mtime > since_mtime:
+                    test_files.append(str(path))
 
-    return suite_test_files
+        return test_files
+
+    @classmethod
+    def test_suite_config(cls, suite_name: str) -> int:
+        """
+        Test a suite's configuration by running test_setup and a test command.
+
+        Args:
+            suite_name: Name of the suite to test
+
+        Returns:
+            Exit code (0 for success, 1 for failure)
+        """
+        suite = SuiteManager.get_by_name(suite_name)
+        if not suite:
+            Logger.error(f"Suite '{suite_name}' not found")
+            Logger.info("Available suites:")
+            for s in ConfigManager.get_suites():
+                print(f"  • {s['name']}")
+            return 1
+
+        Logger.banner(f"Testing suite: {suite_name}")
+        print()
+
+        # Show configuration
+        Logger.info("Configuration:")
+        print(f"  test_root: {Logger.color(suite.get('test_root', '.'), Colors.CYAN)}")
+        print(f"  test_command: {Logger.color(suite['test_command'], Colors.CYAN)}")
+        print(f"  default_target: {Logger.color(suite.get('default_target', '.'), Colors.CYAN)}")
+        print(
+            f"  strip_root_from_target: {Logger.color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}"
+        )
+        if suite.get("post_green_command"):
+            print(
+                f"  post_green_command: {Logger.color(suite['post_green_command'], Colors.CYAN)}"
+            )
+        print()
+
+        # Run test_setup if configured (runs in PROJECT ROOT)
+        setup_cmd = suite.get("test_setup")
+        if setup_cmd:
+            Logger.info(f"Running test_setup (in project root): {setup_cmd}")
+            result = subprocess.run(
+                setup_cmd,
+                capture_output=True,
+                text=True,
+                shell=True,
+                cwd=os.getcwd(),
+                env=ConfigManager.get_suite_env(suite),
+            )
+            if result.stdout:
+                Logger.write(result.stdout)
+            if result.stderr:
+                Logger.write(result.stderr)
+            if result.returncode != 0:
+                Logger.error("test_setup failed")
+                return 1
+            Logger.success("test_setup complete")
+            print()
+
+        # Build test command using same logic as run_tests()
+        target = suite.get("default_target", ".")
+        command_template = suite["test_command"]
+        root = suite.get("test_root", "")
+        strip_root = suite.get("strip_root_from_target", True)
+
+        # Show the path transformation
+        Logger.info("Path resolution:")
+        print(f"  Original target: {Logger.color(target, Colors.CYAN)}")
+
+        transformed_target = target
+        if strip_root and root and root != ".":
+            normalized_root = root if root.endswith("/") else root + "/"
+            if target.startswith(normalized_root):
+                transformed_target = target[len(normalized_root):]
+                print(
+                    f"  After stripping '{normalized_root}': {Logger.color(transformed_target, Colors.CYAN)}"
+                )
+            else:
+                print("  (target doesn't start with test_root, not stripped)")
+
+        cwd = root or os.getcwd()
+        print(f"  Working directory: {Logger.color(cwd, Colors.CYAN)}")
+
+        # Build and show final command
+        if "{target}" in command_template:
+            test_command = command_template.format(target=transformed_target)
+        else:
+            test_command = command_template
+
+        print(f"  Final command: {Logger.color(test_command, Colors.YELLOW)}")
+        print()
+
+        # Run the test command (runs in test_root)
+        Logger.info("Running test_command...")
+        result = subprocess.run(
+            test_command,
+            capture_output=True,
+            text=True,
+            shell=True,
+            cwd=cwd,
+            env=ConfigManager.get_suite_env(suite),
+        )
+        if result.stdout:
+            Logger.write(result.stdout)
+        if result.stderr:
+            Logger.write(result.stderr)
+
+        print()
+        if result.returncode == 0:
+            Logger.success(f"Suite '{suite_name}' configuration is valid")
+            return 0
+        else:
+            Logger.error(f"test_command failed with exit code {result.returncode}")
+            return 1
 
 
+# Convenience aliases for backward compatibility
 def run_tests_for_all_affected_suites(
     suite_test_files: dict[str, list[str]],
 ) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
-    """
-    Run tests for all affected suites.
-
-    Args:
-        suite_test_files: Dict mapping suite name -> list of test files
-
-    Returns:
-        Tuple of (all_passed, results_by_suite)
-        where results_by_suite maps suite_name:test_file -> (passed, stdout, stderr)
-    """
-    all_passed = True
-    results: dict[str, tuple[bool, str, str]] = {}
-
-    for suite_name, test_files in suite_test_files.items():
-        suite = get_suite_by_name(suite_name)
-        if not suite:
-            print_warning(f"Suite '{suite_name}' not found, skipping")
-            continue
-
-        # Run setup for this suite
-        run_suite_setup(suite)
-
-        # Run tests for each test file in this suite
-        for test_file in test_files:
-            passed, stdout, stderr = run_tests(test_file, suite)
-            results[f"{suite_name}:{test_file}"] = (passed, stdout, stderr)
-            if not passed:
-                all_passed = False
-
-    return all_passed, results
+    return TestRunner.run_for_all_affected_suites(suite_test_files)
 
 
 def get_all_disallowed_paths() -> list[str]:
-    """
-    Get disallowed paths from ALL suites for multi-suite protection.
-
-    Returns:
-        Combined list of paths to protect from writes
-    """
-    all_paths = []
-    for suite in CONFIG["suites"]:
-        all_paths.extend(get_disallowed_paths(suite))
-    return list(set(all_paths))  # Deduplicate
+    return SuiteManager.get_all_disallowed_paths()
 
 
 def get_disallowed_paths(suite: dict) -> list[str]:
-    """
-    Get list of paths to disallow writing to, based on suite's disallow_write_globs.
-    Expands globs to actual file paths that exist.
-
-    Args:
-        suite: The suite configuration dict
-    """
-    globs = suite.get("disallow_write_globs", [])
-    paths = []
-
-    for pattern in globs:
-        # Use glob to find matching files
-        if "**" in pattern or "*" in pattern:
-            matched = list(Path(".").glob(pattern))
-            paths.extend(str(p) for p in matched)
-        else:
-            # Literal path
-            if Path(pattern).exists():
-                paths.append(pattern)
-
-    return paths
+    return SuiteManager.get_disallowed_paths(suite)
 
 
 def run_claude_code(
@@ -999,59 +1326,7 @@ def run_claude_code(
 
 
 def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
-    """
-    Run tests on the specified target using the suite's test_command.
-
-    Args:
-        target: The test target (file, package, project, or repo path)
-        suite: The test suite configuration to use
-
-    Returns:
-        Tuple of (passed, stdout, stderr)
-    """
-    print_info(
-        f"Running tests: {color(target, Colors.WHITE, Colors.BOLD)} (suite: {suite['name']})"
-    )
-
-    command_template = suite["test_command"]
-
-    # Strip test_root prefix from target by default (configurable via strip_root_from_target)
-    strip_root = suite.get("strip_root_from_target", True)
-    root = suite.get("test_root", "")
-
-    transformed_target = target
-    if strip_root and root and root != ".":
-        # Normalize root to end with /
-        normalized_root = root if root.endswith("/") else root + "/"
-        if target.startswith(normalized_root):
-            transformed_target = target[len(normalized_root) :]
-
-    # Substitute {target} with the (possibly transformed) path
-    if "{target}" in command_template:
-        test_command = command_template.format(target=transformed_target)
-    else:
-        test_command = command_template
-
-    # Use shell=True since commands may contain shell builtins (cd, source)
-    # and operators (&&, ||, ;)
-    # test_command runs in test_root
-    result = subprocess.run(
-        test_command,
-        capture_output=True,
-        text=True,
-        shell=True,
-        cwd=suite.get("test_root") or os.getcwd(),
-        env=get_suite_env(suite),
-    )
-
-    # Log test output
-    if result.stdout:
-        log_write(result.stdout)
-    if result.stderr:
-        log_write(result.stderr)
-
-    passed = result.returncode == 0
-    return passed, result.stdout, result.stderr
+    return TestRunner.run_tests(target, suite)
 
 
 class GitOperations:
@@ -1236,56 +1511,11 @@ class GitOperations:
 
 
 def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
-    """
-    Find test files modified after the given timestamp.
-
-    Args:
-        since_mtime: Unix timestamp; only return files modified after this
-        suite: The test suite configuration to use
-
-    Returns:
-        List of test file paths modified since the timestamp
-    """
-    file_patterns = suite.get("file_patterns", [])
-
-    if not file_patterns:
-        return []
-
-    test_files = []
-    for pattern in file_patterns:
-        glob_pattern = pattern if pattern.startswith("**/") else f"**/{pattern}"
-        for path in Path(".").glob(glob_pattern):
-            if path.stat().st_mtime > since_mtime:
-                test_files.append(str(path))
-
-    return test_files
+    return TestRunner.find_recent_test_files(since_mtime, suite)
 
 
 def filter_test_files(files: list[str], suite: dict) -> list[str]:
-    """
-    Filter a list of files to only include test files matching suite's patterns.
-
-    Args:
-        files: List of file paths
-        suite: The test suite configuration to use
-
-    Returns:
-        List of file paths matching test file patterns
-    """
-    file_patterns = suite.get("file_patterns", [])
-
-    if not file_patterns:
-        return []
-
-    test_files = []
-    for filepath in files:
-        filename = Path(filepath).name
-        for pattern in file_patterns:
-            if fnmatch.fnmatch(filename, pattern):
-                test_files.append(filepath)
-                break
-
-    return test_files
+    return SuiteManager.filter_test_files(files, suite)
 
 
 def get_file_hashes(files: list[str]) -> dict[str, Optional[str]]:
@@ -1327,19 +1557,7 @@ def read_test_file_contents(files: list[str]) -> str:
 
 
 def get_target_type_description(suite: dict) -> str:
-    """Get a human-readable description of what kind of test target to create."""
-    target_type = suite["target_type"]
-    language = suite["language"]
-    framework = suite["framework"]
-
-    descriptions = {
-        "file": f"Create a test file using {language} and {framework}.",
-        "package": f"Create tests in the appropriate package directory for {language}/{framework}.",
-        "project": f"Add tests to the project's test directory following {framework} conventions.",
-        "repo": f"Add tests following the repository's {framework} test structure.",
-    }
-
-    return descriptions.get(target_type, descriptions["file"])
+    return SuiteManager.get_target_type_description(suite)
 
 
 # ============================================================================
@@ -1356,6 +1574,131 @@ class StabilityResult:
     value: Any  # Extracted value from this iteration
 
 
+class StabilityLoop:
+    """Manages stability and retry loops for Claude interactions."""
+
+    @classmethod
+    def run(
+        cls,
+        prompt_builder: Callable[[int], str],
+        stability_checker: Callable[[int, str, Any], StabilityResult],
+        max_iterations: int = MAX_FIX_ATTEMPTS,
+        stability_threshold: int = STABILITY_ITERATIONS,
+        before_call: Callable[[int], Any] | None = None,
+        phase_name: str = "STABILITY",
+    ) -> tuple[bool, Any]:
+        """
+        Generic stability loop - calls Claude until output/side-effects stabilize.
+
+        This is the core abstraction for:
+        - "Stability loops": Wait for consistent output (same response N times)
+        - "Refinement loops": Wait for side effects to stop (no file changes N times)
+
+        Args:
+            prompt_builder: (iteration) -> prompt string
+            stability_checker: (iteration, stdout, pre_state) -> StabilityResult
+            max_iterations: Maximum iterations before giving up
+            stability_threshold: Consecutive stable iterations required
+            before_call: Optional (iteration) -> pre_state, called before each Claude call
+                         (used for capturing file hashes before Claude modifies files)
+            phase_name: Name for logging
+
+        Returns:
+            (success, final_value) - success is True if stability was reached
+        """
+        stable_count = 0
+        last_value: Any = None
+
+        for i in range(1, max_iterations + 1):
+            # Optional pre-call hook (e.g., capture file hashes)
+            pre_state = before_call(i) if before_call else None
+
+            prompt = prompt_builder(i)
+            returncode, stdout, stderr = run_claude_code(prompt)
+
+            if returncode != 0:
+                Logger.warning(f"Claude error in {phase_name}: {stderr}", indent=1)
+                stable_count = 0
+                continue
+
+            result = stability_checker(i, stdout, pre_state)
+
+            if result.should_fail:
+                return (False, result.value)
+
+            if result.is_stable:
+                stable_count += 1
+                Logger.info(
+                    f"{phase_name}: stable ({stable_count}/{stability_threshold})", indent=1
+                )
+                if stable_count >= stability_threshold:
+                    Logger.success(f"{phase_name}: stabilized")
+                    return (True, result.value)
+            else:
+                stable_count = 0
+                Logger.info(f"{phase_name}: not stable yet", indent=1)
+
+            last_value = result.value
+
+        Logger.warning(f"{phase_name}: did not stabilize after {max_iterations} iterations")
+        return (False, last_value)
+
+    @classmethod
+    def run_with_retry(cls, max_retries: int = 10, tail_lines: int = 150) -> int:
+        """
+        Run chief.py in a retry loop until failures stabilize or succeeds.
+
+        Uses Claude to semantically compare failure outputs.
+        Stops when:
+        - Exit code is 0 (success)
+        - Claude says two consecutive failures are for the same reason
+        - Max retries reached
+        """
+        # Build command: same script with --no-retry to avoid infinite recursion
+        cmd = (
+            [sys.executable, __file__]
+            + [arg for arg in sys.argv[1:] if arg != "--no-retry"]
+            + ["--no-retry"]
+        )
+
+        last_tail: str | None = None
+
+        for attempt in range(1, max_retries + 1):
+            print(f"\n{'='*60}")
+            print(f"RETRY WRAPPER: Attempt {attempt}/{max_retries}")
+            print(f"{'='*60}\n")
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            # Print output to console
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+
+            # Success - done
+            if result.returncode == 0:
+                return 0
+
+            # Get last N lines for comparison
+            lines = result.stdout.strip().split("\n")
+            current_tail = "\n".join(lines[-tail_lines:])
+
+            # Check if same failure reason as last run
+            if last_tail is not None:
+                print("\n[RETRY WRAPPER] Asking Claude if failures are same reason...")
+                if failures_same_reason(last_tail, current_tail):
+                    print("[RETRY WRAPPER] Same failure reason detected - stopping")
+                    return result.returncode
+                print("[RETRY WRAPPER] Different failure reason - will retry...")
+
+            last_tail = current_tail
+
+        print(f"\n[RETRY WRAPPER] Max retries ({max_retries}) reached")
+        return 1
+
+
+# Convenience aliases for backward compatibility
 def run_stability_loop(
     prompt_builder: Callable[[int], str],
     stability_checker: Callable[[int, str, Any], StabilityResult],
@@ -1364,61 +1707,10 @@ def run_stability_loop(
     before_call: Callable[[int], Any] | None = None,
     phase_name: str = "STABILITY",
 ) -> tuple[bool, Any]:
-    """
-    Generic stability loop - calls Claude until output/side-effects stabilize.
-
-    This is the core abstraction for:
-    - "Stability loops": Wait for consistent output (same response N times)
-    - "Refinement loops": Wait for side effects to stop (no file changes N times)
-
-    Args:
-        prompt_builder: (iteration) -> prompt string
-        stability_checker: (iteration, stdout, pre_state) -> StabilityResult
-        max_iterations: Maximum iterations before giving up
-        stability_threshold: Consecutive stable iterations required
-        before_call: Optional (iteration) -> pre_state, called before each Claude call
-                     (used for capturing file hashes before Claude modifies files)
-        phase_name: Name for logging
-
-    Returns:
-        (success, final_value) - success is True if stability was reached
-    """
-    stable_count = 0
-    last_value: Any = None
-
-    for i in range(1, max_iterations + 1):
-        # Optional pre-call hook (e.g., capture file hashes)
-        pre_state = before_call(i) if before_call else None
-
-        prompt = prompt_builder(i)
-        returncode, stdout, stderr = run_claude_code(prompt)
-
-        if returncode != 0:
-            print_warning(f"Claude error in {phase_name}: {stderr}", indent=1)
-            stable_count = 0
-            continue
-
-        result = stability_checker(i, stdout, pre_state)
-
-        if result.should_fail:
-            return (False, result.value)
-
-        if result.is_stable:
-            stable_count += 1
-            print_info(
-                f"{phase_name}: stable ({stable_count}/{stability_threshold})", indent=1
-            )
-            if stable_count >= stability_threshold:
-                print_success(f"{phase_name}: stabilized")
-                return (True, result.value)
-        else:
-            stable_count = 0
-            print_info(f"{phase_name}: not stable yet", indent=1)
-
-        last_value = result.value
-
-    print_warning(f"{phase_name}: did not stabilize after {max_iterations} iterations")
-    return (False, last_value)
+    return StabilityLoop.run(
+        prompt_builder, stability_checker, max_iterations,
+        stability_threshold, before_call, phase_name
+    )
 
 
 # ============================================================================
@@ -1808,7 +2100,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
     """
     # Build suite info section listing all available suites
     suite_info_lines = []
-    for suite in CONFIG["suites"]:
+    for suite in ConfigManager.get_suites():
         patterns = suite.get("file_patterns", [])
         patterns_str = ", ".join(patterns) if patterns else "none"
         suite_info_lines.append(
@@ -2241,58 +2533,7 @@ def fix_failing_tests(
 def run_post_green_commands(
     suite_test_files: dict[str, list[str]],
 ) -> tuple[bool, dict[str, tuple[bool, str, str]]]:
-    """
-    Run post_green_command for all affected suites.
-
-    Args:
-        suite_test_files: Dict mapping suite name -> list of test files
-
-    Returns:
-        Tuple of (all_passed, results_by_suite)
-        where results_by_suite maps suite_name -> (passed, stdout, stderr)
-    """
-    all_passed = True
-    results: dict[str, tuple[bool, str, str]] = {}
-
-    for suite_name in suite_test_files.keys():
-        suite = get_suite_by_name(suite_name)
-        if not suite:
-            continue
-
-        post_green_cmd = suite.get("post_green_command")
-        if not post_green_cmd:
-            continue
-
-        print_info(
-            f"Running post_green_command for suite '{suite_name}': {post_green_cmd}"
-        )
-
-        # post_green_command runs in PROJECT ROOT (not test_root)
-        result = subprocess.run(
-            post_green_cmd,
-            capture_output=True,
-            text=True,
-            shell=True,
-            cwd=os.getcwd(),
-            env=get_suite_env(suite),
-        )
-
-        passed = result.returncode == 0
-        results[suite_name] = (passed, result.stdout, result.stderr)
-
-        # Log output
-        if result.stdout:
-            log_write(result.stdout)
-        if result.stderr:
-            log_write(result.stderr)
-
-        if passed:
-            print_success(f"post_green_command passed for suite '{suite_name}'")
-        else:
-            print_error(f"post_green_command failed for suite '{suite_name}'")
-            all_passed = False
-
-    return all_passed, results
+    return TestRunner.run_post_green_commands(suite_test_files)
 
 
 def fix_failing_build(
@@ -2394,62 +2635,12 @@ Answer ONLY 'YES' or 'NO'."""
 
 
 def run_with_retry(max_retries: int = 10, tail_lines: int = 150) -> int:
-    """
-    Run chief.py in a retry loop until failures stabilize or succeeds.
-
-    Uses Claude to semantically compare failure outputs.
-    Stops when:
-    - Exit code is 0 (success)
-    - Claude says two consecutive failures are for the same reason
-    - Max retries reached
-    """
-    # Build command: same script with --no-retry to avoid infinite recursion
-    cmd = (
-        [sys.executable, __file__]
-        + [arg for arg in sys.argv[1:] if arg != "--no-retry"]
-        + ["--no-retry"]
-    )
-
-    last_tail: str | None = None
-
-    for attempt in range(1, max_retries + 1):
-        print(f"\n{'='*60}")
-        print(f"RETRY WRAPPER: Attempt {attempt}/{max_retries}")
-        print(f"{'='*60}\n")
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        # Print output to console
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-
-        # Success - done
-        if result.returncode == 0:
-            return 0
-
-        # Get last N lines for comparison
-        lines = result.stdout.strip().split("\n")
-        current_tail = "\n".join(lines[-tail_lines:])
-
-        # Check if same failure reason as last run
-        if last_tail is not None:
-            print("\n[RETRY WRAPPER] Asking Claude if failures are same reason...")
-            if failures_same_reason(last_tail, current_tail):
-                print("[RETRY WRAPPER] Same failure reason detected - stopping")
-                return result.returncode
-            print("[RETRY WRAPPER] Different failure reason - will retry...")
-
-        last_tail = current_tail
-
-    print(f"\n[RETRY WRAPPER] Max retries ({max_retries}) reached")
-    return 1
+    return StabilityLoop.run_with_retry(max_retries, tail_lines)
 
 
 def main():
     """Main orchestration loop."""
-    global CONFIG, AUTOPUSH, LOG_FILE
+    global AUTOPUSH
 
     # Parse command-line arguments
     args = parse_args()
@@ -2464,32 +2655,33 @@ def main():
         return run_with_retry()
 
     # Open log file for verbose output (append mode)
-    LOG_FILE = open("chief.log", "a")
-    atexit.register(LOG_FILE.close)
+    log_file = open("chief.log", "a")
+    Logger.set_log_file(log_file)
+    atexit.register(log_file.close)
 
     # Write timestamp separator for this run
-    log_write("\n\n")
-    log_write("╔" + "═" * 78 + "╗\n")
-    log_write("║" + "".center(78) + "║\n")
-    log_write("║" + f"CHIEF RUN: {datetime.now().isoformat()}".center(78) + "║\n")
-    log_write("║" + "".center(78) + "║\n")
-    log_write("╚" + "═" * 78 + "╝\n")
-    log_write("\n")
+    Logger.write("\n\n")
+    Logger.write("╔" + "═" * 78 + "╗\n")
+    Logger.write("║" + "".center(78) + "║\n")
+    Logger.write("║" + f"CHIEF RUN: {datetime.now().isoformat()}".center(78) + "║\n")
+    Logger.write("║" + "".center(78) + "║\n")
+    Logger.write("╚" + "═" * 78 + "╝\n")
+    Logger.write("\n")
 
     print_banner("CHIEF - TDD Orchestrator for Claude Code")
     print()
 
     # Load configuration
-    CONFIG = load_config()
+    load_config()
 
     # Handle --test-suite (needs config but not todos)
     if args.test_suite:
         return test_suite_config(args.test_suite)
 
     print_info(
-        f"Loaded {color(str(len(CONFIG['suites'])), Colors.YELLOW, Colors.BOLD)} test suite(s):"
+        f"Loaded {color(str(len(ConfigManager.get_suites())), Colors.YELLOW, Colors.BOLD)} test suite(s):"
     )
-    for suite in CONFIG["suites"]:
+    for suite in ConfigManager.get_suites():
         print(
             f"  {color('•', Colors.CYAN)} {color(suite['name'], Colors.MAGENTA, Colors.BOLD)}: "
             f"{suite['language']}/{suite['framework']} (test_root: {suite['test_root']})"
