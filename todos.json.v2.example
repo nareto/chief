@@ -1,0 +1,36 @@
+{
+  "todos": [
+    {
+      "uuid": <uuidv4>,
+      "priority": 10,
+      "todo": "Add rate limiting to the /api/users endpoint",
+      "test_suites": ["backend"],
+      "expectations": "Requests beyond 100/minute should return 429 Too Many Requests",
+      "done_at_commit": null
+    },
+    {
+      "uuid": <uuidv4>,
+      "priority": 5,
+      "todo": "Fix login redirect bug when session expires",
+      "test_suites": ["backend", "frontend"],
+      "expectations": "User should be redirected to login page with a 'session expired' message, not a blank screen",
+      "done_at_commit": null
+    },
+    {
+      "uuid": <uuidv4>,
+      "priority": 3,
+      "todo": "Update README with Docker setup instructions",
+      "test_suites": null,
+      "expectations": "README should include docker-compose commands and environment variable configuration",
+      "done_at_commit": null
+    },
+    {
+      "uuid": <uuidv4>,
+      "priority": 2,
+      "todo": "Improve error messages in CLI prompts",
+      "test_suites": null,
+      "expectations": "Error messages should be user-friendly and suggest corrective actions",
+      "done_at_commit": null
+    }
+  ]
+}
