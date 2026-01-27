@@ -232,6 +232,7 @@ class Logger:
     def strip_ansi(text: str) -> str:
         """Remove ANSI escape codes from text."""
         import re
+
         return re.sub(r"\033\[[0-9;]*m", "", text)
 
     @staticmethod
@@ -509,8 +510,14 @@ class ConfigManager:
             print(Logger.color('test_root = "."', Colors.DIM))
             print(Logger.color('test_command = "pytest {target} -v"', Colors.DIM))
             print(Logger.color('target_type = "file"', Colors.DIM))
-            print(Logger.color('file_patterns = ["test_*.py", "*_test.py"]', Colors.DIM))
-            print(Logger.color('disallow_write_globs = ["tests/**", "test_*.py"]', Colors.DIM))
+            print(
+                Logger.color('file_patterns = ["test_*.py", "*_test.py"]', Colors.DIM)
+            )
+            print(
+                Logger.color(
+                    'disallow_write_globs = ["tests/**", "test_*.py"]', Colors.DIM
+                )
+            )
             sys.exit(1)
 
         with open(cls._file_path, "rb") as f:
@@ -598,7 +605,9 @@ class ConfigManager:
 
             # If validation fails and we have an init command, try running it
             if result.returncode != 0 and init_cmd:
-                Logger.warning(f"Suite '{name}' validation failed, running test_init...")
+                Logger.warning(
+                    f"Suite '{name}' validation failed, running test_init..."
+                )
                 Logger.info(f"  Init: {init_cmd}")
 
                 # test_init runs in test_root
@@ -649,7 +658,9 @@ class ConfigManager:
                     print(result.stdout)
                 sys.exit(1)
 
-            print(f"  {Logger.color('✓', Colors.BRIGHT_GREEN)} {Logger.color(name, Colors.MAGENTA)}: OK")
+            print(
+                f"  {Logger.color('✓', Colors.BRIGHT_GREEN)} {Logger.color(name, Colors.MAGENTA)}: OK"
+            )
 
         print()
 
@@ -774,7 +785,9 @@ class TodoManager:
         with open(cls._file_path, "w") as f:
             json.dump(data, f, indent=2)
 
-        Logger.success(f"Removed {removed_count} completed todo(s) from {cls._file_path}")
+        Logger.success(
+            f"Removed {removed_count} completed todo(s) from {cls._file_path}"
+        )
         Logger.info(f"Remaining: {len(data['todos'])} pending todo(s)")
         return 0
 
@@ -873,32 +886,32 @@ class SuiteManager:
 
         return suite_test_files
 
-    @classmethod
-    def filter_test_files(cls, files: list[str], suite: dict) -> list[str]:
-        """
-        Filter a list of files to only include test files matching suite's patterns.
+    # @classmethod
+    # def filter_test_files(cls, files: list[str], suite: dict) -> list[str]:
+    #     """
+    #     Filter a list of files to only include test files matching suite's patterns.
 
-        Args:
-            files: List of file paths
-            suite: The test suite configuration to use
+    #     Args:
+    #         files: List of file paths
+    #         suite: The test suite configuration to use
 
-        Returns:
-            List of file paths matching test file patterns
-        """
-        file_patterns = suite.get("file_patterns", [])
+    #     Returns:
+    #         List of file paths matching test file patterns
+    #     """
+    #     file_patterns = suite.get("file_patterns", [])
 
-        if not file_patterns:
-            return []
+    #     if not file_patterns:
+    #         return []
 
-        test_files = []
-        for filepath in files:
-            filename = Path(filepath).name
-            for pattern in file_patterns:
-                if fnmatch.fnmatch(filename, pattern):
-                    test_files.append(filepath)
-                    break
+    #     test_files = []
+    #     for filepath in files:
+    #         filename = Path(filepath).name
+    #         for pattern in file_patterns:
+    #             if fnmatch.fnmatch(filename, pattern):
+    #                 test_files.append(filepath)
+    #                 break
 
-        return test_files
+    #     return test_files
 
     @classmethod
     def get_all_disallowed_paths(cls) -> list[str]:
@@ -997,7 +1010,7 @@ class TestRunner:
             # Normalize root to end with /
             normalized_root = root if root.endswith("/") else root + "/"
             if target.startswith(normalized_root):
-                transformed_target = target[len(normalized_root):]
+                transformed_target = target[len(normalized_root) :]
 
         # Substitute {target} with the (possibly transformed) path
         if "{target}" in command_template:
@@ -1170,7 +1183,9 @@ class TestRunner:
         Logger.info("Configuration:")
         print(f"  test_root: {Logger.color(suite.get('test_root', '.'), Colors.CYAN)}")
         print(f"  test_command: {Logger.color(suite['test_command'], Colors.CYAN)}")
-        print(f"  default_target: {Logger.color(suite.get('default_target', '.'), Colors.CYAN)}")
+        print(
+            f"  default_target: {Logger.color(suite.get('default_target', '.'), Colors.CYAN)}"
+        )
         print(
             f"  strip_root_from_target: {Logger.color(str(suite.get('strip_root_from_target', True)), Colors.CYAN)}"
         )
@@ -1216,7 +1231,7 @@ class TestRunner:
         if strip_root and root and root != ".":
             normalized_root = root if root.endswith("/") else root + "/"
             if target.startswith(normalized_root):
-                transformed_target = target[len(normalized_root):]
+                transformed_target = target[len(normalized_root) :]
                 print(
                     f"  After stripping '{normalized_root}': {Logger.color(transformed_target, Colors.CYAN)}"
                 )
@@ -1325,8 +1340,8 @@ def run_claude_code(
     return process.returncode, "".join(stdout_lines), ""
 
 
-def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
-    return TestRunner.run_tests(target, suite)
+# def run_tests(target: str, suite: dict) -> tuple[bool, str, str]:
+#     return TestRunner.run_tests(target, suite)
 
 
 class GitOperations:
@@ -1347,7 +1362,9 @@ class GitOperations:
         subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
 
         # Commit
-        subprocess.run(["git", "commit", "-m", message], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", message], check=True, capture_output=True
+        )
 
         # Get commit hash
         result = subprocess.run(
@@ -1503,19 +1520,22 @@ class GitOperations:
 
         for filepath, status in current_snapshot.items():
             # File is new to git status OR has different status than before
-            if filepath not in baseline_snapshot or baseline_snapshot[filepath] != status:
+            if (
+                filepath not in baseline_snapshot
+                or baseline_snapshot[filepath] != status
+            ):
                 if Path(filepath).exists():
                     changed_files.append(filepath)
 
         return changed_files
 
 
-def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
-    return TestRunner.find_recent_test_files(since_mtime, suite)
+# def find_recent_test_files(since_mtime: float, suite: dict) -> list[str]:
+#     return TestRunner.find_recent_test_files(since_mtime, suite)
 
 
-def filter_test_files(files: list[str], suite: dict) -> list[str]:
-    return SuiteManager.filter_test_files(files, suite)
+# def filter_test_files(files: list[str], suite: dict) -> list[str]:
+#     return SuiteManager.filter_test_files(files, suite)
 
 
 def get_file_hashes(files: list[str]) -> dict[str, Optional[str]]:
@@ -1629,7 +1649,8 @@ class StabilityLoop:
             if result.is_stable:
                 stable_count += 1
                 Logger.info(
-                    f"{phase_name}: stable ({stable_count}/{stability_threshold})", indent=1
+                    f"{phase_name}: stable ({stable_count}/{stability_threshold})",
+                    indent=1,
                 )
                 if stable_count >= stability_threshold:
                     Logger.success(f"{phase_name}: stabilized")
@@ -1640,7 +1661,9 @@ class StabilityLoop:
 
             last_value = result.value
 
-        Logger.warning(f"{phase_name}: did not stabilize after {max_iterations} iterations")
+        Logger.warning(
+            f"{phase_name}: did not stabilize after {max_iterations} iterations"
+        )
         return (False, last_value)
 
     @classmethod
@@ -1708,8 +1731,12 @@ def run_stability_loop(
     phase_name: str = "STABILITY",
 ) -> tuple[bool, Any]:
     return StabilityLoop.run(
-        prompt_builder, stability_checker, max_iterations,
-        stability_threshold, before_call, phase_name
+        prompt_builder,
+        stability_checker,
+        max_iterations,
+        stability_threshold,
+        before_call,
+        phase_name,
     )
 
 
@@ -1719,7 +1746,7 @@ def run_stability_loop(
 
 
 @dataclass
-class ContextWindow:
+class Context:
     """
     Represents what we're sending to Claude's context window.
     Think of it as an array of sections we allocate to.
@@ -2039,7 +2066,8 @@ class TodoProcessor:
         # Outer retry loop
         for attempt in range(1, MAX_IMPLEMENTATION_ATTEMPTS + 1):
             print_phase(
-                "GREEN", f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}"
+                "GREEN",
+                f"Implementation attempt {attempt}/{MAX_IMPLEMENTATION_ATTEMPTS}",
             )
 
             # Snapshot dirty files before implementation
@@ -2063,7 +2091,9 @@ class TodoProcessor:
             if verify_completion_stable(self.todo):
                 # Verified complete - commit and mark done
                 try:
-                    commit_hash = GitOperations.commit_and_tag(f"chief: {self.todo_text}")
+                    commit_hash = GitOperations.commit_and_tag(
+                        f"chief: {self.todo_text}"
+                    )
                     GitOperations.push_with_tags()  # Non-fatal
                     self.todo["done_at_commit"] = commit_hash
                     save_todos(self.data)
@@ -2075,13 +2105,17 @@ class TodoProcessor:
                     continue
             else:
                 # Verification failed
-                print_warning("Semantic verification failed, will retry implementation...")
+                print_warning(
+                    "Semantic verification failed, will retry implementation..."
+                )
                 if attempt < MAX_IMPLEMENTATION_ATTEMPTS:
                     GitOperations.revert_changes(baseline_dirty)
                 else:
                     print_info("Keeping changes for inspection (final attempt)")
 
-        print_error(f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts")
+        print_error(
+            f"Failed to complete todo after {MAX_IMPLEMENTATION_ATTEMPTS} attempts"
+        )
         return False
 
 
@@ -2109,7 +2143,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
         )
     suite_info = "\n".join(suite_info_lines)
 
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         expectations=todo.get("expectations", ""),
         suite_info=suite_info,
@@ -2174,7 +2208,7 @@ def write_test_for_todo(todo: dict) -> tuple[dict[str, list[str]], list[str]]:
         return suite_test_files, all_test_artifacts
 
     # Build context for refinement prompts
-    refinement_context = ContextWindow(
+    refinement_context = Context(
         task=todo.get("todo", ""),
         expectations=todo.get("expectations", ""),
         test_files=files_to_monitor,
@@ -2274,7 +2308,7 @@ def verify_existing_tests_stable(
     Returns:
         List of confirmed test paths (intersection), or empty list if unstable
     """
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         expectations=todo.get("expectations", ""),
         suite_info=suite_info,
@@ -2359,7 +2393,7 @@ def implement_todo_no_tests(
             "\n\nPrevious verification failed. Please fix outstanding issues."
         )
 
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         expectations=todo.get("expectations", ""),
         retry_context=retry_context,
@@ -2385,7 +2419,7 @@ def verify_completion_stable(todo: dict) -> bool:
     Returns:
         True if task verified complete (stable YES), False otherwise
     """
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         expectations=todo.get("expectations", ""),
     )
@@ -2465,7 +2499,7 @@ def implement_todo(
             extra_disallow.extend(get_disallowed_paths(suite))
     extra_disallow = list(set(extra_disallow))  # Deduplicate
 
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         test_locations_str=test_locations_str,
     )
@@ -2518,7 +2552,7 @@ def fix_failing_tests(
             extra_disallow.extend(get_disallowed_paths(suite))
     extra_disallow = list(set(extra_disallow))  # Deduplicate
 
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         test_locations_str=test_locations_str,
         failure_output=failure_output,
@@ -2580,7 +2614,7 @@ def fix_failing_build(
             extra_disallow.extend(get_disallowed_paths(suite))
     extra_disallow = list(set(extra_disallow))  # Deduplicate
 
-    context = ContextWindow(
+    context = Context(
         task=todo.get("todo", ""),
         test_locations_str=test_locations_str,
         failure_output=failure_output,
