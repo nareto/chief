@@ -8,73 +8,112 @@ This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralp
 ## How It Works
 
 ```mermaid
-flowchart TB
-    todos["todos.json"]
-    testable{testable?}
-    todos --> testable
+flowchart TD
+    %% ==========================================
+    %% GLOBAL STYLES
+    %% ==========================================
+    classDef claude fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef prompt fill:#e3f2fd,stroke:#0277bd,stroke-width:1px,color:#01579b,stroke-dasharray: 5 5;
+    classDef system fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100;
+    classDef decision fill:#fff,stroke:#333,stroke-width:1px;
 
-    subgraph RedPhase["RED PHASE"]
+    Start([Start Task]) --> CheckConfig[System: Load Config & Todo]
+    CheckConfig --> RedStart
+
+    %% ==========================================
+    %% RED PHASE
+    %% ==========================================
+    subgraph Red_Phase [RED PHASE: Write & Refine Tests]
         direction TB
-        red_claude["Claude Code"]
-        run_red_tests["Run Tests"]
-        tests_fail{Fail?}
-        refine_claude["Claude Code"]
-
-        red_claude --> run_red_tests
-        run_red_tests --> tests_fail
-        tests_fail -->|"no"| refine_claude
-        refine_claude --> run_red_tests
+        
+        RedStart{Tests Exist?}
+        
+        %% PATH 1: Existing Tests
+        RedStart -- Unknown --> P_Verify(Prompt: RED_VERIFY_EXISTING)
+        P_Verify -- RED_VERIFY_EXISTING --> C_RedVerify[[Claude Code]]
+        C_RedVerify --> ParseVerify{Result?}
+        ParseVerify -- "Tests Found" --> RunTestsInitial
+        ParseVerify -- "Need New" --> P_Write
+        
+        %% PATH 2: Write New
+        RedStart -- No --> P_Write(Prompt: RED_WRITE_TESTS)
+        P_Write -- RED_WRITE_TESTS --> C_RedWrite[[Claude Code]]
+        C_RedWrite --> RunTestsInitial
+        
+        %% EXECUTION & REFINEMENT
+        RunTestsInitial[System: Run Tests] --> CheckRed{Analyze Result}
+        
+        %% LOOP: REFINE (Stability)
+        CheckRed -- "Syntax Error / Logic Bug" --> P_Refine(Prompt: RED_REFINE_TESTS)
+        CheckRed -- "Tests PASSED (Bad!)" --> P_Refine
+        
+        P_Refine -- RED_REFINE_TESTS --> C_RedRefine[[Claude Code]]
+        C_RedRefine --> RunTestsInitial
+        
+        %% EXIT RED PHASE
+        CheckRed -- "Tests FAILED (Good)" --> RedSuccess([Tests Valid & Failing])
     end
 
-    subgraph GreenPhase["GREEN PHASE"]
-        direction TB
-        green_claude["Claude Code"]
-        run_green_tests["Run Tests"]
-        tests_pass{Pass?}
-        fix_claude["Claude Code"]
-        run_build["post_green_commands"]
-        build_pass{Pass?}
-        fix_build_claude["Claude Code"]
-        retest["Run Tests"]
-        retest_pass{Pass?}
+    RedSuccess --> GreenStart
 
-        green_claude --> run_green_tests
-        run_green_tests --> tests_pass
-        tests_pass -->|"no"| fix_claude
-        fix_claude --> run_green_tests
-        tests_pass -->|"yes"| run_build
-        run_build --> build_pass
-        build_pass -->|"no"| fix_build_claude
-        fix_build_claude --> retest
-        retest --> retest_pass
-        retest_pass -->|"no"| fix_claude
-        retest_pass -->|"yes"| run_build
+    %% ==========================================
+    %% GREEN PHASE
+    %% ==========================================
+    subgraph Green_Phase [GREEN PHASE: Implement & Fix]
+        direction TB
+        
+        GreenStart{Task Type?}
+        
+        %% IMPLEMENTATION
+        GreenStart -- "Standard TDD" --> P_Imp(Prompt: GREEN_IMPLEMENT)
+        GreenStart -- "No Tests" --> P_ImpNo(Prompt: GREEN_IMPLEMENT_NO_TESTS)
+        
+        P_Imp -- GREEN_IMPLEMENT --> C_Imp[[Claude Code]]
+        P_ImpNo -- GREEN_IMPLEMENT_NO_TESTS --> C_Imp
+        
+        C_Imp --> RunBuild[System: Run Build]
+        
+        %% LOOP: FIX BUILD
+        RunBuild --> CheckBuild{Build OK?}
+        CheckBuild -- "Build Failed" --> P_FixBuild(Prompt: FIX_FAILING_BUILD)
+        P_FixBuild -- FIX_FAILING_BUILD --> C_Fix[[Claude Code]]
+        
+        %% LOOP: FIX TESTS
+        CheckBuild -- "Build OK" --> RunTestsGreen[System: Run Tests]
+        RunTestsGreen --> CheckGreen{Tests Pass?}
+        
+        CheckGreen -- "Tests Failed" --> P_FixTest(Prompt: FIX_FAILING_TESTS)
+        P_FixTest -- FIX_FAILING_TESTS --> C_Fix
+        
+        C_Fix --> RunBuild
+        
+        %% EXIT GREEN PHASE
+        CheckGreen -- "All Pass" --> VerifyPhase([Ready for Verification])
     end
 
-    subgraph NonTestable["NON-TESTABLE PATH"]
-        direction TB
-        impl_claude["Claude Code"]
-        verify_claude["Claude Code"]
-        verified{YES 2x?}
+    VerifyPhase --> P_VerifyComp(Prompt: VERIFY_COMPLETION)
 
-        impl_claude --> verify_claude
-        verify_claude --> verified
-        verified -->|"no"| impl_claude
-    end
+    %% ==========================================
+    %% VERIFICATION
+    %% ==========================================
+    P_VerifyComp -- VERIFY_COMPLETION --> C_Verify[[Claude Code]]
+    C_Verify --> IsComplete{Complete?}
+    
+    IsComplete -- "No (Refactor/Fix)" --> P_Imp
+    IsComplete -- "Yes" --> Commit[Git Commit & Push]
+    Commit --> End([Next Todo])
 
-    commit["Git Commit + Tag"]
+    %% ==========================================
+    %% SUBGRAPH STYLING
+    %% ==========================================
+    style Red_Phase fill:#ffebee,stroke:#c62828,stroke-width:3px,font-size:24px,font-weight:bold,color:#b71c1c
+    style Green_Phase fill:#e8f5e9,stroke:#2e7d32,stroke-width:3px,font-size:24px,font-weight:bold,color:#1b5e20
 
-    testable -->|"yes<br/>RED_WRITE_TESTS<br/>(task, expectations, suite_info)"| red_claude
-    testable -->|"no<br/>GREEN_IMPLEMENT_NO_TESTS<br/>(task, expectations, retry_context)"| impl_claude
-
-    tests_fail -->|"yes<br/>GREEN_IMPLEMENT<br/>(task, test_locations)"| green_claude
-    build_pass -->|"yes"| commit
-    verified -->|"yes"| commit
-
-    red_claude -.->|"RED_REFINE_TESTS<br/>(task, expectations, file_list)"| refine_claude
-    fix_claude -.->|"FIX_FAILING_TESTS<br/>(task, test_locations, failure_output)"| run_green_tests
-    fix_build_claude -.->|"FIX_FAILING_BUILD<br/>(task, test_locations, failure_output)"| retest
-    verify_claude -.->|"VERIFY_COMPLETION<br/>(task, expectations)"| verified
+    %% Node Styling assignments
+    class C_RedVerify,C_RedWrite,C_RedRefine,C_Imp,C_Fix,C_Verify claude;
+    class P_Verify,P_Write,P_Refine,P_Imp,P_ImpNo,P_FixBuild,P_FixTest,P_VerifyComp prompt;
+    class RunTestsInitial,RunBuild,RunTestsGreen,CheckConfig,Commit system;
+    class RedStart,ParseVerify,CheckRed,GreenStart,CheckBuild,CheckGreen,IsComplete decision;
 ```
 ## ⚠️ Potential Data Loss Warning
 
