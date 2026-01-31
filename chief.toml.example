@@ -1,3 +1,7 @@
+# TODO: add global option for coding agent choice (default claude code)
+# TODO: add global option for command line options to be appended to agent calls (e.g., for mcp servers, disallowed paths)
+# TODO: add linting commands, per suite
+
 # Chief Configuration Reference
 # =============================
 #
