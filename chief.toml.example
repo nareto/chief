@@ -52,6 +52,12 @@ max_retries = 10
 #                 If this fails, enters a build fix loop to resolve issues.
 #                 Example: "docker compose build frontend"
 #
+# lint_command
+#                 Command to run AFTER tests pass, BEFORE post_green_command.
+#                 Runs in PROJECT ROOT.
+#                 Use for: linting, formatting checks, type checks, etc.
+#                 Example: "npm run lint" or "ruff check ."
+#
 # env             Environment variables for all commands in this suite
 #                 Example: { PYENV_VERSION = "3.11", NODE_ENV = "test" }
 #
@@ -92,6 +98,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["test_*.py", "*_test.py"]
 # disallow_write_globs = ["tests/**", "test_*.py", "*_test.py"]
+# lint_command = "ruff check ."
 
 
 # ============================================================
@@ -110,6 +117,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["test_*.py", "*_test.py"]
 # disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
+# lint_command = "ruff check backend"
 # env = { PYENV_VERSION = "3.11" }
 
 
@@ -128,6 +136,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["*.test.ts", "*.spec.ts"]
 # disallow_write_globs = ["**/*.test.ts", "**/*.spec.ts", "__tests__/**"]
+# lint_command = "npm run lint"
 
 
 # ============================================================
@@ -148,6 +157,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["*.test.ts", "*.test.tsx"]
 # disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.test.tsx"]
+# lint_command = "npm run lint"
 
 
 # ============================================================
@@ -164,6 +174,7 @@ max_retries = 10
 # target_type = "package"
 # file_patterns = ["*_test.go"]
 # disallow_write_globs = ["**/*_test.go"]
+# lint_command = "golangci-lint run"
 
 
 # ============================================================
@@ -180,6 +191,7 @@ max_retries = 10
 # target_type = "project"
 # file_patterns = []
 # disallow_write_globs = ["tests/**"]
+# lint_command = "cargo clippy"
 
 
 # ============================================================
@@ -202,6 +214,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["test_*.py", "*_test.py"]
 # disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
+# lint_command = "ruff check backend"
 # env = { TEST_DATABASE_URL = "postgresql+asyncpg://user:pass@localhost:5432/testdb" }
 #
 # [[suites]]
@@ -216,6 +229,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["*.test.ts", "*.test.tsx"]
 # disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.test.tsx"]
+# lint_command = "npm run lint"
 #
 # [[suites]]
 # name = "frontend-e2e"
@@ -229,6 +243,7 @@ max_retries = 10
 # target_type = "file"
 # file_patterns = ["*.spec.ts"]
 # disallow_write_globs = ["frontend/e2e/**"]
+# lint_command = "npm run lint"
 
 
 # ============================================================
