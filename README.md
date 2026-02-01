@@ -8,12 +8,21 @@ This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralp
 
 Chief runs a phase-based loop for each todo:
 
-1. **RED**: write or refine tests (optionally lint validation).
-2. **GREEN**: implement features; tests must pass to finish the phase.
+1. **RED**: write or refine tests
+  - stability required to pass phase (see next section)
+2. **GREEN**: implement features
+  - tests must pass to pass the phase.
 3. **POST_GREEN**: optional lint/build commands after tests pass.
 4. **Commit**: auto-commit and tag on success.
 
-Chief records all events (agent prompts/responses, diffs, test outputs) in `chief.db` and reuses them for subsequent prompts.
+Chief records all events (agent prompts/responses, diffs, test outputs) in `chief.db` and queries it to give context to subsequent prompts.
+
+### Stability Loops
+
+Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of stability: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success. 
+
+We call this a stability loop, with a minimum required stability of 2. It's used in Red phase, or for tasks in `todos.json` that specify no `test_suites` (like, "update the docs"). 
+
 
 ## ⚠️ Potential Data Loss Warning
 
