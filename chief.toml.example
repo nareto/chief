@@ -55,6 +55,7 @@ max_retries = 10
 # lint_command
 #                 Command to run AFTER tests pass, BEFORE post_green_command.
 #                 Runs in PROJECT ROOT.
+#                 If the command includes "{target}", it will be replaced by the lint target.
 #                 Use for: linting, formatting checks, type checks, etc.
 #                 Example: "npm run lint" or "ruff check ."
 #
@@ -78,6 +79,7 @@ max_retries = 10
 # | test_command       | test_root      | During RED/GREEN test phases      |
 # | test_setup         | PROJECT ROOT   | Once before first test of suite   |
 # | post_green_command | PROJECT ROOT   | After tests pass, before commit   |
+# | lint_command       | PROJECT ROOT   | After tests pass, before post_green|
 #
 # PROJECT ROOT = the directory where chief.py is run (usually repo root)
 # test_root = subdirectory specified in the suite config
