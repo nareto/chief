@@ -59,6 +59,13 @@ max_retries = 10
 #                 Use for: linting, formatting checks, type checks, etc.
 #                 Example: "npm run lint" or "ruff check ."
 #
+# lint_fix_command
+#                 Optional command to attempt auto-fixes when lint_command fails.
+#                 Runs in PROJECT ROOT.
+#                 If set, chief will run this command once after a lint failure,
+#                 then re-run lint_command. Use {target} if needed.
+#                 Example: "ruff check --fix ." or "npm run lint -- --fix"
+#
 # env             Environment variables for all commands in this suite
 #                 Example: { PYENV_VERSION = "3.11", NODE_ENV = "test" }
 #
@@ -101,6 +108,7 @@ max_retries = 10
 # file_patterns = ["test_*.py", "*_test.py"]
 # disallow_write_globs = ["tests/**", "test_*.py", "*_test.py"]
 # lint_command = ".venv/bin/python -m ruff check ."  # Use venv ruff to avoid PATH issues
+# lint_fix_command = ".venv/bin/python -m ruff check --fix ."  # Optional auto-fix
 
 
 # ============================================================
@@ -120,6 +128,7 @@ max_retries = 10
 # file_patterns = ["test_*.py", "*_test.py"]
 # disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
 # lint_command = ".venv/bin/python -m ruff check backend"  # Use venv ruff to avoid PATH issues
+# lint_fix_command = ".venv/bin/python -m ruff check --fix backend"  # Optional auto-fix
 # env = { PYENV_VERSION = "3.11" }
 
 
@@ -139,6 +148,7 @@ max_retries = 10
 # file_patterns = ["*.test.ts", "*.spec.ts"]
 # disallow_write_globs = ["**/*.test.ts", "**/*.spec.ts", "__tests__/**"]
 # lint_command = "npm run lint"
+# lint_fix_command = "npm run lint -- --fix"
 
 
 # ============================================================
@@ -160,6 +170,7 @@ max_retries = 10
 # file_patterns = ["*.test.ts", "*.test.tsx"]
 # disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.test.tsx"]
 # lint_command = "npm run lint"
+# lint_fix_command = "npm run lint -- --fix"
 
 
 # ============================================================
@@ -177,6 +188,7 @@ max_retries = 10
 # file_patterns = ["*_test.go"]
 # disallow_write_globs = ["**/*_test.go"]
 # lint_command = "golangci-lint run"
+# lint_fix_command = "golangci-lint run --fix"  # Optional auto-fix (if enabled in config)
 
 
 # ============================================================
@@ -194,6 +206,7 @@ max_retries = 10
 # file_patterns = []
 # disallow_write_globs = ["tests/**"]
 # lint_command = "cargo clippy"
+# lint_fix_command = "cargo clippy --fix"  # Optional auto-fix (may require nightly)
 
 
 # ============================================================
@@ -217,6 +230,7 @@ max_retries = 10
 # file_patterns = ["test_*.py", "*_test.py"]
 # disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
 # lint_command = ".venv/bin/python -m ruff check backend"  # Use venv ruff to avoid PATH issues
+# lint_fix_command = ".venv/bin/python -m ruff check --fix backend"  # Optional auto-fix
 # env = { TEST_DATABASE_URL = "postgresql+asyncpg://user:pass@localhost:5432/testdb" }
 #
 # [[suites]]
