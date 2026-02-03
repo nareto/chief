@@ -36,6 +36,34 @@ def _state(*, phase: chief.Phase = chief.Phase.red) -> SimpleNamespace:
     )
 
 
+class _ContextStrategy(chief.StabilityStrategy):
+    def run_iteration(self) -> chief.SubprocessOutput:
+        return chief.SubprocessOutput(
+            exit_code=0,
+            merged_output="",
+            stdout="",
+            stderr="",
+            command="",
+        )
+
+    def is_stable(
+        self, iteration_idx: int, iteration_output: chief.SubprocessOutput
+    ) -> chief.StabilityDecision:
+        return chief.StabilityDecision.terminal_success
+
+
+def _make_context_strategy(dbclient: object) -> _ContextStrategy:
+    iofacade = object.__new__(chief.ChiefIOFacade)
+    iofacade.dbclient = dbclient  # type: ignore[attr-defined]
+    iofacade._formatter = chief.EventFormatter()  # type: ignore[attr-defined]
+
+    return _ContextStrategy(
+        agent=SimpleNamespace(),
+        chief_run_state=SimpleNamespace(run_id="current", iofacade=iofacade),
+        todo=SimpleNamespace(todo_id="todo-1"),
+    )
+
+
 def test_todo_compute_id_ignores_surrounding_whitespace() -> None:
     first = chief.Todo.compute_id("Implement feature", "must pass")
     second = chief.Todo.compute_id("  Implement feature  ", "\nmust pass\n")
@@ -309,6 +337,190 @@ def test_build_phase_context_returns_default_message_when_no_events() -> None:
         event_types=[chief.EventType.phase_failure],
     )
     assert context == "No previous attempts recorded."
+
+
+def test_strategy_context_drops_old_lint_failures_after_latest_pass() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    lint_fail = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="warning",
+        msg="Lint failed (backend)",
+        event_type=chief.EventType.lint,
+        timestamp=now,
+        phase=chief.Phase.red,
+        payload={
+            "command": "ruff check .",
+            "output": "E999 bad",
+            "exit_code": 1,
+            "suite": "backend",
+        },
+    )
+    lint_pass = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="info",
+        msg="Lint passed (backend)",
+        event_type=chief.EventType.lint,
+        timestamp=now + dt.timedelta(seconds=1),
+        phase=chief.Phase.red,
+        payload={
+            "command": "ruff check .",
+            "output": "",
+            "exit_code": 0,
+            "suite": "backend",
+        },
+    )
+
+    class FakeDB:
+        def get_events(self, run_ids, **kwargs):  # type: ignore[no-untyped-def]
+            return [lint_pass, lint_fail] if run_ids == ["current"] else []
+
+        def get_recent_run_ids_for_todo(self, todo_id, exclude_run_id):  # type: ignore[no-untyped-def]
+            return []
+
+    strategy = _make_context_strategy(FakeDB())
+    context = strategy._build_previous_steps_log(
+        phase=chief.Phase.red,
+        event_types=[chief.EventType.lint],
+        prune_resolved_checks=True,
+    )
+    assert "LINT PASS (backend)" in context
+    assert "LINT FAIL" not in context
+
+
+def test_strategy_context_drops_old_test_failures_after_latest_pass() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    test_fail = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="warning",
+        msg="Test failed",
+        event_type=chief.EventType.test_run,
+        timestamp=now,
+        phase=chief.Phase.green,
+        payload={
+            "command": "pytest tests",
+            "output": "FAILED",
+            "exit_code": 1,
+        },
+    )
+    test_pass = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="info",
+        msg="Test passed",
+        event_type=chief.EventType.test_run,
+        timestamp=now + dt.timedelta(seconds=1),
+        phase=chief.Phase.green,
+        payload={
+            "command": "pytest tests",
+            "output": "ok",
+            "exit_code": 0,
+        },
+    )
+
+    class FakeDB:
+        def get_events(self, run_ids, **kwargs):  # type: ignore[no-untyped-def]
+            return [test_pass, test_fail] if run_ids == ["current"] else []
+
+        def get_recent_run_ids_for_todo(self, todo_id, exclude_run_id):  # type: ignore[no-untyped-def]
+            return []
+
+    strategy = _make_context_strategy(FakeDB())
+    context = strategy._build_previous_steps_log(
+        phase=chief.Phase.green,
+        event_types=[chief.EventType.test_run],
+        prune_resolved_checks=True,
+    )
+    assert "TEST PASS: pytest tests" in context
+    assert "TEST FAIL" not in context
+
+
+def test_strategy_context_drops_resolved_phase_failures() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    phase_failure = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="warning",
+        msg="Stability loop failed once",
+        event_type=chief.EventType.phase_failure,
+        timestamp=now,
+        phase=chief.Phase.red,
+    )
+    lint_pass = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="info",
+        msg="Lint passed (backend)",
+        event_type=chief.EventType.lint,
+        timestamp=now + dt.timedelta(seconds=1),
+        phase=chief.Phase.red,
+        payload={
+            "command": "ruff check .",
+            "output": "",
+            "exit_code": 0,
+            "suite": "backend",
+        },
+    )
+
+    class FakeDB:
+        def get_events(self, run_ids, **kwargs):  # type: ignore[no-untyped-def]
+            return [lint_pass, phase_failure] if run_ids == ["current"] else []
+
+        def get_recent_run_ids_for_todo(self, todo_id, exclude_run_id):  # type: ignore[no-untyped-def]
+            return []
+
+    strategy = _make_context_strategy(FakeDB())
+    context = strategy._build_previous_steps_log(
+        phase=chief.Phase.red,
+        event_types=[chief.EventType.phase_failure, chief.EventType.lint],
+        prune_resolved_checks=True,
+        prune_resolved_phase_failures=True,
+    )
+    assert "PHASE FAILURE" not in context
+    assert "LINT PASS (backend)" in context
+
+
+def test_strategy_context_falls_back_when_current_events_are_other_phase() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    current_green = chief.ChiefLoggableEvent(
+        run_id="current",
+        todo_id="todo-1",
+        level="info",
+        msg="current green",
+        event_type=chief.EventType.phase_failure,
+        timestamp=now,
+        phase=chief.Phase.green,
+    )
+    previous_red = chief.ChiefLoggableEvent(
+        run_id="previous",
+        todo_id="todo-1",
+        level="info",
+        msg="previous red",
+        event_type=chief.EventType.phase_failure,
+        timestamp=now,
+        phase=chief.Phase.red,
+    )
+
+    class FakeDB:
+        def get_events(self, run_ids, **kwargs):  # type: ignore[no-untyped-def]
+            if run_ids == ["current"]:
+                return [current_green]
+            if run_ids == ["previous"]:
+                return [previous_red]
+            return []
+
+        def get_recent_run_ids_for_todo(self, todo_id, exclude_run_id):  # type: ignore[no-untyped-def]
+            return ["previous"]
+
+    strategy = _make_context_strategy(FakeDB())
+    context = strategy._build_previous_steps_log(
+        phase=chief.Phase.red,
+        event_types=[chief.EventType.phase_failure],
+    )
+    assert "previous red" in context
+    assert "current green" not in context
 
 
 def test_event_formatter_formats_test_failures_without_framework_specific_parsing() -> None:
