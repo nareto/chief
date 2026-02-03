@@ -311,6 +311,89 @@ def test_build_phase_context_returns_default_message_when_no_events() -> None:
     assert context == "No previous attempts recorded."
 
 
+def test_event_formatter_formats_test_failures_without_framework_specific_parsing() -> None:
+    event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Test command result",
+        event_type=chief.EventType.test_run,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={
+            "command": "run-tests tests",
+            "exit_code": 1,
+            "output": "FAILED tests/test_sample.py::test_example - AssertionError: boom",
+        },
+    )
+
+    formatted = chief.EventFormatter().format_events([event])
+    assert "TEST FAIL (exit code 1): run-tests tests" in formatted
+    assert (
+        "Output:\nFAILED tests/test_sample.py::test_example - AssertionError: boom"
+        in formatted
+    )
+    assert "\n  - tests/test_sample.py::test_example" not in formatted
+
+
+def test_event_formatter_formats_lint_failures_without_parser_rules() -> None:
+    event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Lint command result",
+        event_type=chief.EventType.lint,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={
+            "suite": "backend",
+            "exit_code": 1,
+            "output": "src/app.py:10:5: E501 line too long",
+        },
+    )
+
+    formatted = chief.EventFormatter().format_events([event])
+    assert "LINT FAIL (backend):" in formatted
+    assert "Output:\nsrc/app.py:10:5: E501 line too long" in formatted
+
+
+def test_event_formatter_truncates_output_to_last_ten_lines_by_default() -> None:
+    output = "\n".join(f"line-{i}" for i in range(1, 16))
+    event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Test command result",
+        event_type=chief.EventType.test_run,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={"command": "run-tests tests", "exit_code": 1, "output": output},
+    )
+
+    formatted = chief.EventFormatter().format_events([event])
+    output_block = formatted.split("Output:\n", 1)[1]
+    assert output_block.splitlines() == [f"line-{i}" for i in range(6, 16)]
+
+
+def test_event_formatter_uses_shared_instance_truncation_limits() -> None:
+    output = "0123456789abcdef"
+    formatter = chief.EventFormatter(max_output_lines=10, max_output_chars=6)
+    test_event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Test command result",
+        event_type=chief.EventType.test_run,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={"command": "run-tests tests", "exit_code": 1, "output": output},
+    )
+    lint_event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Lint command result",
+        event_type=chief.EventType.lint,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={"suite": "backend", "exit_code": 1, "output": output},
+    )
+
+    formatted = formatter.format_events([test_event, lint_event])
+    assert formatted.count("Output:\nabcdef") == 2
+    assert "0123456789" not in formatted
+
+
 def test_test_runner_format_target_strips_test_root_prefix() -> None:
     runner = chief.TestRunner(
         _suite(test_root="tests", default_target="tests", strip_root_from_target=True),
