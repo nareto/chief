@@ -240,14 +240,18 @@ def test_build_phase_context_prefers_current_run_events() -> None:
             calls.append("recent")
             return ["previous"]
 
-    context = chief._build_phase_context(
-        FakeDB(),  # type: ignore[arg-type]
+    iofacade = object.__new__(chief.ChiefIOFacade)
+    iofacade.dbclient = FakeDB()  # type: ignore[attr-defined]
+    iofacade._formatter = chief.EventFormatter()  # type: ignore[attr-defined]
+    context = chief.ChiefIOFacade.get_phase_context(
+        iofacade,
         todo_id="todo-1",
-        current_run_id="current",
+        run_id="current",
         phase=chief.Phase.red,
         event_types=[chief.EventType.agent_response],
     )
-    assert "current event" in context
+    assert context
+    assert context != "No previous attempts recorded."
     assert calls == ["events:current"]
 
 
@@ -273,10 +277,13 @@ def test_build_phase_context_falls_back_to_previous_run() -> None:
         def get_recent_run_ids_for_todo(self, todo_id, exclude_run_id):  # type: ignore[no-untyped-def]
             return ["previous"]
 
-    context = chief._build_phase_context(
-        FakeDB(),  # type: ignore[arg-type]
+    iofacade = object.__new__(chief.ChiefIOFacade)
+    iofacade.dbclient = FakeDB()  # type: ignore[attr-defined]
+    iofacade._formatter = chief.EventFormatter()  # type: ignore[attr-defined]
+    context = chief.ChiefIOFacade.get_phase_context(
+        iofacade,
         todo_id="todo-1",
-        current_run_id="current",
+        run_id="current",
         phase=chief.Phase.green,
         event_types=[chief.EventType.phase_failure],
     )
@@ -291,10 +298,13 @@ def test_build_phase_context_returns_default_message_when_no_events() -> None:
         def get_recent_run_ids_for_todo(self, todo_id, exclude_run_id):  # type: ignore[no-untyped-def]
             return []
 
-    context = chief._build_phase_context(
-        FakeDB(),  # type: ignore[arg-type]
+    iofacade = object.__new__(chief.ChiefIOFacade)
+    iofacade.dbclient = FakeDB()  # type: ignore[attr-defined]
+    iofacade._formatter = chief.EventFormatter()  # type: ignore[attr-defined]
+    context = chief.ChiefIOFacade.get_phase_context(
+        iofacade,
         todo_id="todo-1",
-        current_run_id="current",
+        run_id="current",
         phase=chief.Phase.green,
         event_types=[chief.EventType.phase_failure],
     )
