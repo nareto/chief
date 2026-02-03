@@ -415,6 +415,58 @@ def test_test_runner_validate_or_init_runs_init_after_missing_command(
     assert init_calls[0][0] == "bootstrap-tests"
 
 
+def test_linting_stability_strategy_is_stable_runs_lint_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suite = _suite(lint_command="lint {target}", test_root="tests")
+    run_fix_flags: list[bool] = []
+
+    def fake_run_lint(  # type: ignore[no-untyped-def]
+        self, target=None, run_fix=True
+    ) -> chief.SubprocessOutput:
+        run_fix_flags.append(run_fix)
+        return chief.SubprocessOutput(
+            exit_code=0,
+            merged_output="clean",
+            stdout="",
+            stderr="",
+            command="lint tests",
+        )
+
+    monkeypatch.setattr(chief.TestRunner, "run_lint", fake_run_lint)
+
+    state = SimpleNamespace(
+        run_id="run-1",
+        current_phase=chief.Phase.red,
+        iofacade=SimpleNamespace(log_event=lambda event: None),
+    )
+    todo = SimpleNamespace(todo_id="todo-1")
+    strategy = chief.LintingStabilityStrategy(
+        agent=chief.CodexCode(),
+        chief_run_state=state,
+        todo=todo,
+        suites=[suite],
+        lint_failures=[
+            (
+                suite,
+                chief.SubprocessOutput(
+                    exit_code=1,
+                    merged_output="fail",
+                    stdout="",
+                    stderr="",
+                    command="lint tests",
+                ),
+            )
+        ],
+    )
+
+    decision = strategy.is_stable(
+        0, chief.SubprocessOutput(exit_code=0, merged_output="", stdout="", stderr="")
+    )
+    assert decision == chief.StabilityDecision.terminal_success
+    assert run_fix_flags == [False]
+
+
 def test_stability_loop_context_requires_consecutive_stable_iterations() -> None:
     decisions = iter(
         [
@@ -440,7 +492,9 @@ def test_stability_loop_context_requires_consecutive_stable_iterations() -> None
                 exit_code=0, merged_output="", stdout="", stderr="", command=""
             )
 
-        def is_stable(self, iteration) -> chief.StabilityDecision:  # type: ignore[no-untyped-def]
+        def is_stable(  # type: ignore[no-untyped-def]
+            self, iteration_idx, iteration_output
+        ) -> chief.StabilityDecision:
             return next(decisions)
 
     context = chief.StabilityLoopContext(strategy=Strategy(), required_stable_iterations=2)
@@ -448,7 +502,7 @@ def test_stability_loop_context_requires_consecutive_stable_iterations() -> None
     assert len(runs) == 4
 
 
-def test_stability_loop_context_raises_timeout_when_never_stable() -> None:
+def test_stability_loop_context_raises_when_never_stable() -> None:
     class Strategy:
         chief_run_state = SimpleNamespace(
             run_id="run-1",
@@ -462,11 +516,13 @@ def test_stability_loop_context_raises_timeout_when_never_stable() -> None:
                 exit_code=0, merged_output="", stdout="", stderr="", command=""
             )
 
-        def is_stable(self, iteration) -> chief.StabilityDecision:  # type: ignore[no-untyped-def]
+        def is_stable(  # type: ignore[no-untyped-def]
+            self, iteration_idx, iteration_output
+        ) -> chief.StabilityDecision:
             return chief.StabilityDecision.unstable
 
     context = chief.StabilityLoopContext(
         strategy=Strategy(), required_stable_iterations=2, max_loops=3
     )
-    with pytest.raises(TimeoutError, match="failed to converge"):
+    with pytest.raises(chief.UnrecoverableError, match="failed to converge"):
         context.run()
