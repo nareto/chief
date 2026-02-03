@@ -420,7 +420,7 @@ def test_test_runner_run_lint_runs_fix_command_before_retry(
     )
     runner = chief.TestRunner(suite, state)
 
-    calls: list[str] = []
+    calls: list[tuple[str, bool]] = []
     outputs = [
         chief.SubprocessOutput(
             exit_code=1,
@@ -445,8 +445,10 @@ def test_test_runner_run_lint_runs_fix_command_before_retry(
         ),
     ]
 
-    def fake_run_streaming(cmd: str, cwd: str, env: dict[str, str]) -> chief.SubprocessOutput:
-        calls.append(cmd)
+    def fake_run_streaming(
+        cmd: str, cwd: str, env: dict[str, str], stream_output: bool = True
+    ) -> chief.SubprocessOutput:
+        calls.append((cmd, stream_output))
         return outputs.pop(0)
 
     monkeypatch.setattr(
@@ -455,9 +457,58 @@ def test_test_runner_run_lint_runs_fix_command_before_retry(
 
     out = runner.run_lint()
     assert out.exit_code == 0
-    assert calls == ["lint tests", "lint-fix tests", "lint tests"]
+    assert calls == [
+        ("lint tests", False),
+        ("lint-fix tests", False),
+        ("lint tests", False),
+    ]
     assert len(logged) == 1
     assert logged[0].msg == "Lint fix command result"
+
+
+def test_chief_iofacade_log_event_hides_lint_failure_output_in_stdout_logs() -> None:
+    class FakeDB:
+        def __init__(self) -> None:
+            self.saved: list[chief.ChiefLoggableEvent] = []
+
+        def save_event(self, event: chief.ChiefLoggableEvent) -> None:
+            self.saved.append(event)
+
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.logged: list[tuple[str, str]] = []
+
+        def warning(self, message: str) -> None:
+            self.logged.append(("warning", message))
+
+        def info(self, message: str) -> None:
+            self.logged.append(("info", message))
+
+    iofacade = object.__new__(chief.ChiefIOFacade)
+    iofacade.dbclient = FakeDB()  # type: ignore[attr-defined]
+    iofacade.logger = FakeLogger()  # type: ignore[attr-defined]
+
+    raw_output = "line-1\nline-2\nline-3"
+    event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Lint failed (backend)",
+        event_type=chief.EventType.lint,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={
+            "suite": "backend",
+            "command": "ruff check tests",
+            "exit_code": 1,
+            "output": raw_output,
+        },
+    )
+
+    chief.ChiefIOFacade.log_event(iofacade, event)
+    assert len(iofacade.dbclient.saved) == 1  # type: ignore[attr-defined]
+    assert iofacade.dbclient.saved[0].payload["output"] == raw_output  # type: ignore[attr-defined]
+    logged_message = iofacade.logger.logged[0][1]  # type: ignore[attr-defined]
+    assert "line-1" not in logged_message
+    assert "<omitted; full lint output saved to DB and prompt tail>" in logged_message
 
 
 def test_test_runner_validate_or_init_runs_init_after_missing_command(
