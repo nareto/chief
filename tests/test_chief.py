@@ -802,18 +802,6 @@ def test_linting_stability_strategy_is_stable_runs_lint_and_succeeds(
         chief_run_state=state,
         todo=todo,
         suites=[suite],
-        lint_failures=[
-            (
-                suite,
-                chief.SubprocessOutput(
-                    exit_code=1,
-                    merged_output="fail",
-                    stdout="",
-                    stderr="",
-                    command="lint tests",
-                ),
-            )
-        ],
     )
 
     decision = strategy.is_stable(
@@ -821,6 +809,124 @@ def test_linting_stability_strategy_is_stable_runs_lint_and_succeeds(
     )
     assert decision == chief.StabilityDecision.terminal_success
     assert run_fix_flags == [False]
+
+
+def test_linting_stability_strategy_precheck_runs_lint_once_without_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suite = _suite(
+        lint_command="lint {target}",
+        lint_fix_command="lint-fix {target}",
+        test_root="tests",
+    )
+    run_fix_flags: list[bool] = []
+
+    def fake_run_lint(  # type: ignore[no-untyped-def]
+        self, target=None, run_fix=True
+    ) -> chief.SubprocessOutput:
+        run_fix_flags.append(run_fix)
+        return chief.SubprocessOutput(
+            exit_code=0,
+            merged_output="clean",
+            stdout="",
+            stderr="",
+            command="lint tests",
+        )
+
+    monkeypatch.setattr(chief.TestRunner, "run_lint", fake_run_lint)
+
+    state = SimpleNamespace(
+        run_id="run-1",
+        current_phase=chief.Phase.red,
+        iofacade=SimpleNamespace(log_event=lambda event: None),
+    )
+    strategy = chief.LintingStabilityStrategy(
+        agent=chief.CodexCode(),
+        chief_run_state=state,
+        todo=SimpleNamespace(todo_id="todo-1"),
+        suites=[suite],
+    )
+
+    chief.StabilityLoopContext(strategy=strategy, required_stable_iterations=1).run()
+    assert run_fix_flags == [False]
+
+
+def test_post_green_strategy_enables_pre_loop_stability_check() -> None:
+    strategy = chief.PostGreenStrategy(
+        agent=SimpleNamespace(),
+        chief_run_state=SimpleNamespace(current_phase=chief.Phase.post_green),
+        todo=SimpleNamespace(todo_id="todo-1"),
+        suites=[],
+    )
+    assert strategy.check_stability_before_loop is True
+
+
+def test_stability_loop_context_short_circuits_on_precheck_terminal_success() -> None:
+    decisions: list[int] = []
+    runs: list[int] = []
+
+    class Strategy:
+        check_stability_before_loop = True
+        chief_run_state = SimpleNamespace(
+            run_id="run-1",
+            current_phase=chief.Phase.red,
+            iofacade=SimpleNamespace(log_event=lambda event: None),
+        )
+        todo = SimpleNamespace(todo_id="todo-1")
+
+        def run_iteration(self) -> chief.SubprocessOutput:
+            runs.append(1)
+            return chief.SubprocessOutput(
+                exit_code=0, merged_output="", stdout="", stderr="", command=""
+            )
+
+        def is_stable(  # type: ignore[no-untyped-def]
+            self, iteration_idx, iteration_output
+        ) -> chief.StabilityDecision:
+            decisions.append(iteration_idx)
+            return chief.StabilityDecision.terminal_success
+
+    chief.StabilityLoopContext(strategy=Strategy(), required_stable_iterations=2).run()
+    assert decisions == [-1]
+    assert runs == []
+
+
+def test_stability_loop_context_does_not_count_precheck_stable() -> None:
+    decisions = iter(
+        [
+            chief.StabilityDecision.stable,
+            chief.StabilityDecision.stable,
+            chief.StabilityDecision.stable,
+        ]
+    )
+    seen_indices: list[int] = []
+    runs: list[int] = []
+
+    class Strategy:
+        check_stability_before_loop = True
+        chief_run_state = SimpleNamespace(
+            run_id="run-1",
+            current_phase=chief.Phase.red,
+            iofacade=SimpleNamespace(log_event=lambda event: None),
+        )
+        todo = SimpleNamespace(todo_id="todo-1")
+
+        def run_iteration(self) -> chief.SubprocessOutput:
+            runs.append(1)
+            return chief.SubprocessOutput(
+                exit_code=0, merged_output="", stdout="", stderr="", command=""
+            )
+
+        def is_stable(  # type: ignore[no-untyped-def]
+            self, iteration_idx, iteration_output
+        ) -> chief.StabilityDecision:
+            seen_indices.append(iteration_idx)
+            return next(decisions)
+
+    context = chief.StabilityLoopContext(strategy=Strategy(), required_stable_iterations=2)
+    context.run()
+    assert seen_indices == [-1, 0, 1]
+    assert len(runs) == 2
 
 
 def test_stability_loop_context_requires_consecutive_stable_iterations() -> None:
@@ -835,6 +941,7 @@ def test_stability_loop_context_requires_consecutive_stable_iterations() -> None
     runs: list[int] = []
 
     class Strategy:
+        check_stability_before_loop = False
         chief_run_state = SimpleNamespace(
             run_id="run-1",
             current_phase=chief.Phase.red,
@@ -860,6 +967,7 @@ def test_stability_loop_context_requires_consecutive_stable_iterations() -> None
 
 def test_stability_loop_context_raises_when_never_stable() -> None:
     class Strategy:
+        check_stability_before_loop = False
         chief_run_state = SimpleNamespace(
             run_id="run-1",
             current_phase=chief.Phase.green,
