@@ -17,11 +17,14 @@ Chief runs a phase-based loop for each todo:
 
 Chief records all events (agent prompts/responses, diffs, test outputs) in `chief.db` and queries it to give context to subsequent prompts.
 
-### Stability Loops
+### Iteration Loops
 
 Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of stability: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success. 
 
-We call this a stability loop, with a minimum required stability of 2. It's used in Red phase, or for tasks in `todos.json` that specify no `test_suites` (like, "update the docs"). 
+Chief uses two loop types:
+
+- **Convergence loop**: require consecutive stable outcomes (used in RED and no-test GREEN tasks).
+- **Until-pass loop**: repeatedly run checks and ask the agent to fix failures until all checks pass (used for linting, GREEN with tests, and POST_GREEN).
 
 
 ## ⚠️ Potential Data Loss Warning
