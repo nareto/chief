@@ -1,0 +1,11 @@
+panes:
+  - command: codex
+    focus: true
+  # - command: npm install && npm run dev
+  #   split: horizontal
+
+files:
+  symlink:
+    - .turbo # share build cache across worktrees
+  # copy:
+  #   - .env
