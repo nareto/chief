@@ -227,6 +227,57 @@ def test_codex_code_parse_output_supports_multiple_json_shapes() -> None:
     assert parsed == "ABCDE"
 
 
+def test_decode_jsonish_unwraps_double_encoded_json() -> None:
+    encoded = json.dumps(json.dumps({"suite": "backend", "exit_code": 0}))
+    decoded = chief._decode_jsonish(encoded)
+    assert decoded == {"suite": "backend", "exit_code": 0}
+
+
+def test_chief_loggable_event_round_trip_restores_payload_and_event_type(
+    tmp_path: Path,
+) -> None:
+    db = chief.DBClient(str(tmp_path / "chief.db"))
+    db.save_run(
+        chief.Run(
+            run_id="run-1",
+            status="running",
+            exit_status=None,
+            started_at=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            ended_at=None,
+        )
+    )
+    db.save_event(
+        chief.ChiefLoggableEvent(
+            run_id="run-1",
+            level="info",
+            msg="Lint passed (backend)",
+            event_type=chief.EventType.lint,
+            timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            payload={
+                "suite": "backend",
+                "command": "ruff check .",
+                "output": "All checks passed!",
+                "exit_code": 0,
+            },
+        )
+    )
+
+    events = db.get_events(
+        ["run-1"],
+        event_types=[chief.EventType.lint],
+        limit=1,
+    )
+    assert len(events) == 1
+    loaded = events[0]
+    assert loaded.event_type == chief.EventType.lint
+    assert isinstance(loaded.payload, dict)
+    assert loaded.payload["suite"] == "backend"
+
+    formatted = chief.EventFormatter().format_events(events)
+    assert "LINT PASS (backend)" in formatted
+    db.close()
+
+
 def test_select_suites_returns_matching_suites_in_source_order() -> None:
     suites = [_suite(name="a"), _suite(name="b"), _suite(name="c")]
     selected = chief._select_suites(suites, ["c", "a"])
