@@ -5,7 +5,9 @@
 # coding agent to use
 agent = "codex"
 # codex model (only used when agent = "codex")
-model = "codex-5.2"
+model = "gpt-5.3-codex"
+# codex reasoning effort (only used when agent = "codex")
+model_reasoning_effort = "high"
 # extra args appended to agent invocation
 agent_extra_args = []
 # maximum run retries
