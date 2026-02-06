@@ -13,7 +13,7 @@ agent_extra_args = []
 # maximum run retries
 max_retries = 10
 # max seconds to wait for the coding agent per run before timing out
-agent_timeout_seconds = 1800
+agent_timeout_seconds = 2700
 
 # Chief Configuration Reference
 # =============================

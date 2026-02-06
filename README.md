@@ -57,7 +57,7 @@ agent = "claude" # or "codex"
 model = "gpt-5" # optional, codex only
 agent_extra_args = []
 max_retries = 10
-agent_timeout_seconds = 1800
+agent_timeout_seconds = 2700
 
 [[suites]]
 name = "backend"
@@ -159,7 +159,7 @@ The commands reference the example files to understand the schema, so all three 
 | `model` | No | Codex model name (only used when `agent = "codex"`) |
 | `agent_extra_args` | No | Extra CLI args appended to the agent invocation |
 | `max_retries` | No | Max number of run retries (default 10) |
-| `agent_timeout_seconds` | No | Max seconds to wait for the coding agent (default 1800) |
+| `agent_timeout_seconds` | No | Max seconds to wait for the coding agent (default 2700) |
 
 ### Suite Options (`[[suites]]`)
 
