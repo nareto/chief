@@ -173,8 +173,10 @@ def test_chief_toml_manager_load_parses_core_configuration(tmp_path: Path) -> No
         """
         [chief]
         agent = "codex"
+        model = "gpt-5"
         agent_extra_args = ["--model", "gpt-5"]
         max_retries = 4
+        agent_timeout_seconds = 1200
 
         [[suites]]
         name = "py"
@@ -198,8 +200,10 @@ def test_chief_toml_manager_load_parses_core_configuration(tmp_path: Path) -> No
     loaded = chief.ChiefTomlManager(str(toml_path)).load()
 
     assert loaded.chief.agent == "codex"
+    assert loaded.chief.model == "gpt-5"
     assert loaded.chief.agent_extra_args == ["--model", "gpt-5"]
     assert loaded.chief.max_retries == 4
+    assert loaded.chief.agent_timeout_seconds == 1200
     assert len(loaded.suites) == 1
     suite = loaded.suites[0]
     assert suite.name == "py"
@@ -231,6 +235,35 @@ def test_codex_code_parse_output_supports_multiple_json_shapes() -> None:
 
     parsed = chief.CodexCode().parse_output(output)
     assert parsed == "ABCDE"
+
+
+def test_codex_code_get_cmd_includes_model_and_strips_conflicting_extra_args() -> None:
+    cmd = chief.CodexCode(
+        extra_args=["--sandbox", "workspace-write", "--model", "old-model"],
+        model="gpt-5",
+    ).get_cmd(disallowed_paths=[])
+
+    assert cmd == [
+        "codex",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--model",
+        "gpt-5",
+        "-",
+    ]
+
+
+def test_parse_args_supports_codex_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["chief.py", "--model", "gpt-5", "--max-chief-retries", "7"],
+    )
+    args = chief.parse_args()
+    assert args.model == "gpt-5"
+    assert args.max_chief_retries == 7
 
 
 def test_decode_jsonish_unwraps_double_encoded_json() -> None:

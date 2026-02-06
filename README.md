@@ -54,6 +54,7 @@ See `chief.toml.example` for more examples. Here's a minimal config:
 ```toml
 [chief]
 agent = "claude" # or "codex"
+model = "gpt-5" # optional, codex only
 agent_extra_args = []
 max_retries = 10
 
@@ -92,6 +93,8 @@ See `todos.json.example` for reference. Here's a sample:
 
 ```bash
 python chief.py
+# or override codex model from CLI for this run
+python chief.py --model gpt-5
 ```
 
 ## Optional: Claude Code Commands
@@ -133,6 +136,7 @@ The commands reference the example files to understand the schema, so all three 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `agent` | No | Coding agent to use (`claude` or `codex`) |
+| `model` | No | Codex model name (only used when `agent = "codex"`) |
 | `agent_extra_args` | No | Extra CLI args appended to the agent invocation |
 | `max_retries` | No | Max number of run retries (default 10) |
 

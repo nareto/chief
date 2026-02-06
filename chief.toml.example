@@ -3,7 +3,9 @@
 # ============================================================
 [chief]
 # coding agent to use
-agent = "claude"
+agent = "codex"
+# codex model (only used when agent = "codex")
+model = "codex-5.2"
 # extra args appended to agent invocation
 agent_extra_args = []
 # maximum run retries
