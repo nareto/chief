@@ -112,8 +112,8 @@ python chief.py --requirements-file prd.md
 
 Behavior:
 - Chief sends a focused prompt to the configured agent (based on the `/req` and `/prd` command style).
-- The agent is asked to edit only `todos.json`, following `todos.json.example`.
-- Chief then prints `git diff -- todos.json` and exits.
+- The agent is asked to update `todos.json` following `todos.json.example`, and may scaffold if your prompt requires it.
+- Chief prints a single combined `git diff HEAD` and exits.
 
 ## Optional: Claude Code Commands
 

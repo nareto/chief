@@ -292,7 +292,7 @@ def test_build_requirements_agent_prompt_contains_core_instructions() -> None:
     )
     assert "Break requirements down into single todos" in prompt
     assert "todos.json.example" in prompt
-    assert "Edit only `todos.json`." in prompt
+    assert "If you did not do any scaffolding, edit only `todos.json`." in prompt
     assert "change that button to green" in prompt
 
 
@@ -336,14 +336,19 @@ def test_main_requirements_mode_updates_todos_and_exits(
         ),
     )
     monkeypatch.setattr(chief, "_build_agent_from_config", lambda *a, **k: FakeAgent())
-    monkeypatch.setattr(chief, "_git_diff_for_file", lambda path: "diff --git a/todos.json b/todos.json")
+    monkeypatch.setattr(
+        chief.GitOperations,
+        "diff",
+        lambda files=None, cached=False, against_ref=None: "combined diff output",
+    )
 
     exit_code = chief.main()
 
     assert exit_code == 0
     assert "change that button to green" in captured_prompt["value"]
     stdout = capsys.readouterr().out
-    assert "diff --git a/todos.json b/todos.json" in stdout
+    assert "=== git diff HEAD ===" in stdout
+    assert "combined diff output" in stdout
 
 
 def test_decode_jsonish_unwraps_double_encoded_json() -> None:
