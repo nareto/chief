@@ -53,7 +53,7 @@ See `chief.toml.example` for more examples. Here's a minimal config:
 
 ```toml
 [chief]
-agent = "claude" # or "codex"
+agent = "codex" # or "claude"
 model = "gpt-5" # optional, codex only
 agent_extra_args = []
 max_retries = 10
@@ -155,7 +155,7 @@ The commands reference the example files to understand the schema, so all three 
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `agent` | No | Coding agent to use (`claude` or `codex`) |
+| `agent` | No | Coding agent to use (`codex` or `claude`), default: `codex` |
 | `model` | No | Codex model name (only used when `agent = "codex"`) |
 | `agent_extra_args` | No | Extra CLI args appended to the agent invocation |
 | `max_retries` | No | Max number of run retries (default 10) |

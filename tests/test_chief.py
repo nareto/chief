@@ -214,6 +214,17 @@ def test_chief_toml_manager_load_parses_core_configuration(tmp_path: Path) -> No
     assert suite.strip_root_from_target is False
 
 
+def test_chief_toml_manager_defaults_to_codex_when_config_is_empty(
+    tmp_path: Path,
+) -> None:
+    toml_path = tmp_path / "chief.toml"
+    toml_path.write_text("", encoding="utf-8")
+
+    loaded = chief.ChiefTomlManager(str(toml_path)).load()
+
+    assert loaded.chief.agent == "codex"
+
+
 def test_codex_code_parse_output_supports_multiple_json_shapes() -> None:
     output = "\n".join(
         [
