@@ -27,12 +27,18 @@ def _suite(**overrides: object) -> chief.TestSuite:
     return chief.TestSuite(**data)  # type: ignore[arg-type]
 
 
-def _state(*, phase: chief.Phase = chief.Phase.red) -> SimpleNamespace:
+def _state(
+    *,
+    phase: chief.Phase = chief.Phase.red,
+    run_id: str = "run-1",
+    current_todo_id: str = "todo-1",
+    iofacade: SimpleNamespace | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
-        run_id="run-1",
-        current_todo_id="todo-1",
+        run_id=run_id,
+        current_todo_id=current_todo_id,
         current_phase=phase,
-        iofacade=SimpleNamespace(log_event=lambda event: None),
+        iofacade=iofacade or SimpleNamespace(log_event=lambda event: None),
     )
 
 
@@ -666,7 +672,7 @@ def test_test_runner_format_target_strips_test_root_prefix() -> None:
     assert runner._format_target(None) == "tests"
 
 
-def test_test_runner_run_lint_runs_fix_command_before_retry(
+def test_linting_fix_strategy_run_lint_checks_runs_fix_command_before_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     suite = _suite(
@@ -675,13 +681,18 @@ def test_test_runner_run_lint_runs_fix_command_before_retry(
         test_root="tests",
     )
     logged: list[chief.ChiefLoggableEvent] = []
-    state = SimpleNamespace(
+    state = _state(
+        phase=chief.Phase.red,
         run_id="run-1",
         current_todo_id="todo-1",
-        current_phase=chief.Phase.red,
         iofacade=SimpleNamespace(log_event=lambda event: logged.append(event)),
     )
-    runner = chief.TestRunner(suite, state)
+    strategy = chief.LintingFixStrategy(
+        agent=chief.CodexCode(),
+        chief_run_state=state,
+        todo=SimpleNamespace(todo_id="todo-1"),
+        suites=[suite],
+    )
 
     calls: list[tuple[str, bool]] = []
     outputs = [
@@ -708,25 +719,27 @@ def test_test_runner_run_lint_runs_fix_command_before_retry(
         ),
     ]
 
-    def fake_run_streaming(
+    def fake_run_command(
         cmd: str, cwd: str, env: dict[str, str], stream_output: bool = True
     ) -> chief.SubprocessOutput:
         calls.append((cmd, stream_output))
         return outputs.pop(0)
 
-    monkeypatch.setattr(
-        chief.TestRunner, "_run_streaming", staticmethod(fake_run_streaming)
-    )
+    monkeypatch.setattr(chief.SubprocessRunner, "run", fake_run_command)
 
-    out = runner.run_lint()
-    assert out.exit_code == 0
+    failures = strategy._run_lint_checks(phase_label="red", run_fix=True)
+    assert failures == []
     assert calls == [
         ("lint tests", False),
         ("lint-fix tests", False),
         ("lint tests", False),
     ]
-    assert len(logged) == 1
-    assert logged[0].msg == "Lint fix command result"
+    assert len(logged) == 3
+    assert [event.msg for event in logged] == [
+        "Lint failed (backend)",
+        "Lint fix command result",
+        "Lint passed (backend)",
+    ]
 
 
 def test_chief_iofacade_log_event_hides_lint_failure_output_in_stdout_logs() -> None:
@@ -828,25 +841,15 @@ def test_linting_fix_strategy_check_goal_runs_lint_and_succeeds(
     suite = _suite(lint_command="lint {target}", test_root="tests")
     run_fix_flags: list[bool] = []
 
-    def fake_run_lint(  # type: ignore[no-untyped-def]
-        self, target=None, run_fix=True
-    ) -> chief.SubprocessOutput:
+    def fake_run_lint_checks(  # type: ignore[no-untyped-def]
+        self, phase_label, run_fix=False
+    ):
         run_fix_flags.append(run_fix)
-        return chief.SubprocessOutput(
-            exit_code=0,
-            merged_output="clean",
-            stdout="",
-            stderr="",
-            command="lint tests",
-        )
+        return []
 
-    monkeypatch.setattr(chief.TestRunner, "run_lint", fake_run_lint)
+    monkeypatch.setattr(chief.LintingFixStrategy, "_run_lint_checks", fake_run_lint_checks)
 
-    state = SimpleNamespace(
-        run_id="run-1",
-        current_phase=chief.Phase.red,
-        iofacade=SimpleNamespace(log_event=lambda event: None),
-    )
+    state = _state(phase=chief.Phase.red)
     todo = SimpleNamespace(todo_id="todo-1")
     strategy = chief.LintingFixStrategy(
         agent=chief.CodexCode(),
@@ -872,25 +875,15 @@ def test_linting_fix_strategy_precheck_runs_lint_once_without_fix(
     )
     run_fix_flags: list[bool] = []
 
-    def fake_run_lint(  # type: ignore[no-untyped-def]
-        self, target=None, run_fix=True
-    ) -> chief.SubprocessOutput:
+    def fake_run_lint_checks(  # type: ignore[no-untyped-def]
+        self, phase_label, run_fix=False
+    ):
         run_fix_flags.append(run_fix)
-        return chief.SubprocessOutput(
-            exit_code=0,
-            merged_output="clean",
-            stdout="",
-            stderr="",
-            command="lint tests",
-        )
+        return []
 
-    monkeypatch.setattr(chief.TestRunner, "run_lint", fake_run_lint)
+    monkeypatch.setattr(chief.LintingFixStrategy, "_run_lint_checks", fake_run_lint_checks)
 
-    state = SimpleNamespace(
-        run_id="run-1",
-        current_phase=chief.Phase.red,
-        iofacade=SimpleNamespace(log_event=lambda event: None),
-    )
+    state = _state(phase=chief.Phase.red)
     strategy = chief.LintingFixStrategy(
         agent=chief.CodexCode(),
         chief_run_state=state,
