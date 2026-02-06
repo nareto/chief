@@ -97,6 +97,24 @@ python chief.py
 python chief.py --model gpt-5
 ```
 
+### 5. Generate todos from requirements (agent-driven)
+
+Chief can ask the configured agent to translate requirements directly into `todos.json`.
+This works with both formal PRDs and vague requests.
+
+```bash
+# Inline requirement text (repeatable)
+python chief.py --requirements "change that button to green"
+
+# Requirements from file(s) (repeatable)
+python chief.py --requirements-file prd.md
+```
+
+Behavior:
+- Chief sends a focused prompt to the configured agent (based on the `/req` and `/prd` command style).
+- The agent is asked to edit only `todos.json`, following `todos.json.example`.
+- Chief then prints `git diff -- todos.json` and exits.
+
 ## Optional: Claude Code Commands
 
 Chief includes optional Claude Code slash commands that help manage your `todos.json`. To use them, symlink the `.claude` directory and example files into your project:
@@ -128,6 +146,7 @@ The commands reference the example files to understand the schema, so all three 
 - **Smart Recovery** - Automatic retry loops with rollback on failure
 - **Git Integration** - Auto-commit and tag on successful completion
 - **Priority Queue** - Process todos by priority (highest first)
+- **Requirements Intake Mode** - Convert PRDs/requirements into `todos.json` via a single agent run and show the resulting `git diff`
 
 ## Configuration Reference
 

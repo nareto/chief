@@ -266,6 +266,86 @@ def test_parse_args_supports_codex_model_override(monkeypatch: pytest.MonkeyPatc
     assert args.max_chief_retries == 7
 
 
+def test_parse_args_supports_requirements_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chief.py",
+            "--requirements",
+            "change that button to green",
+            "--requirements-file",
+            "prd.md",
+        ],
+    )
+    args = chief.parse_args()
+    assert args.requirements == ["change that button to green"]
+    assert args.requirements_file == ["prd.md"]
+
+
+def test_build_requirements_agent_prompt_contains_core_instructions() -> None:
+    prompt = chief._build_requirements_agent_prompt(
+        "change that button to green",
+        "todos.json",
+    )
+    assert "Break requirements down into single todos" in prompt
+    assert "todos.json.example" in prompt
+    assert "Edit only `todos.json`." in prompt
+    assert "change that button to green" in prompt
+
+
+def test_main_requirements_mode_updates_todos_and_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requirements_path = tmp_path / "req.txt"
+    requirements_path.write_text("change that button to green", encoding="utf-8")
+    captured_prompt: dict[str, str] = {}
+
+    class FakeAgent:
+        def run(self, prompt: str, **kwargs):  # type: ignore[no-untyped-def]
+            captured_prompt["value"] = prompt
+            return chief.SubprocessOutput(
+                exit_code=0,
+                merged_output="",
+                stdout="",
+                stderr="",
+                command="fake",
+            )
+
+    args = SimpleNamespace(
+        todos_path=str(tmp_path / "todos.json"),
+        toml_path=str(tmp_path / "chief.toml"),
+        db_path=str(tmp_path / "chief.db"),
+        clean_done=False,
+        tail_events=0,
+        max_chief_retries=None,
+        agent_timeout_seconds=None,
+        model=None,
+        model_reasoning_effort=None,
+        requirements=[],
+        requirements_file=[str(requirements_path)],
+    )
+    monkeypatch.setattr(chief, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        chief,
+        "ChiefTomlManager",
+        lambda _path: SimpleNamespace(
+            load=lambda: chief.ChiefToml(suites=[], chief=chief.ChiefConfig(agent="codex"))
+        ),
+    )
+    monkeypatch.setattr(chief, "_build_agent_from_config", lambda *a, **k: FakeAgent())
+    monkeypatch.setattr(chief, "_git_diff_for_file", lambda path: "diff --git a/todos.json b/todos.json")
+
+    exit_code = chief.main()
+
+    assert exit_code == 0
+    assert "change that button to green" in captured_prompt["value"]
+    stdout = capsys.readouterr().out
+    assert "diff --git a/todos.json b/todos.json" in stdout
+
+
 def test_decode_jsonish_unwraps_double_encoded_json() -> None:
     encoded = json.dumps(json.dumps({"suite": "backend", "exit_code": 0}))
     decoded = chief._decode_jsonish(encoded)
