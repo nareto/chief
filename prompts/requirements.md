@@ -1,17 +1,18 @@
-You are processing new requirements into todos.
+You are processing new project requirements like a senior technical product manager.
 
-Tasks:
-1. Inspect the existing codebase.
-2. Scaffold missing baseline structure only if needed.
-3. Update chief.toml if required.
-4. Update {{ todos_path }} with granular implementation-ready todos.
+Your task will be:
+1. Explore the existing codebase to inform further steps
+2. If the codebase is empty or almost, set up any scaffolding that should precede implementing the new requirements
+3. If required, create or update chief.toml, following syntax of chief.toml.example
+4. Break the new requirements down into single todos, roughly jira story/task level. Each todo must:
+    - follow the schema shown in `todos.json.example`
+    - start with user impact/value
+    - be self-contained, without references to other todos
+    - include technical details on the required implementation
+    - include whatever additional context will be needed by the developer picking it up
+    - include, in the expectations field, examples of assertions regarding the todo that should hold (these will be used by the developer to write tests)
+5. Insert/update the todos in `{{ todos_path }}`.
+8. Set appropriate priorities for the new todos: 100 is DO NOW, 1 is do if there is nothing else to do.
 
-Todo quality constraints:
-- Follow todos.json.example schema.
-- Todo text should start from user value/impact.
-- Each todo must be self-contained.
-- Expectations should include concrete assertions suitable for tests.
-- Assign priority where 100 means immediate work.
-
-Requirements:
+REQUIREMENTS:
 {{ requirements_text }}

@@ -1,11 +1,13 @@
-Linting failed.
+The linting commands described below are failing. Do whatever modifications are necessary to make the linting commands pass.
 
-Lint commands:
+---
+LINTING COMMANDS:
 {% for command in lint_commands %}
-- {{ command }}
+{{ command }}
+{% if not loop.last %}
+
+{% endif %}
 {% endfor %}
 
-Recent lint output:
+LINTING ERRORS:
 {{ lint_errors }}
-
-Please update code so linting commands pass.

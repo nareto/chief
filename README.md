@@ -1,5 +1,43 @@
 # Chief (Rust)
 
+**Chief** is an automated TDD orchestrator that enforces discipline on your coding agent: write failing tests first, then implement, then verify.
+
+This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralph/) from Geoffrey Huntley.
+
+## How It Works
+
+Chief runs a phase-based loop for each todo:
+
+1. **RED**: write or refine tests
+  - stability required to pass phase (see next section)
+2. **GREEN**: implement features
+  - tests must pass to pass the phase.
+3. **POST_GREEN**: optional lint/build commands after tests pass.
+4. **Commit**: auto-commit and tag on success.
+
+Chief records all events (agent prompts/responses, diffs, test outputs) in `chief.db` and queries it to give context to subsequent prompts.
+
+### Iteration Loops
+
+Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of stability: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success.
+
+Chief uses two loop types:
+
+- **Convergence loop**: require consecutive stable outcomes (used in RED and no-test GREEN tasks).
+- **Until-pass loop**: repeatedly run checks and ask the agent to fix failures until all checks pass (used for linting, GREEN with tests, and POST_GREEN).
+
+## ⚠️ Potential Data Loss Warning
+
+**Chief performs destructive Git operations.**
+
+To recover from failed TDD cycles, this tool utilizes `git checkout` to revert changes. It assumes it is the sole actor in the repository during execution.
+
+- **Start Clean:** Ensure you have no uncommitted changes or untracked files before running.
+- **Hands Off:** Do not modify files manually while the script is active.
+- **Data Loss:** Any file created or modified manually during a Chief run runs a high risk of being deleted if the agent triggers a rollback.
+
+## Rust Runtime Layout
+
 Chief is a Rust TDD orchestration system with:
 
 - `cli` binary for single-project execution (current Chief flow).
