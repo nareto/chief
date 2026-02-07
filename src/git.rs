@@ -20,11 +20,16 @@ pub struct ShellGitOps {
 }
 
 impl ShellGitOps {
+    fn command_with_safe_directory(cwd: &Path) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("-c").arg("safe.directory=*").current_dir(cwd);
+        cmd
+    }
+
     pub fn discover(start_dir: impl AsRef<Path>) -> Result<Self> {
-        let output = Command::new("git")
+        let output = Self::command_with_safe_directory(start_dir.as_ref())
             .arg("rev-parse")
             .arg("--show-toplevel")
-            .current_dir(start_dir.as_ref())
             .output()
             .context("failed to execute git rev-parse")?;
         if !output.status.success() {
@@ -41,9 +46,8 @@ impl ShellGitOps {
     }
 
     fn run_capture(&self, cwd: &Path, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
+        let output = Self::command_with_safe_directory(cwd)
             .args(args)
-            .current_dir(cwd)
             .output()
             .with_context(|| format!("git command failed to start: git {}", args.join(" ")))?;
         if !output.status.success() {
@@ -57,9 +61,8 @@ impl ShellGitOps {
     }
 
     fn run_status(&self, cwd: &Path, args: &[&str]) -> Result<()> {
-        let status = Command::new("git")
+        let status = Self::command_with_safe_directory(cwd)
             .args(args)
-            .current_dir(cwd)
             .status()
             .with_context(|| format!("git command failed to start: git {}", args.join(" ")))?;
         if !status.success() {
@@ -96,16 +99,13 @@ impl GitOps for ShellGitOps {
             return Ok(String::new());
         }
 
-        let mut cmd = Command::new("git");
+        let mut cmd = Self::command_with_safe_directory(cwd);
         cmd.arg("diff").arg("--stat").arg("--");
         for file in files {
             cmd.arg(file);
         }
 
-        let output = cmd
-            .current_dir(cwd)
-            .output()
-            .context("failed to run git diff --stat")?;
+        let output = cmd.output().context("failed to run git diff --stat")?;
         if !output.status.success() {
             return Err(anyhow!(
                 "git diff --stat failed: {}",
@@ -118,9 +118,8 @@ impl GitOps for ShellGitOps {
     fn commit_and_tag(&self, cwd: &Path, message: &str) -> Result<String> {
         self.run_status(cwd, &["add", "-A"])?;
 
-        let status = Command::new("git")
+        let status = Self::command_with_safe_directory(cwd)
             .args(["commit", "-m", message])
-            .current_dir(cwd)
             .status()
             .context("failed to run git commit")?;
 

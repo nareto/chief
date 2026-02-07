@@ -240,7 +240,7 @@ impl ProjectStore {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
-            let started_at: String = row.get(7)?;
+            let started_at: Option<String> = row.get(7)?;
             let ended_at: Option<String> = row.get(8)?;
             let worker_index: i64 = row.get(4)?;
             Ok(JobRecord {
@@ -251,7 +251,10 @@ impl ProjectStore {
                 worker_index: worker_index as usize,
                 flow: row.get(5)?,
                 worktree_path: row.get(6)?,
-                started_at: parse_datetime(&started_at).unwrap_or_else(|_| Utc::now()),
+                started_at: started_at
+                    .as_deref()
+                    .and_then(|value| parse_datetime(value).ok())
+                    .unwrap_or_else(Utc::now),
                 ended_at: ended_at
                     .as_deref()
                     .and_then(|value| parse_datetime(value).ok()),
@@ -326,23 +329,30 @@ impl ProjectStore {
             bind_values.into_iter().map(json_to_sql_value).collect();
 
         let rows = stmt.query_map(rusqlite::params_from_iter(rusqlite_values), |row| {
-            let payload_text: String = row.get(9)?;
-            let payload: BTreeMap<String, serde_json::Value> =
-                serde_json::from_str(&payload_text).unwrap_or_default();
+            let payload_text: Option<String> = row.get(9)?;
+            let payload: BTreeMap<String, serde_json::Value> = payload_text
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok())
+                .unwrap_or_default();
             let phase_text: Option<String> = row.get(6)?;
-            let event_type_text: String = row.get(8)?;
-            let timestamp_text: String = row.get(4)?;
+            let event_type_text: Option<String> = row.get(8)?;
+            let timestamp_text: Option<String> = row.get(4)?;
+            let level_text: Option<String> = row.get(5)?;
+            let msg_text: Option<String> = row.get(7)?;
 
             Ok(EventRecord {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
                 job_id: row.get(2)?,
                 todo_id: row.get(3)?,
-                timestamp: parse_datetime(&timestamp_text).unwrap_or_else(|_| Utc::now()),
-                level: row.get(5)?,
+                timestamp: timestamp_text
+                    .as_deref()
+                    .and_then(|value| parse_datetime(value).ok())
+                    .unwrap_or_else(Utc::now),
+                level: level_text.unwrap_or_else(|| "info".to_owned()),
                 phase: phase_text.as_deref().map(parse_phase),
-                msg: row.get(7)?,
-                event_type: parse_event_type(&event_type_text),
+                msg: msg_text.unwrap_or_default(),
+                event_type: parse_event_type(event_type_text.as_deref().unwrap_or("msg")),
                 payload,
             })
         })?;
@@ -400,7 +410,7 @@ impl ProjectStore {
 
     fn migrate(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
+            "PRAGMA foreign_keys = OFF;
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -444,6 +454,128 @@ impl ProjectStore {
             );",
         )
         .context("failed to migrate sqlite schema")?;
+
+        self.rebuild_todos_table_if_legacy(conn)?;
+        self.ensure_column(conn, "todos", "done_at_commit", "TEXT")?;
+        self.ensure_column(conn, "todos", "updated_at", "TEXT")?;
+        self.ensure_column(conn, "events", "job_id", "TEXT")?;
+
+        conn.execute(
+            "UPDATE todos SET updated_at = ?1 WHERE updated_at IS NULL OR TRIM(updated_at) = ''",
+            params![Utc::now().to_rfc3339()],
+        )?;
+
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .context("failed to re-enable sqlite foreign keys")?;
+        Ok(())
+    }
+
+    fn ensure_column(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<()> {
+        if self.table_has_column(conn, table, column)? {
+            return Ok(());
+        }
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        conn.execute(&sql, [])
+            .with_context(|| format!("failed to add column {table}.{column}"))?;
+        Ok(())
+    }
+
+    fn table_has_column(&self, conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn table_columns(&self, conn: &Connection, table: &str) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to inspect table {table}"))
+    }
+
+    fn rebuild_todos_table_if_legacy(&self, conn: &Connection) -> Result<()> {
+        let columns = self.table_columns(conn, "todos")?;
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let required = [
+            "id",
+            "priority",
+            "todo",
+            "expectations",
+            "test_suites",
+            "status",
+            "done_at_commit",
+            "updated_at",
+        ];
+        let has_all_required = required.iter().all(|col| columns.iter().any(|c| c == col));
+        let needs_rebuild = !has_all_required || columns.iter().any(|col| col == "run_id");
+        if !needs_rebuild {
+            return Ok(());
+        }
+
+        let src = "__chief_todos_legacy";
+        conn.execute(&format!("ALTER TABLE todos RENAME TO {src}"), [])
+            .context("failed to rename legacy todos table")?;
+        conn.execute_batch(
+            "CREATE TABLE todos (
+                id TEXT PRIMARY KEY,
+                priority INTEGER NOT NULL,
+                todo TEXT NOT NULL,
+                expectations TEXT NOT NULL,
+                test_suites TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done_at_commit TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .context("failed to create migrated todos table")?;
+
+        let expr = |name: &str, fallback: &str| -> String {
+            if columns.iter().any(|col| col == name) {
+                format!("COALESCE({name}, {fallback})")
+            } else {
+                fallback.to_owned()
+            }
+        };
+
+        let done_expr = if columns.iter().any(|col| col == "done_at_commit") {
+            "done_at_commit".to_owned()
+        } else {
+            "NULL".to_owned()
+        };
+
+        let sql = format!(
+            "INSERT INTO todos (id, priority, todo, expectations, test_suites, status, done_at_commit, updated_at)
+             SELECT {id_expr}, {priority_expr}, {todo_expr}, {expectations_expr}, {suites_expr}, {status_expr}, {done_expr}, {updated_expr}
+             FROM {src}",
+            id_expr = expr("id", "lower(hex(randomblob(16)))"),
+            priority_expr = expr("priority", "0"),
+            todo_expr = expr("todo", "''"),
+            expectations_expr = expr("expectations", "''"),
+            suites_expr = expr("test_suites", "'[]'"),
+            status_expr = expr("status", "'pending'"),
+            done_expr = done_expr,
+            updated_expr = expr("updated_at", "strftime('%Y-%m-%dT%H:%M:%fZ','now')"),
+            src = src,
+        );
+        conn.execute(&sql, [])
+            .context("failed to migrate legacy todos rows")?;
+        conn.execute(&format!("DROP TABLE {src}"), [])
+            .context("failed to drop legacy todos table")?;
         Ok(())
     }
 }

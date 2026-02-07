@@ -102,7 +102,7 @@ async fn run() -> Result<()> {
     let scheduler = Scheduler::new(registry);
     let state = Arc::new(AppState { scheduler });
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/api/projects", get(list_projects))
         .route("/api/projects/refresh", post(refresh_projects))
         .route("/api/projects/{project}/start", post(start_project))
@@ -121,9 +121,11 @@ async fn run() -> Result<()> {
         .with_state(state)
         .layer(CorsLayer::permissive());
 
-    if cli.frontend_dir.exists() {
-        app = app.nest_service("/", ServeDir::new(&cli.frontend_dir));
-    }
+    let app = if cli.frontend_dir.exists() {
+        app.fallback_service(ServeDir::new(&cli.frontend_dir))
+    } else {
+        app
+    };
 
     let bind = format!("{}:{}", cli.host, cli.port);
     let listener = tokio::net::TcpListener::bind(&bind)
