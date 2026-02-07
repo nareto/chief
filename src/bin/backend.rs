@@ -105,19 +105,19 @@ async fn run() -> Result<()> {
     let mut app = Router::new()
         .route("/api/projects", get(list_projects))
         .route("/api/projects/refresh", post(refresh_projects))
-        .route("/api/projects/:project/start", post(start_project))
-        .route("/api/projects/:project/stop", post(stop_project))
+        .route("/api/projects/{project}/start", post(start_project))
+        .route("/api/projects/{project}/stop", post(stop_project))
         .route(
-            "/api/projects/:project/todos",
+            "/api/projects/{project}/todos",
             get(get_todos).post(add_todo),
         )
-        .route("/api/projects/:project/jobs", get(get_jobs))
-        .route("/api/projects/:project/logs", get(get_logs))
+        .route("/api/projects/{project}/jobs", get(get_jobs))
+        .route("/api/projects/{project}/logs", get(get_logs))
         .route(
-            "/api/projects/:project/requirements",
+            "/api/projects/{project}/requirements",
             post(process_requirements),
         )
-        .route("/api/projects/:project/terminal/ws", get(terminal_ws))
+        .route("/api/projects/{project}/terminal/ws", get(terminal_ws))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
