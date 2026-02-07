@@ -1,208 +1,174 @@
-# Chief
+# Chief (Rust)
 
-**Chief** is an automated TDD orchestrator that enforces discipline on your coding agent: write failing tests first, then implement, then verify.
+Chief is a Rust TDD orchestration system with:
 
-This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralph/) from Geoffrey Huntley.
+- `cli` binary for single-project execution (current Chief flow).
+- `backend` binary for multi-project orchestration + introspection API.
+- responsive frontend (`frontend/`) for operating the backend.
 
-## How It Works
+The system keeps **per-project** state local:
 
-Chief runs a phase-based loop for each todo:
+- `chief.toml`
+- `todos.json`
+- `chief.db` (SQLite)
 
-1. **RED**: write or refine tests
-  - stability required to pass phase (see next section)
-2. **GREEN**: implement features
-  - tests must pass to pass the phase.
-3. **POST_GREEN**: optional lint/build commands after tests pass.
-4. **Commit**: auto-commit and tag on success.
+There is no centralized database.
 
-Chief records all events (agent prompts/responses, diffs, test outputs) in `chief.db` and queries it to give context to subsequent prompts.
+## Architecture
 
-### Iteration Loops
+Core library modules:
 
-Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of stability: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success. 
+- `src/domain.rs`: strongly-typed core models (`Todo`, `EventRecord`, `JobRecord`, `Phase`, `TodoStatus`, etc).
+- `src/config.rs`: `chief.toml` parsing for `[chief]`, `[backend]`, and `[[suites]]`.
+- `src/storage.rs`: per-project SQLite + `todos.json` synchronization.
+- `src/prompt.rs`: prompt loading/rendering from `prompts/*.md` using Jinja syntax (`minijinja`).
+- `src/agent.rs`: coding-agent abstraction and concrete CLI agent adapters.
+- `src/git.rs`: git/worktree operations.
+- `src/flow.rs`: pluggable orchestration building blocks.
+- `src/service.rs`: project registry + execution engine.
+- `src/scheduler.rs`: multi-agent backend scheduler.
 
-Chief uses two loop types:
+### Pluggable flow design (lego bricks)
 
-- **Convergence loop**: require consecutive stable outcomes (used in RED and no-test GREEN tasks).
-- **Until-pass loop**: repeatedly run checks and ask the agent to fix failures until all checks pass (used for linting, GREEN with tests, and POST_GREEN).
+`src/flow.rs` is intentionally modular:
 
+- `PhaseStrategy` trait: behavior for one phase (`RED`, `GREEN`, `POST_GREEN`, etc).
+- `LoopPolicy` trait: convergence loops vs until-pass loops.
+- `TodoFlow` trait: composition of phase strategies into full todo workflows.
 
-## ⚠️ Potential Data Loss Warning
+Included flows:
 
-**Chief performs destructive Git operations.**
+- `tdd` (default): RED -> GREEN -> POST_GREEN.
+- `single_prompt`: one implementation-focused loop (for experimentation).
 
-To recover from failed TDD cycles, this tool utilizes `git checkout` to revert changes. It assumes it is the sole actor in the repository during execution.
+Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
 
-- **Start Clean:** Ensure you have no uncommitted changes or untracked files before running.
-- **Hands Off:** Do not modify files manually while the script is active.
-- **Data Loss:** Any file created or modified manually during a Chief run runs a high risk of being deleted if the agent triggers a rollback.
+## Multi-agent backend model
 
-## Quick Start
+The backend manages multiple projects under one parent directory.
 
-### 1. Copy `chief.py` to your project
+For each project, the scheduler supports configurable parallel coding agents:
 
-Chief is a single self-contained file with no dependencies beyond Python 3.11+ stdlib. Just copy it into your codebase:
+- default is `1` (no parallelism).
+- when `agents > 1`, each worker runs in a dedicated git worktree.
+- todo selection is serialized (one selector at a time) to reduce conflicts.
+- for workers after the first, selector prompt (`prompts/todo_select.md`) includes:
+  - available todos (not done, not in progress)
+  - currently in-progress todos
+- each worker processes exactly one todo, exits, and then the scheduler spawns the next worker.
+- successful worker branches are merged back to mainline branch.
+
+## Prompts
+
+All prompts are Markdown templates with Jinja syntax under:
+
+- `prompts/red.md`
+- `prompts/green.md`
+- `prompts/post_green.md`
+- `prompts/lint_fix.md`
+- `prompts/requirements.md`
+- `prompts/todo_select.md`
+
+Each project can own its own `prompts/` directory.
+
+## CLI usage
+
+Run one project directly:
 
 ```bash
-cp chief.py /path/to/your/project/
+cargo run --bin cli -- --project-dir /path/to/project
 ```
 
-### 2. Create your config file (`chief.toml`)
+Common options:
 
-See `chief.toml.example` for more examples. Here's a minimal config:
+```bash
+cargo run --bin cli -- \
+  --project-dir /path/to/project \
+  --flow tdd \
+  --model gpt-5
+```
+
+Requirements -> todos mode:
+
+```bash
+cargo run --bin cli -- \
+  --project-dir /path/to/project \
+  --requirements "Add JWT auth and refresh token rotation"
+```
+
+Tail events:
+
+```bash
+cargo run --bin cli -- --project-dir /path/to/project --tail-events 50
+```
+
+## Backend usage
+
+Run backend over a parent directory containing multiple git projects:
+
+```bash
+cargo run --bin backend -- --parent-dir /path/to/projects --port 8000
+```
+
+Frontend can be served by nginx in docker compose (see below), and calls backend APIs for:
+
+- project status and runtime controls
+- start/stop project schedulers
+- job list and todo table
+- filtered logs
+- requirements ingestion
+- websocket terminal command execution
+
+## Docker compose
+
+Build and run:
+
+```bash
+docker compose up --build
+```
+
+Projects mount is generic in `docker-compose.yml`:
+
+```bash
+CHIEF_PROJECTS_PARENT=/absolute/path/to/projects docker compose up --build
+```
+
+For machine-specific setup (for example NFS), use `docker-compose.override.yml` locally. That file is gitignored.
+
+Services:
+
+- `backend` on `http://localhost:8000`
+- `frontend` on `http://localhost:3000`
+
+`frontend` proxies `/api/*` and websocket terminal traffic to backend.
+
+## Config (`chief.toml`) quick example
 
 ```toml
 [chief]
-agent = "codex" # or "claude"
-model = "gpt-5" # optional, codex only
-agent_extra_args = []
+agent = "codex"
+model = "gpt-5"
 max_retries = 10
 agent_timeout_seconds = 2700
 
+[backend]
+default_agents_per_project = 1
+max_agents_per_project = 8
+
 [[suites]]
 name = "backend"
-language = "Python"
-framework = "pytest"
+language = "Rust"
+framework = "cargo test"
 test_root = "."
-test_command = "pytest {target} -v"
-target_type = "file"
-file_patterns = ["test_*.py", "*_test.py"]
+test_command = "cargo test"
+target_type = "project"
+lint_command = "cargo clippy"
+post_green_command = "cargo test"
 ```
 
-### 3. Create your task list (`todos.json`)
+See `chief.toml.example` for more patterns.
 
-See `todos.json.example` for reference. Here's a sample:
+## Current status
 
-```json
-{
-  "todos": [
-    {
-      "todo": "Add user authentication with JWT tokens",
-      "priority": 10,
-      "expectations": "Users can login and receive a JWT token for subsequent API calls"
-    },
-    {
-      "todo": "Implement rate limiting for API endpoints",
-      "priority": 5
-    }
-  ]
-}
-```
-
-### 4. Run Chief
-
-```bash
-python chief.py
-# or override codex model from CLI for this run
-python chief.py --model gpt-5
-```
-
-### 5. Generate todos from requirements (agent-driven)
-
-Chief can ask the configured agent to translate requirements directly into `todos.json`.
-This works with both formal PRDs and vague requests.
-
-```bash
-# Inline requirement text (repeatable)
-python chief.py --requirements "change that button to green"
-
-# Requirements from file(s) (repeatable)
-python chief.py --requirements-file prd.md
-```
-
-Behavior:
-- Chief sends a focused prompt to the configured agent (based on the `/req` and `/prd` command style).
-- The agent is asked to update `todos.json` following `todos.json.example`, and may scaffold if your prompt requires it.
-- Chief prints a single combined `git diff HEAD` and exits.
-
-## Optional: Claude Code Commands
-
-Chief includes optional Claude Code slash commands that help manage your `todos.json`. To use them, symlink the `.claude` directory and example files into your project:
-
-```bash
-ln -s /path/to/chief/.claude /path/to/your/project/.claude
-ln -s /path/to/chief/todos.json.example /path/to/your/project/todos.json.example
-ln -s /path/to/chief/chief.toml.example /path/to/your/project/chief.toml.example
-```
-
-This gives you access to:
-
-| Command | Description |
-|---------|-------------|
-| `/req <requirements>` | Break down requirements into todos and add them to `todos.json` |
-| `/reprio` | Reprioritize todos based on recent project activity |
-| `/prd <prd text>` | Generate project scaffolding and create todos from a PRD |
-
-The commands reference the example files to understand the schema, so all three symlinks are needed.
-
-## Features
-
-- **Multi-Suite Support** - Handle monorepos with multiple languages/frameworks
-- **Automatic Environment Setup** - Optional `test_init` commands for venvs, npm install, etc.
-- **Pre-Test Setup** - Optional `test_setup` commands (Docker, test data seeding)
-- **Linting/Validation** - Optional `lint_command` executed in RED and POST_GREEN
-- **Post-Green Validation** - Optional `post_green_command` (builds, type checks)
-- **Unrestricted GREEN/POST_GREEN Writes** - Agent can modify any files while implementing/fixing
-- **Smart Recovery** - Automatic retry loops with rollback on failure
-- **Git Integration** - Auto-commit and tag on successful completion
-- **Priority Queue** - Process todos by priority (highest first)
-- **Requirements Intake Mode** - Convert PRDs/requirements into `todos.json` via a single agent run and show the resulting `git diff`
-
-## Configuration Reference
-
-### Global Options (`[chief]`)
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `agent` | No | Coding agent to use (`codex` or `claude`), default: `codex` |
-| `model` | No | Codex model name (only used when `agent = "codex"`) |
-| `agent_extra_args` | No | Extra CLI args appended to the agent invocation |
-| `max_retries` | No | Max number of run retries (default 10) |
-| `agent_timeout_seconds` | No | Max seconds to wait for the coding agent (default 2700) |
-| `agent_log_max_output_lines` | No | Max lines of event output tail included in agent context (default 10) |
-| `agent_log_max_output_chars` | No | Max characters of event output tail included in agent context (default 1500) |
-| `use_agent_log_truncation_for_stdout_logs` | No | Reuse `agent_log_max_output_*` limits for printed stdout event logs (default false) |
-
-### Suite Options (`[[suites]]`)
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Unique identifier for the suite |
-| `language` | Yes | Programming language (Python, TypeScript, Go, etc.) |
-| `framework` | Yes | Test framework (pytest, Jest, Vitest, go test, etc.) |
-| `test_root` | Yes | Working directory for test commands |
-| `test_command` | Yes | Test command. Use `{target}` for the test file/path |
-| `target_type` | Yes | One of: `file`, `package`, `project`, `repo` |
-| `default_target` | No | Default target when none detected |
-| `file_patterns` | No | Glob patterns for test files |
-| `disallow_write_globs` | No | Legacy field; currently not enforced in GREEN/POST_GREEN |
-| `test_init` | No | Command to initialize dev environment |
-| `test_setup` | No | Command to run before tests (once per suite) |
-| `lint_command` | No | Lint/typecheck command (RED + POST_GREEN) |
-| `post_green_command` | No | Command to run after tests pass |
-| `env` | No | Environment variables for commands |
-| `strip_root_from_target` | No | Whether to strip `test_root` prefix from `{target}` (default true) |
-
-### Todo Options
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `todo` | Yes | Description of the task |
-| `priority` | No | Higher = processed first (default: 0) |
-| `expectations` | No | Expected outcome (1-2 sentences) |
-| `test_suites` | No | List of suites to use for this todo |
-| `status` | No | `pending`, `in_progress`, `attempted`, `done` |
-| `done_at_commit` | Auto | Set by Chief when completed |
-
-## Examples
-
-See `chief.toml.example` for configuration examples including:
-- Python + pytest (with pyenv)
-- TypeScript + Jest/Vitest
-- Go + go test
-- Rust + cargo test
-- Multi-suite monorepo setups
-
-## License
-
-MIT
+- Rust library and both binaries compile (`cargo check`).
+- Legacy Python implementation has been removed.

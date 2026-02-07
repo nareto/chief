@@ -1,288 +1,73 @@
-# ============================================================
-# GLOBAL OPTIONS
-# ============================================================
 [chief]
-# coding agent to use
 agent = "codex"
-# codex model (only used when agent = "codex")
-model = "gpt-5.3-codex"
-# codex reasoning effort (only used when agent = "codex")
-model_reasoning_effort = "high"
-# extra args appended to agent invocation
+# model = "gpt-5"
+# model_reasoning_effort = "high"
 agent_extra_args = []
-# maximum run retries
 max_retries = 10
-# max seconds to wait for the coding agent per run before timing out
 agent_timeout_seconds = 2700
-# max number of log output lines included when passing event context to the agent
 agent_log_max_output_lines = 10
-# max number of log output characters included when passing event context to the agent
 agent_log_max_output_chars = 1500
-# when true, reuse the agent_log_* truncation values for printed stdout event logs
 use_agent_log_truncation_for_stdout_logs = false
 
-# Chief Configuration Reference
-# =============================
-#
-# Chief uses a multi-suite format with [[suites]] entries.
-# Define multiple suites for multi-language projects (monorepos).
-#
-# REQUIRED FIELDS
-# ---------------
-# name            Unique identifier for the suite (e.g., "backend", "frontend")
-# language        Programming language (e.g., "Python", "TypeScript", "Go")
-# framework       Test framework (e.g., "pytest", "Jest", "go test")
-# test_root       Working directory for test_init and test_command.
-#                 Also used with strip_root_from_target to trim paths before
-#                 passing to {target}. Use "." for project root.
-# test_command    Test command. Use {target} placeholder for test file/path.
-#                 Runs in test_root directory.
-# target_type     How tests are organized: "file", "package", "project", or "repo"
-#
-# OPTIONAL FIELDS
-# ---------------
-# default_target  Fallback target when none detected (e.g., ".", "tests/")
-# file_patterns   Glob patterns matching test files (e.g., ["test_*.py", "*_test.py"])
-# disallow_write_globs
-#                 Legacy field retained for compatibility.
-#                 Currently not enforced in GREEN/POST-GREEN.
-#
-# test_init       Command to initialize dev environment (runs if validation fails)
-#                 Runs in test_root directory.
-#                 Use for: creating virtualenvs, npm install, installing dependencies
-#                 Example: "python -m venv .venv && pip install -r requirements.txt"
-#
-# test_setup      Command to run once before suite's tests execute.
-#                 Runs in PROJECT ROOT (not test_root).
-#                 Use for: starting Docker services, seeding test data
-#                 Example: "docker compose up -d db"
-#
-# post_green_command
-#                 Validation command to run AFTER tests pass, BEFORE commit.
-#                 Runs in PROJECT ROOT (not test_root).
-#                 Use for: Docker builds, type checking, linting, etc.
-#                 If this fails, enters a build fix loop to resolve issues.
-#                 Example: "docker compose build frontend"
-#
-# lint_command
-#                 Command to run AFTER tests pass, BEFORE post_green_command.
-#                 Runs in PROJECT ROOT.
-#                 If the command includes "{target}", it will be replaced by the lint target.
-#                 Use for: linting, formatting checks, type checks, etc.
-#                 Example: "npm run lint" or "ruff check ."
-#
-# lint_fix_command
-#                 Optional command to attempt auto-fixes when lint_command fails.
-#                 Runs in PROJECT ROOT.
-#                 If set, chief will run this command once after a lint failure,
-#                 then re-run lint_command. Use {target} if needed.
-#                 Example: "ruff check --fix ." or "npm run lint -- --fix"
-#
-# env             Environment variables for all commands in this suite
-#                 Example: { PYENV_VERSION = "3.11", NODE_ENV = "test" }
-#
-# strip_root_from_target
-#                 When true (default), strips `test_root` prefix from {target} paths.
-#                 Example: test_root="backend/", target="backend/tests/test_foo.py"
-#                   -> {target} becomes "tests/test_foo.py"
-#                 Set false if your test command expects full paths from project root.
-#
-# ============================================================
-# EXECUTION CONTEXT
-# ============================================================
-# Understanding where each command runs is critical:
-#
-# | Field              | Runs In        | When                              |
-# |--------------------|----------------|-----------------------------------|
-# | test_init          | test_root      | Once if validation fails          |
-# | test_command       | test_root      | During RED/GREEN test phases      |
-# | test_setup         | PROJECT ROOT   | Once before first test of suite   |
-# | post_green_command | PROJECT ROOT   | After tests pass, before commit   |
-# | lint_command       | PROJECT ROOT   | After tests pass, before post_green|
-#
-# PROJECT ROOT = the directory where chief.py is run (usually repo root)
-# test_root = subdirectory specified in the suite config
+[backend]
+host = "0.0.0.0"
+port = 8000
+# projects_parent_dir can be set for backend default project discovery.
+# projects_parent_dir = "/workspace/projects"
+frontend_dir = "frontend"
+default_agents_per_project = 1
+max_agents_per_project = 8
 
+# -----------------------------
+# Rust project suite
+# -----------------------------
+[[suites]]
+name = "backend"
+language = "Rust"
+framework = "cargo test"
+test_root = "."
+test_command = "cargo test"
+target_type = "project"
+default_target = "."
+file_patterns = []
+lint_command = "cargo clippy"
+# lint_fix_command = "cargo fmt"
+post_green_command = "cargo test"
+env = {}
+strip_root_from_target = true
 
-# ============================================================
-# Python + pytest
-# ============================================================
-
+# -----------------------------
+# Python project suite
+# -----------------------------
 # [[suites]]
 # name = "backend"
 # language = "Python"
 # framework = "pytest"
 # test_root = "."
 # test_command = "pytest {target} -v"
-# test_init = "python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+# target_type = "file"
 # default_target = "."
-# target_type = "file"
 # file_patterns = ["test_*.py", "*_test.py"]
-# disallow_write_globs = ["tests/**", "test_*.py", "*_test.py"]
-# lint_command = ".venv/bin/python -m ruff check ."  # Use venv ruff to avoid PATH issues
-# lint_fix_command = ".venv/bin/python -m ruff check --fix ."  # Optional auto-fix
+# lint_command = "ruff check {target}"
+# lint_fix_command = "ruff check --fix {target}"
+# post_green_command = "pytest -q"
+# env = {}
+# strip_root_from_target = true
 
-
-# ============================================================
-# Python + pytest (with pyenv for version pinning)
-# ============================================================
-
-# [[suites]]
-# name = "backend"
-# language = "Python"
-# framework = "pytest"
-# test_root = "backend/"
-# test_command = "source .venv/bin/activate && pytest {target} -v"
-# test_init = "PYENV_VERSION=3.11 python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
-# test_setup = "docker compose up -d sb-db"
-# default_target = "tests/"
-# target_type = "file"
-# file_patterns = ["test_*.py", "*_test.py"]
-# disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
-# lint_command = ".venv/bin/python -m ruff check backend"  # Use venv ruff to avoid PATH issues
-# lint_fix_command = ".venv/bin/python -m ruff check --fix backend"  # Optional auto-fix
-# env = { PYENV_VERSION = "3.11" }
-
-
-# ============================================================
-# TypeScript + Jest
-# ============================================================
-
-# [[suites]]
-# name = "frontend"
-# language = "TypeScript"
-# framework = "Jest"
-# test_root = "."
-# test_command = "npx jest {target}"
-# test_init = "npm install"
-# default_target = "."
-# target_type = "file"
-# file_patterns = ["*.test.ts", "*.spec.ts"]
-# disallow_write_globs = ["**/*.test.ts", "**/*.spec.ts", "__tests__/**"]
-# lint_command = "npm run lint"
-# lint_fix_command = "npm run lint -- --fix"
-
-
-# ============================================================
-# TypeScript + Vitest with Docker Build Verification
-# ============================================================
-# Use post_green_command for build verification to catch TypeScript
-# errors that unit tests might miss (strict mode, unused variables, etc.)
-
+# -----------------------------
+# TypeScript project suite
+# -----------------------------
 # [[suites]]
 # name = "frontend"
 # language = "TypeScript"
 # framework = "Vitest"
-# test_root = "frontend/"
+# test_root = "frontend"
 # test_command = "npm run test -- {target}"
-# test_init = "npm install"
-# post_green_command = "docker compose build sb-frontend"
-# default_target = "src/"
 # target_type = "file"
+# default_target = "src"
 # file_patterns = ["*.test.ts", "*.test.tsx"]
-# disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.test.tsx"]
 # lint_command = "npm run lint"
 # lint_fix_command = "npm run lint -- --fix"
-
-
-# ============================================================
-# Go + go test
-# ============================================================
-
-# [[suites]]
-# name = "backend"
-# language = "Go"
-# framework = "go test"
-# test_root = "."
-# test_command = "go test -v {target}"
-# default_target = "./..."
-# target_type = "package"
-# file_patterns = ["*_test.go"]
-# disallow_write_globs = ["**/*_test.go"]
-# lint_command = "golangci-lint run"
-# lint_fix_command = "golangci-lint run --fix"  # Optional auto-fix (if enabled in config)
-
-
-# ============================================================
-# Rust + cargo test
-# ============================================================
-
-# [[suites]]
-# name = "backend"
-# language = "Rust"
-# framework = "cargo test"
-# test_root = "."
-# test_command = "cargo test"
-# default_target = "."
-# target_type = "project"
-# file_patterns = []
-# disallow_write_globs = ["tests/**"]
-# lint_command = "cargo clippy"
-# lint_fix_command = "cargo clippy --fix"  # Optional auto-fix (may require nightly)
-
-
-# ============================================================
-# Multi-Suite: Full-stack (Python + TypeScript) with post_green
-# ============================================================
-# This example shows a full-stack monorepo with:
-# - Backend: Python/pytest with database dependency
-# - Frontend: TypeScript/Vitest with Docker build verification
-
-# [[suites]]
-# name = "backend"
-# language = "Python"
-# framework = "pytest"
-# test_root = "backend/"
-# test_command = "source .venv/bin/activate && pytest {target} -v"
-# test_init = "PYENV_VERSION=3.11 python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
-# test_setup = "docker compose up -d sb-db"
-# post_green_command = "docker compose build sb-backend"
-# default_target = "tests/"
-# target_type = "file"
-# file_patterns = ["test_*.py", "*_test.py"]
-# disallow_write_globs = ["backend/tests/**", "backend/**/test_*.py"]
-# lint_command = ".venv/bin/python -m ruff check backend"  # Use venv ruff to avoid PATH issues
-# lint_fix_command = ".venv/bin/python -m ruff check --fix backend"  # Optional auto-fix
-# env = { TEST_DATABASE_URL = "postgresql+asyncpg://user:pass@localhost:5432/testdb" }
-#
-# [[suites]]
-# name = "frontend-unit"
-# language = "TypeScript"
-# framework = "Vitest"
-# test_root = "frontend/"
-# test_command = "npm run test -- {target}"
-# test_init = "npm install"
-# post_green_command = "docker compose build sb-frontend"
-# default_target = "src/"
-# target_type = "file"
-# file_patterns = ["*.test.ts", "*.test.tsx"]
-# disallow_write_globs = ["frontend/**/*.test.ts", "frontend/**/*.test.tsx"]
-# lint_command = "npm run lint"
-#
-# [[suites]]
-# name = "frontend-e2e"
-# language = "TypeScript"
-# framework = "Playwright"
-# test_root = "frontend/"
-# test_command = "npm run test:e2e -- {target}"
-# test_init = "npm install && npx playwright install"
-# test_setup = "docker compose up -d"
-# default_target = "e2e/"
-# target_type = "file"
-# file_patterns = ["*.spec.ts"]
-# disallow_write_globs = ["frontend/e2e/**"]
-# lint_command = "npm run lint"
-
-
-# ============================================================
-# WORKFLOW OVERVIEW
-# ============================================================
-# 1. Load todos from todos.json
-# 2. For each todo (by priority):
-#    a. RED: Write failing tests (Claude detects appropriate suite(s))
-#    b. GREEN: Implement to make tests pass
-#    c. BUILD: Run post_green_command to verify build/lint/types
-#       - If build fails, enter build fix loop
-#       - Re-run tests AND post_green after each fix
-#    d. On success: commit, tag, and optionally push
-# 3. Mark todo as done with commit hash
+# post_green_command = "npm run build"
+# env = { NODE_ENV = "test" }
+# strip_root_from_target = true

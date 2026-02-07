@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command:
+      - --parent-dir
+      - /workspace/projects
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --frontend-dir
+      - /workspace/chief/frontend
+    volumes:
+      - ./:/workspace/chief
+      - ${CHIEF_PROJECTS_PARENT:-./projects}:/workspace/projects
+    working_dir: /workspace/chief
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
