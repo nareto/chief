@@ -1034,6 +1034,72 @@ def test_post_green_strategy_enables_pre_loop_stability_check() -> None:
     assert strategy.check_goal_before_loop is True
 
 
+def test_chief_run_does_not_restrict_writes_in_green_or_post_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_disallowed: list[tuple[str, object]] = []
+    todo = SimpleNamespace(todo_id="todo-1", todo="task", test_suites=["backend"])
+    suite = _suite(name="backend", disallow_write_globs=["tests/**"])
+
+    class _FakeLoop:
+        def __init__(self, strategy, max_loops=6):  # type: ignore[no-untyped-def]
+            self.strategy = strategy
+            self.max_loops = max_loops
+
+        def run(self) -> None:
+            return None
+
+    class _FakeRedStrategy:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.chief_run_state = kwargs["chief_run_state"]
+            self.todo = kwargs["todo"]
+
+    class _FakeGreenStrategy:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured_disallowed.append(("green", kwargs.get("disallowed_files")))
+            self.chief_run_state = kwargs["chief_run_state"]
+            self.todo = kwargs["todo"]
+
+    class _FakePostGreenStrategy:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured_disallowed.append(("post_green", kwargs.get("disallowed_files")))
+            self.chief_run_state = kwargs["chief_run_state"]
+            self.todo = kwargs["todo"]
+
+    chief_instance = object.__new__(chief.Chief)
+    chief_instance.agent = SimpleNamespace()
+    chief_instance.state = SimpleNamespace(
+        chief_toml=SimpleNamespace(suites=[suite]),
+        sync_todos=lambda: None,
+        iofacade=SimpleNamespace(
+            get_next_todo=lambda: todo,
+            log_event=lambda event: None,
+            terminate_run=lambda run_id, status: None,
+        ),
+        run_id="run-1",
+        current_phase=chief.Phase.start,
+    )
+    chief_instance._set_todo_status = lambda *args, **kwargs: None  # type: ignore[assignment]
+    chief_instance._run_initial_lint_gate = lambda *args, **kwargs: None  # type: ignore[assignment]
+
+    monkeypatch.setattr(chief.TestRunner, "run_test_init", lambda self: None)
+    monkeypatch.setattr(chief, "ConvergenceLoopContext", _FakeLoop)
+    monkeypatch.setattr(chief, "UntilPassLoopContext", _FakeLoop)
+    monkeypatch.setattr(chief, "RedPhaseStrategy", _FakeRedStrategy)
+    monkeypatch.setattr(chief, "GreenPhaseStrategy", _FakeGreenStrategy)
+    monkeypatch.setattr(chief, "PostGreenStrategy", _FakePostGreenStrategy)
+    monkeypatch.setattr(chief.GitOperations, "commit_and_tag", lambda msg: "abc123")
+    monkeypatch.setattr(
+        chief.GitOperations,
+        "changed_files",
+        lambda: ["tests/test_sample.py", "src/app.py"],
+    )
+
+    chief.Chief.run(chief_instance, max_iter=1)
+
+    assert captured_disallowed == [("green", None), ("post_green", None)]
+
+
 def test_convergence_loop_context_short_circuits_on_precheck_success() -> None:
     decisions: list[int] = []
     runs: list[int] = []

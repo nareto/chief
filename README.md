@@ -67,7 +67,6 @@ test_root = "."
 test_command = "pytest {target} -v"
 target_type = "file"
 file_patterns = ["test_*.py", "*_test.py"]
-disallow_write_globs = ["tests/**", "test_*.py"]
 ```
 
 ### 3. Create your task list (`todos.json`)
@@ -143,7 +142,7 @@ The commands reference the example files to understand the schema, so all three 
 - **Pre-Test Setup** - Optional `test_setup` commands (Docker, test data seeding)
 - **Linting/Validation** - Optional `lint_command` executed in RED and POST_GREEN
 - **Post-Green Validation** - Optional `post_green_command` (builds, type checks)
-- **Test File Protection** - Prevents agent from modifying tests during implementation
+- **Unrestricted GREEN/POST_GREEN Writes** - Agent can modify any files while implementing/fixing
 - **Smart Recovery** - Automatic retry loops with rollback on failure
 - **Git Integration** - Auto-commit and tag on successful completion
 - **Priority Queue** - Process todos by priority (highest first)
@@ -173,7 +172,7 @@ The commands reference the example files to understand the schema, so all three 
 | `target_type` | Yes | One of: `file`, `package`, `project`, `repo` |
 | `default_target` | No | Default target when none detected |
 | `file_patterns` | No | Glob patterns for test files |
-| `disallow_write_globs` | No | Patterns for files agent cannot modify |
+| `disallow_write_globs` | No | Legacy field; currently not enforced in GREEN/POST_GREEN |
 | `test_init` | No | Command to initialize dev environment |
 | `test_setup` | No | Command to run before tests (once per suite) |
 | `lint_command` | No | Lint/typecheck command (RED + POST_GREEN) |

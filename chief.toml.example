@@ -38,8 +38,8 @@ agent_timeout_seconds = 2700
 # default_target  Fallback target when none detected (e.g., ".", "tests/")
 # file_patterns   Glob patterns matching test files (e.g., ["test_*.py", "*_test.py"])
 # disallow_write_globs
-#                 Patterns for files Claude cannot modify during GREEN phase
-#                 Use to protect test files from being changed during implementation
+#                 Legacy field retained for compatibility.
+#                 Currently not enforced in GREEN/POST-GREEN.
 #
 # test_init       Command to initialize dev environment (runs if validation fails)
 #                 Runs in test_root directory.
