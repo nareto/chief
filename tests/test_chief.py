@@ -177,6 +177,9 @@ def test_chief_toml_manager_load_parses_core_configuration(tmp_path: Path) -> No
         agent_extra_args = ["--model", "gpt-5"]
         max_retries = 4
         agent_timeout_seconds = 1200
+        agent_log_max_output_lines = 3
+        agent_log_max_output_chars = 5
+        use_agent_log_truncation_for_stdout_logs = true
 
         [[suites]]
         name = "py"
@@ -204,6 +207,9 @@ def test_chief_toml_manager_load_parses_core_configuration(tmp_path: Path) -> No
     assert loaded.chief.agent_extra_args == ["--model", "gpt-5"]
     assert loaded.chief.max_retries == 4
     assert loaded.chief.agent_timeout_seconds == 1200
+    assert loaded.chief.agent_log_max_output_lines == 3
+    assert loaded.chief.agent_log_max_output_chars == 5
+    assert loaded.chief.use_agent_log_truncation_for_stdout_logs is True
     assert len(loaded.suites) == 1
     suite = loaded.suites[0]
     assert suite.name == "py"
@@ -223,6 +229,9 @@ def test_chief_toml_manager_defaults_to_codex_when_config_is_empty(
     loaded = chief.ChiefTomlManager(str(toml_path)).load()
 
     assert loaded.chief.agent == "codex"
+    assert loaded.chief.agent_log_max_output_lines == 10
+    assert loaded.chief.agent_log_max_output_chars == 1500
+    assert loaded.chief.use_agent_log_truncation_for_stdout_logs is False
 
 
 def test_codex_code_parse_output_supports_multiple_json_shapes() -> None:
@@ -914,6 +923,52 @@ def test_chief_iofacade_log_event_hides_lint_failure_output_in_stdout_logs() -> 
     logged_message = iofacade.logger.logged[0][1]  # type: ignore[attr-defined]
     assert "line-1" not in logged_message
     assert "<omitted; full lint output saved to DB and prompt tail>" in logged_message
+
+
+def test_chief_iofacade_log_event_can_truncate_stdout_output_with_formatter_limits() -> None:
+    class FakeDB:
+        def __init__(self) -> None:
+            self.saved: list[chief.ChiefLoggableEvent] = []
+
+        def save_event(self, event: chief.ChiefLoggableEvent) -> None:
+            self.saved.append(event)
+
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.logged: list[tuple[str, str]] = []
+
+        def warning(self, message: str) -> None:
+            self.logged.append(("warning", message))
+
+        def info(self, message: str) -> None:
+            self.logged.append(("info", message))
+
+    iofacade = object.__new__(chief.ChiefIOFacade)
+    iofacade.dbclient = FakeDB()  # type: ignore[attr-defined]
+    iofacade.logger = FakeLogger()  # type: ignore[attr-defined]
+    iofacade._formatter = chief.EventFormatter(  # type: ignore[attr-defined]
+        max_output_lines=10, max_output_chars=6
+    )
+    iofacade._use_formatter_truncation_for_stdout_logs = True  # type: ignore[attr-defined]
+
+    raw_output = "0123456789abcdef"
+    event = chief.ChiefLoggableEvent(
+        run_id="run-1",
+        level="warning",
+        msg="Test command result",
+        event_type=chief.EventType.test_run,
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        payload={
+            "command": "pytest tests",
+            "exit_code": 1,
+            "output": raw_output,
+        },
+    )
+
+    chief.ChiefIOFacade.log_event(iofacade, event)
+    logged_message = iofacade.logger.logged[0][1]  # type: ignore[attr-defined]
+    assert "0123456789" not in logged_message
+    assert '"output": "abcdef"' in logged_message
 
 
 def test_test_runner_validate_or_init_runs_init_after_missing_command(

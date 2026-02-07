@@ -14,6 +14,12 @@ agent_extra_args = []
 max_retries = 10
 # max seconds to wait for the coding agent per run before timing out
 agent_timeout_seconds = 2700
+# max number of log output lines included when passing event context to the agent
+agent_log_max_output_lines = 10
+# max number of log output characters included when passing event context to the agent
+agent_log_max_output_chars = 1500
+# when true, reuse the agent_log_* truncation values for printed stdout event logs
+use_agent_log_truncation_for_stdout_logs = false
 
 # Chief Configuration Reference
 # =============================

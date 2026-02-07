@@ -159,6 +159,9 @@ The commands reference the example files to understand the schema, so all three 
 | `agent_extra_args` | No | Extra CLI args appended to the agent invocation |
 | `max_retries` | No | Max number of run retries (default 10) |
 | `agent_timeout_seconds` | No | Max seconds to wait for the coding agent (default 2700) |
+| `agent_log_max_output_lines` | No | Max lines of event output tail included in agent context (default 10) |
+| `agent_log_max_output_chars` | No | Max characters of event output tail included in agent context (default 1500) |
+| `use_agent_log_truncation_for_stdout_logs` | No | Reuse `agent_log_max_output_*` limits for printed stdout event logs (default false) |
 
 ### Suite Options (`[[suites]]`)
 
