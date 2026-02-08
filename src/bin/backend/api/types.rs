@@ -113,6 +113,7 @@ pub struct StateResponse {
     pub active_agents: usize,
     pub desired_agents: usize,
     pub flow_name: String,
+    pub last_error: Option<String>,
     pub phase: String,
     pub phase_iteration: Option<PhaseIteration>,
     pub last_activity: Option<String>,
@@ -129,6 +130,7 @@ pub struct PhaseIteration {
 
 #[derive(Debug, Serialize)]
 pub struct TodoProgress {
+    pub available: usize,
     pub completed: usize,
     pub total: usize,
 }

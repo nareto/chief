@@ -286,6 +286,10 @@ impl ApiService {
             .iter()
             .filter(|todo| todo.status == TodoStatus::Done)
             .count();
+        let available_todos = todos
+            .iter()
+            .filter(|todo| todo.status != TodoStatus::Done && todo.status != TodoStatus::InProgress)
+            .count();
 
         Ok(StateResponse {
             project: project.to_owned(),
@@ -302,6 +306,7 @@ impl ApiService {
                 .as_ref()
                 .map(|view| view.flow_name.clone())
                 .unwrap_or_else(|| FlowKind::Tdd.as_str().to_owned()),
+            last_error: runtime.as_ref().and_then(|view| view.last_error.clone()),
             phase: current_phase,
             phase_iteration,
             last_activity: recent_events
@@ -309,6 +314,7 @@ impl ApiService {
                 .map(|event| event.timestamp.to_rfc3339()),
             dirty_files,
             todos: TodoProgress {
+                available: available_todos,
                 completed: completed_todos,
                 total: todos.len(),
             },

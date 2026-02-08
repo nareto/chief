@@ -125,7 +125,30 @@ impl Scheduler {
 
             if workers.is_empty() {
                 let no_more_work = context.store.list_available_todos()?.is_empty();
-                if stop_requested || no_more_work {
+                if stop_requested {
+                    context.log_project_event(
+                        &run_id,
+                        None,
+                        None,
+                        "info",
+                        None,
+                        crate::domain::EventType::Job,
+                        format!("Stop requested for {project_name}; supervisor exiting"),
+                        std::collections::BTreeMap::new(),
+                    )?;
+                    break;
+                }
+                if no_more_work {
+                    context.log_project_event(
+                        &run_id,
+                        None,
+                        None,
+                        "info",
+                        None,
+                        crate::domain::EventType::Job,
+                        format!("No available todos for {project_name}; supervisor exiting"),
+                        std::collections::BTreeMap::new(),
+                    )?;
                     break;
                 }
                 sleep(Duration::from_millis(500)).await;

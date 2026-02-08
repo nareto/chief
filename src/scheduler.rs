@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tracing::error;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectRuntimeView {
@@ -151,6 +152,11 @@ impl Scheduler {
             let this = self.clone();
             tokio::spawn(async move {
                 if let Err(err) = this.supervise_project(project_name.clone()).await {
+                    error!(
+                        project = %project_name,
+                        error = %err,
+                        "project supervisor exited with error"
+                    );
                     let mut states = this.states.lock().await;
                     if let Some(state) = states.get_mut(&project_name) {
                         state.last_error = Some(err.to_string());
