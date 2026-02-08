@@ -213,17 +213,17 @@ pub(super) fn run_worker(
                     &status_err,
                 );
             }
-            if let Some(branch) = &branch_name
-                && let Err(remove_err) = context.git.remove_worktree(&work_dir, branch)
-            {
-                report_state_update_error(
-                    &context,
-                    &run_id,
-                    Some(&job.id),
-                    Some(&todo_id),
-                    "failed to cleanup worker worktree",
-                    &remove_err,
-                );
+            if let Some(branch) = &branch_name {
+                if let Err(remove_err) = context.git.remove_worktree(&work_dir, branch) {
+                    report_state_update_error(
+                        &context,
+                        &run_id,
+                        Some(&job.id),
+                        Some(&todo_id),
+                        "failed to cleanup worker worktree",
+                        &remove_err,
+                    );
+                }
             }
             update_job(&context, &mut job, JobStatus::Failed, Some(err.to_string()));
             WorkerResult {
