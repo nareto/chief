@@ -1,4 +1,5 @@
 use super::WorkerResult;
+use crate::agent::is_agent_cancelled_error;
 use crate::domain::{EventType, JobRecord, JobStatus, Todo, TodoStatus};
 use crate::flow::FlowKind;
 use crate::git::GitOps;
@@ -6,6 +7,7 @@ use crate::orchestrator::OrchestratorError;
 use crate::service::{ChiefEngine, ProjectContext};
 use std::fs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -18,6 +20,7 @@ pub(super) fn run_worker(
     model_override: Option<String>,
     use_worktree: bool,
     merge_lock: Arc<Mutex<()>>,
+    cancel_signal: Arc<AtomicBool>,
 ) -> WorkerResult {
     let engine = ChiefEngine::new(context.clone());
 
@@ -31,6 +34,21 @@ pub(super) fn run_worker(
     };
 
     update_job(&context, &mut job, JobStatus::Running, None);
+
+    if cancel_signal.load(Ordering::SeqCst) {
+        let _ = context
+            .store
+            .update_todo_status(&todo.id, TodoStatus::Pending, None);
+        update_job(&context, &mut job, JobStatus::Cancelled, None);
+        return WorkerResult {
+            job_id: job.id,
+            todo_id: todo.id,
+            status: "cancelled".to_owned(),
+            error: Some("cancelled by stop request".to_owned()),
+            commit_hash: None,
+            unrecoverable: false,
+        };
+    }
 
     let main_branch = context
         .git
@@ -135,6 +153,7 @@ pub(super) fn run_worker(
         flow_kind,
         work_dir.clone(),
         model_override,
+        cancel_signal.clone(),
         max_retries,
         |attempt, total, err| {
             let msg = format!(
@@ -212,6 +231,45 @@ pub(super) fn run_worker(
             }
         }
         Err(err) => {
+            let cancelled = cancel_signal.load(Ordering::SeqCst) || is_agent_cancelled_error(err.as_error());
+            if cancelled {
+                if let Err(status_err) =
+                    context
+                        .store
+                        .update_todo_status(&todo_id, TodoStatus::Pending, None)
+                {
+                    report_state_update_error(
+                        &context,
+                        &run_id,
+                        Some(&job.id),
+                        Some(&todo_id),
+                        "failed to mark todo pending after cancellation",
+                        &status_err,
+                    );
+                }
+                if let Some(branch) = &branch_name {
+                    if let Err(remove_err) = context.git.remove_worktree(&work_dir, branch) {
+                        report_state_update_error(
+                            &context,
+                            &run_id,
+                            Some(&job.id),
+                            Some(&todo_id),
+                            "failed to cleanup worker worktree after cancellation",
+                            &remove_err,
+                        );
+                    }
+                }
+                update_job(&context, &mut job, JobStatus::Cancelled, None);
+                return WorkerResult {
+                    job_id: job.id,
+                    todo_id,
+                    status: "cancelled".to_owned(),
+                    error: Some("cancelled by stop request".to_owned()),
+                    commit_hash: None,
+                    unrecoverable: false,
+                };
+            }
+
             let unrecoverable = matches!(err, OrchestratorError::Unrecoverable(_));
             let err_string = err.as_error().to_string();
             if let Err(status_err) =

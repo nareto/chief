@@ -1,4 +1,6 @@
-use crate::agent::{CodingAgent, CommandAgent};
+use crate::agent::{
+    AgentCancelledError, CodingAgent, CommandAgent, is_agent_cancelled_error,
+};
 use crate::config::ChiefToml;
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoStatus,
@@ -15,6 +17,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -38,8 +41,7 @@ impl ProjectContext {
         let store = ProjectStore::new(&project_dir);
         store.init()?;
 
-        let prompts = FsPromptStore::new(project_dir.join("prompts"));
-        prompts.ensure_default_templates()?;
+        let prompts = FsPromptStore::from_workspace_prompts()?;
 
         let git = ShellGitOps::discover(&project_dir)
             .with_context(|| format!("{} is not a git repository", project_dir.display()))?;
@@ -236,7 +238,14 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
+        cancel_signal: Arc<AtomicBool>,
     ) -> OrchestratorResult<TodoOutcome> {
+        if cancel_signal.load(Ordering::SeqCst) {
+            return Err(OrchestratorError::unrecoverable(anyhow!(
+                AgentCancelledError
+            )));
+        }
+
         let flow = build_flow(flow_kind);
         let agent = self.project.build_agent(model_override);
 
@@ -252,6 +261,7 @@ impl ChiefEngine {
             chief_config: &self.project.chief_toml.chief,
             all_suites: &self.project.chief_toml.suites,
             todo,
+            cancel_signal,
         };
 
         flow.run_todo(&mut execution)
@@ -267,6 +277,7 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
+        cancel_signal: Arc<AtomicBool>,
     ) -> Result<TodoOutcome> {
         self.run_single_todo_once(
             run_id,
@@ -276,6 +287,7 @@ impl ChiefEngine {
             flow_kind,
             work_dir,
             model_override,
+            cancel_signal,
         )
         .map_err(OrchestratorError::into_error)
     }
@@ -289,6 +301,7 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
+        cancel_signal: Arc<AtomicBool>,
         max_retries: usize,
         mut on_retry: F,
     ) -> OrchestratorResult<TodoOutcome>
@@ -298,6 +311,11 @@ impl ChiefEngine {
         retry_with_policy_and_hook(
             max_retries,
             |_attempt, _max_retries| {
+                if cancel_signal.load(Ordering::SeqCst) {
+                    return Err(OrchestratorError::unrecoverable(anyhow!(
+                        AgentCancelledError
+                    )));
+                }
                 self.run_single_todo_once(
                     run_id,
                     job_id,
@@ -306,6 +324,7 @@ impl ChiefEngine {
                     flow_kind,
                     work_dir.clone(),
                     model_override.clone(),
+                    cancel_signal.clone(),
                 )
             },
             |attempt, total, err| on_retry(attempt, total, err),
@@ -355,6 +374,7 @@ impl ChiefEngine {
                 flow_kind,
                 self.project.project_dir.clone(),
                 model_override,
+                Arc::new(AtomicBool::new(false)),
             ) {
                 Ok(outcome) => {
                     if let Some(commit_hash) = outcome.commit_hash.as_deref() {
@@ -484,6 +504,7 @@ impl ChiefEngine {
                 cwd: self.project.project_dir.clone(),
                 timeout_seconds: Some(self.project.chief_toml.chief.agent_timeout_seconds),
                 disallowed_paths: Vec::new(),
+                cancel_signal: None,
             })?;
 
             if response.exit_code != 0 {
@@ -514,7 +535,7 @@ impl ChiefEngine {
     }
 
     fn classify_runtime_error(&self, err: anyhow::Error) -> OrchestratorError {
-        if is_known_unrecoverable_error(&err) {
+        if is_known_unrecoverable_error(&err) || is_agent_cancelled_error(&err) {
             OrchestratorError::unrecoverable(err)
         } else {
             OrchestratorError::retryable(err)

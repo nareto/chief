@@ -1,4 +1,4 @@
-use crate::agent::{AgentRequest, CodingAgent};
+use crate::agent::{AgentCancelledError, AgentRequest, CodingAgent};
 use crate::config::{ChiefConfig, TestSuiteConfig};
 use crate::domain::{AgentOutput, EventRecord, EventType, LoopDecision, Phase, Todo};
 use crate::git::GitOps;
@@ -11,8 +11,11 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +83,7 @@ pub struct FlowExecution<'a> {
     pub chief_config: &'a ChiefConfig,
     pub all_suites: &'a [TestSuiteConfig],
     pub todo: Todo,
+    pub cancel_signal: Arc<AtomicBool>,
 }
 
 impl<'a> FlowExecution<'a> {
@@ -180,13 +184,18 @@ impl<'a> FlowExecution<'a> {
         cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<AgentOutput> {
+        self.ensure_not_cancelled()?;
+
         let mut process = Command::new("sh");
         process.arg("-lc").arg(command);
         process.current_dir(cwd);
         process.envs(env.iter());
-        let output = process
-            .output()
+        process.stdout(Stdio::piped());
+        process.stderr(Stdio::piped());
+        let mut child = process
+            .spawn()
             .with_context(|| format!("failed to run command: {command}"))?;
+        let output = wait_for_command_with_cancel(&mut child, &self.cancel_signal)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Ok(AgentOutput {
@@ -237,6 +246,8 @@ impl<'a> FlowExecution<'a> {
         prompt: String,
         disallowed_paths: Vec<String>,
     ) -> Result<AgentOutput> {
+        self.ensure_not_cancelled()?;
+
         self.log_event(
             "info",
             Some(phase),
@@ -255,6 +266,7 @@ impl<'a> FlowExecution<'a> {
             cwd: self.project_dir.clone(),
             timeout_seconds: Some(self.chief_config.agent_timeout_seconds),
             disallowed_paths,
+            cancel_signal: Some(self.cancel_signal.clone()),
         })?;
 
         self.log_event(
@@ -302,6 +314,13 @@ impl<'a> FlowExecution<'a> {
         )?;
 
         Ok(out)
+    }
+
+    fn ensure_not_cancelled(&self) -> Result<()> {
+        if self.cancel_signal.load(Ordering::SeqCst) {
+            return Err(anyhow!(AgentCancelledError));
+        }
+        Ok(())
     }
 }
 
@@ -864,6 +883,39 @@ fn run_lint_checks(
     }
 
     Ok(all_ok)
+}
+
+fn wait_for_command_with_cancel(
+    child: &mut std::process::Child,
+    cancel_signal: &Arc<AtomicBool>,
+) -> Result<std::process::Output> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut out) = child.stdout.take() {
+                use std::io::Read;
+                out.read_to_end(&mut stdout)?;
+            }
+            if let Some(mut err) = child.stderr.take() {
+                use std::io::Read;
+                err.read_to_end(&mut stderr)?;
+            }
+            return Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        if cancel_signal.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(AgentCancelledError));
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn run_test_and_lint(

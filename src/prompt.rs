@@ -2,7 +2,6 @@ use anyhow::{Context, Result, anyhow};
 use minijinja::Environment;
 use minijinja::value::Value as JinjaValue;
 use serde_json::Value;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,10 +26,11 @@ const REQUIRED_PROMPT_FILES: [&str; 6] = [
 ];
 
 impl FsPromptStore {
-    pub fn new(root: impl AsRef<Path>) -> Self {
-        Self {
-            root: root.as_ref().to_path_buf(),
-        }
+    pub fn from_workspace_prompts() -> Result<Self> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompts");
+        let store = Self { root };
+        store.validate_required_templates()?;
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -59,32 +59,21 @@ impl FsPromptStore {
         Ok(names)
     }
 
-    pub fn ensure_default_templates(&self) -> Result<()> {
-        if !self.root.exists() {
-            fs::create_dir_all(&self.root)
-                .with_context(|| format!("failed to create {}", self.root.display()))?;
+    pub fn validate_required_templates(&self) -> Result<()> {
+        if !self.root.is_dir() {
+            return Err(anyhow!(
+                "missing required prompts directory at {}",
+                self.root.display()
+            ));
         }
-        let template_source_root = resolve_template_source_root()?;
         for template_name in REQUIRED_PROMPT_FILES {
             let path = self.root.join(template_name);
-            if path.exists() {
-                continue;
-            }
-            let source_path = template_source_root.join(template_name);
-            if !source_path.exists() {
+            if !path.is_file() {
                 return Err(anyhow!(
-                    "required prompt template '{}' is missing from {}",
-                    template_name,
-                    template_source_root.display()
+                    "missing required prompt template {}",
+                    path.display()
                 ));
             }
-            fs::copy(&source_path, &path).with_context(|| {
-                format!(
-                    "failed to copy default prompt {} -> {}",
-                    source_path.display(),
-                    path.display()
-                )
-            })?;
         }
         Ok(())
     }
@@ -115,33 +104,4 @@ impl PromptStore for FsPromptStore {
     fn exists(&self, template_name: &str) -> bool {
         self.template_path(template_name).exists()
     }
-}
-
-fn resolve_template_source_root() -> Result<PathBuf> {
-    if let Ok(path) = env::var("CHIEF_PROMPTS_DIR") {
-        let explicit = PathBuf::from(path);
-        if explicit.is_dir() {
-            return Ok(explicit);
-        }
-        return Err(anyhow!(
-            "CHIEF_PROMPTS_DIR points to a non-directory: {}",
-            explicit.display()
-        ));
-    }
-
-    let repo_prompts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompts");
-    if repo_prompts.is_dir() {
-        return Ok(repo_prompts);
-    }
-
-    let cwd_prompts = env::current_dir()
-        .context("failed to resolve current working directory")?
-        .join("prompts");
-    if cwd_prompts.is_dir() {
-        return Ok(cwd_prompts);
-    }
-
-    Err(anyhow!(
-        "could not locate prompt templates; expected a prompts directory or CHIEF_PROMPTS_DIR"
-    ))
 }

@@ -13,6 +13,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
@@ -50,6 +51,7 @@ struct ProjectRuntime {
     last_error: Option<String>,
     selection_lock: Arc<Mutex<()>>,
     merge_lock: Arc<Mutex<()>>,
+    cancel_signal: Arc<AtomicBool>,
 }
 
 impl ProjectRuntime {
@@ -64,6 +66,7 @@ impl ProjectRuntime {
             last_error: None,
             selection_lock: Arc::new(Mutex::new(())),
             merge_lock: Arc::new(Mutex::new(())),
+            cancel_signal: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -141,6 +144,7 @@ impl Scheduler {
             state.flow_kind = flow_kind;
             state.model_override = model_override.clone();
             state.stop_requested = false;
+            state.cancel_signal.store(false, Ordering::SeqCst);
             state.last_error = None;
             if state.running {
                 false
@@ -180,6 +184,7 @@ impl Scheduler {
             };
             let should_log = !state.stop_requested;
             state.stop_requested = true;
+            state.cancel_signal.store(true, Ordering::SeqCst);
             should_log
         };
 
@@ -211,7 +216,7 @@ impl Scheduler {
                 "info",
                 None,
                 EventType::Job,
-                format!("Stop requested for {project_name}; waiting for active workers to finish"),
+                format!("Stop requested for {project_name}; cancelling active work now"),
                 BTreeMap::new(),
             ) {
                 warn!(

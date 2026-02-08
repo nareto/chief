@@ -3,6 +3,8 @@ use crate::domain::Todo;
 use crate::prompt::PromptStore;
 use crate::service::ProjectContext;
 use anyhow::{Context, Result, anyhow};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub(super) async fn select_todo_id(
     context: &ProjectContext,
@@ -10,6 +12,7 @@ pub(super) async fn select_todo_id(
     available: &[Todo],
     in_progress: &[Todo],
     model_override: Option<String>,
+    cancel_signal: Arc<AtomicBool>,
 ) -> Result<String> {
     if worker_index <= 1 || in_progress.is_empty() {
         return highest_priority_todo_id(available).ok_or_else(|| anyhow!("no available todo"));
@@ -34,6 +37,7 @@ pub(super) async fn select_todo_id(
                 cwd: project_dir,
                 timeout_seconds: Some(timeout_seconds),
                 disallowed_paths: Vec::new(),
+                cancel_signal: Some(cancel_signal),
             })
         }
     })

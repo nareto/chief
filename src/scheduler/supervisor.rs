@@ -3,6 +3,7 @@ use crate::domain::{JobStatus, RunExitStatus};
 use crate::service::ChiefEngine;
 use anyhow::Result;
 use chrono::Utc;
+use std::sync::atomic::Ordering;
 use tokio::task::JoinSet;
 use tokio::time::{Duration, sleep};
 
@@ -53,6 +54,7 @@ impl Scheduler {
                 stop_requested,
                 selection_lock,
                 merge_lock,
+                cancel_signal,
             ) = {
                 let states = self.states.lock().await;
                 let Some(state) = states.get(&project_name) else {
@@ -65,6 +67,7 @@ impl Scheduler {
                     state.stop_requested,
                     state.selection_lock.clone(),
                     state.merge_lock.clone(),
+                    state.cancel_signal.clone(),
                 )
             };
 
@@ -83,6 +86,7 @@ impl Scheduler {
                     &available,
                     &in_progress,
                     model_override.clone(),
+                    cancel_signal.clone(),
                 )
                 .await
                 .unwrap_or_else(|_| available[0].id.clone());
@@ -106,6 +110,7 @@ impl Scheduler {
                 let worker_flow = flow_kind;
                 let worker_model = model_override.clone();
                 let worker_merge_lock = merge_lock.clone();
+                let worker_cancel_signal = cancel_signal.clone();
 
                 workers.spawn(async move {
                     tokio::task::spawn_blocking(move || {
@@ -118,6 +123,7 @@ impl Scheduler {
                             worker_model,
                             use_worktree,
                             worker_merge_lock,
+                            worker_cancel_signal,
                         )
                     })
                     .await
@@ -149,7 +155,7 @@ impl Scheduler {
                         "info",
                         None,
                         crate::domain::EventType::Job,
-                        format!("Stop requested for {project_name}; supervisor exiting"),
+                        format!("Stop requested for {project_name}; cancellation complete"),
                         std::collections::BTreeMap::new(),
                     )?;
                     break;
@@ -174,6 +180,9 @@ impl Scheduler {
             if let Some(joined) = workers.join_next().await {
                 match joined {
                     Ok(result) => {
+                        if result.status == "cancelled" {
+                            continue;
+                        }
                         if result.status != "completed" {
                             any_failure = true;
                             if result.unrecoverable {
@@ -195,6 +204,13 @@ impl Scheduler {
                             state.last_error = Some(format!("worker join error: {err}"));
                         }
                     }
+                }
+            }
+
+            if cancel_signal.load(Ordering::SeqCst) {
+                let mut states = self.states.lock().await;
+                if let Some(state) = states.get_mut(&project_name) {
+                    state.stop_requested = true;
                 }
             }
         }

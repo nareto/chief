@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -13,6 +15,7 @@ pub struct AgentRequest {
     pub cwd: PathBuf,
     pub timeout_seconds: Option<u64>,
     pub disallowed_paths: Vec<String>,
+    pub cancel_signal: Option<Arc<AtomicBool>>,
 }
 
 pub trait CodingAgent: Send + Sync {
@@ -146,15 +149,20 @@ impl CodingAgent for CommandAgent {
                 .context("failed to write prompt to agent stdin")?;
         }
 
-        let (output, timed_out) = wait_with_timeout(child, request.timeout_seconds)
+        let (output, wait_state) =
+            wait_with_timeout(child, request.timeout_seconds, request.cancel_signal.as_deref())
             .context("failed while waiting for agent output")?;
+
+        if wait_state == WaitState::Cancelled {
+            return Err(anyhow!(AgentCancelledError));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let merged = self.parse_output(&stdout, &stderr);
 
         let mut merged_output = merged;
-        if timed_out {
+        if wait_state == WaitState::TimedOut {
             merged_output = format!(
                 "agent timed out after {} second(s) and was terminated.\n{}",
                 request.timeout_seconds.unwrap_or_default(),
@@ -168,7 +176,7 @@ impl CodingAgent for CommandAgent {
         }
 
         Ok(AgentOutput {
-            exit_code: if timed_out {
+            exit_code: if wait_state == WaitState::TimedOut {
                 124
             } else {
                 output.status.code().unwrap_or(1)
@@ -179,6 +187,22 @@ impl CodingAgent for CommandAgent {
             merged_output,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AgentCancelledError;
+
+impl std::fmt::Display for AgentCancelledError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "agent execution cancelled by stop request")
+    }
+}
+
+impl std::error::Error for AgentCancelledError {}
+
+pub fn is_agent_cancelled_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AgentCancelledError>().is_some())
 }
 
 fn parse_codex_json_output(output: &str) -> String {
@@ -261,15 +285,26 @@ fn shell_escape(part: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn wait_with_timeout(mut child: Child, timeout_seconds: Option<u64>) -> Result<(Output, bool)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitState {
+    Completed,
+    TimedOut,
+    Cancelled,
+}
+
+fn wait_with_timeout(
+    mut child: Child,
+    timeout_seconds: Option<u64>,
+    cancel_signal: Option<&AtomicBool>,
+) -> Result<(Output, WaitState)> {
     let Some(timeout_seconds) = timeout_seconds else {
         let output = child.wait_with_output()?;
-        return Ok((output, false));
+        return Ok((output, WaitState::Completed));
     };
 
     if timeout_seconds == 0 {
         let output = child.wait_with_output()?;
-        return Ok((output, false));
+        return Ok((output, WaitState::Completed));
     }
 
     let timeout = Duration::from_secs(timeout_seconds);
@@ -291,14 +326,23 @@ fn wait_with_timeout(mut child: Child, timeout_seconds: Option<u64>) -> Result<(
                     stdout,
                     stderr,
                 },
-                false,
+                WaitState::Completed,
             ));
+        }
+
+        if cancel_signal
+            .map(|flag| flag.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
+            let _ = child.kill();
+            let output = child.wait_with_output()?;
+            return Ok((output, WaitState::Cancelled));
         }
 
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let output = child.wait_with_output()?;
-            return Ok((output, true));
+            return Ok((output, WaitState::TimedOut));
         }
 
         std::thread::sleep(Duration::from_millis(100));
