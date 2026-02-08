@@ -12,7 +12,7 @@ use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "chief-backend")]
+#[command(name = "chief_backend")]
 #[command(about = "Chief multi-project backend server")]
 pub struct BackendCli {
     #[arg(long, default_value = ".")]

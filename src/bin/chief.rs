@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "chief-cli")]
+#[command(name = "chief")]
 #[command(about = "Chief TDD orchestrator CLI")]
 struct Cli {
     #[arg(long, default_value = ".")]

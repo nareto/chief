@@ -40,8 +40,8 @@ To recover from failed TDD cycles, this tool utilizes `git checkout` to revert c
 
 Chief is a Rust TDD orchestration system with:
 
-- `cli` binary for single-project execution (current Chief flow).
-- `backend` binary for multi-project orchestration + introspection API.
+- `chief` binary for single-project execution (current Chief flow).
+- `chief_backend` binary for multi-project orchestration + introspection API.
 - responsive frontend (`frontend/`) for operating the backend.
 
 The system keeps **per-project** state local:
@@ -114,13 +114,13 @@ Each project can own its own `prompts/` directory.
 Run one project directly:
 
 ```bash
-cargo run --bin cli -- --project-dir /path/to/project
+cargo run --bin chief -- --project-dir /path/to/project
 ```
 
 Common options:
 
 ```bash
-cargo run --bin cli -- \
+cargo run --bin chief -- \
   --project-dir /path/to/project \
   --flow tdd \
   --model gpt-5
@@ -129,7 +129,7 @@ cargo run --bin cli -- \
 Requirements -> todos mode:
 
 ```bash
-cargo run --bin cli -- \
+cargo run --bin chief -- \
   --project-dir /path/to/project \
   --requirements "Add JWT auth and refresh token rotation"
 ```
@@ -137,7 +137,7 @@ cargo run --bin cli -- \
 Tail events:
 
 ```bash
-cargo run --bin cli -- --project-dir /path/to/project --tail-events 50
+cargo run --bin chief -- --project-dir /path/to/project --tail-events 50
 ```
 
 ## Backend usage
@@ -145,7 +145,7 @@ cargo run --bin cli -- --project-dir /path/to/project --tail-events 50
 Run backend over a parent directory containing multiple git projects:
 
 ```bash
-cargo run --bin backend -- --parent-dir /path/to/projects --port 8000
+cargo run --bin chief_backend -- --parent-dir /path/to/projects --port 8000
 ```
 
 Backend security flags/environment:
@@ -165,7 +165,7 @@ Example production-style backend start:
 
 ```bash
 CHIEF_API_TOKEN='replace-with-long-random-token' \
-cargo run --bin backend -- \
+cargo run --bin chief_backend -- \
   --parent-dir /path/to/projects \
   --host 0.0.0.0 \
   --port 8000 \
