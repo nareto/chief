@@ -8,7 +8,7 @@ Below you will find:
 
 ---
 TODO INFO:
-task: {{ todo.todo }}
+todo: {{ todo.todo }}
 expectations: {{ todo.expectations }}
 
 LOG:

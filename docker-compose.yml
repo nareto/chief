@@ -10,8 +10,6 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
-      - --frontend-dir
-      - /workspace/chief/frontend
     volumes:
       - ./:/workspace/chief
       - ${CHIEF_PROJECTS_PARENT:-./projects}:/workspace/projects
@@ -23,7 +21,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
+      args:
+        CHIEF_BACKEND_URL: http://backend:8000
+        NEXT_PUBLIC_CHIEF_WS_BASE: ws://localhost:8000
     depends_on:
       - backend
+    environment:
+      CHIEF_BACKEND_URL: http://backend:8000
+      NEXT_PUBLIC_CHIEF_WS_BASE: ws://localhost:8000
     ports:
-      - "3000:80"
+      - "3000:3000"
