@@ -21,12 +21,12 @@ pub fn require_sensitive_access(state: &AppState, headers: &HeaderMap) -> Result
 }
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
-    if let Some(value) = headers.get("x-chief-token")
-        && let Ok(token) = value.to_str()
-    {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_owned());
+    if let Some(value) = headers.get("x-chief-token") {
+        if let Ok(token) = value.to_str() {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
         }
     }
 
