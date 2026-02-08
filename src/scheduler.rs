@@ -33,6 +33,7 @@ pub struct WorkerResult {
     pub status: String,
     pub error: Option<String>,
     pub commit_hash: Option<String>,
+    pub unrecoverable: bool,
 }
 
 #[derive(Debug)]

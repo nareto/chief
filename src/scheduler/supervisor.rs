@@ -27,6 +27,7 @@ impl Scheduler {
         let mut workers: JoinSet<WorkerResult> = JoinSet::new();
         let mut spawn_count = 0usize;
         let mut any_failure = false;
+        let mut unrecoverable_failure = false;
 
         loop {
             let (
@@ -110,6 +111,7 @@ impl Scheduler {
                         status: "failed".to_owned(),
                         error: Some(format!("worker task panicked: {join_err}")),
                         commit_hash: None,
+                        unrecoverable: false,
                     })
                 });
             }
@@ -135,9 +137,15 @@ impl Scheduler {
                     Ok(result) => {
                         if result.status != "completed" {
                             any_failure = true;
+                            if result.unrecoverable {
+                                unrecoverable_failure = true;
+                            }
                             let mut states = self.states.lock().await;
                             if let Some(state) = states.get_mut(&project_name) {
                                 state.last_error = result.error.clone();
+                                if result.unrecoverable {
+                                    state.stop_requested = true;
+                                }
                             }
                         }
                     }
@@ -155,7 +163,11 @@ impl Scheduler {
         engine.finish_run(
             &run_id,
             if any_failure {
-                RunExitStatus::Failure
+                if unrecoverable_failure {
+                    RunExitStatus::UnrecoverableFailure
+                } else {
+                    RunExitStatus::Failure
+                }
             } else {
                 RunExitStatus::Success
             },

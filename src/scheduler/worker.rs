@@ -2,6 +2,7 @@ use super::WorkerResult;
 use crate::domain::{EventType, JobRecord, JobStatus, Todo, TodoStatus};
 use crate::flow::FlowKind;
 use crate::git::GitOps;
+use crate::orchestrator::OrchestratorError;
 use crate::service::{ChiefEngine, ProjectContext};
 use std::fs;
 use std::sync::Arc;
@@ -68,6 +69,7 @@ pub(super) fn run_worker(
                 status: "failed".to_owned(),
                 error: Some(err.to_string()),
                 commit_hash: None,
+                unrecoverable: true,
             };
         }
 
@@ -101,6 +103,7 @@ pub(super) fn run_worker(
                 status: "failed".to_owned(),
                 error: Some(err.to_string()),
                 commit_hash: None,
+                unrecoverable: true,
             };
         }
 
@@ -123,7 +126,8 @@ pub(super) fn run_worker(
     }
 
     let todo_id = todo.id.clone();
-    let outcome = engine.run_single_todo(
+    let max_retries = context.chief_toml.chief.max_retries.max(1);
+    let outcome = engine.run_single_todo_with_retries(
         &run_id,
         &job.id,
         job.worker_index,
@@ -131,6 +135,13 @@ pub(super) fn run_worker(
         flow_kind,
         work_dir.clone(),
         model_override,
+        max_retries,
+        |attempt, total, err| {
+            let msg = format!(
+                "worker todo execution failed ({attempt}/{total}), retrying non-deterministic loop"
+            );
+            report_state_update_error(&context, &run_id, Some(&job.id), Some(&todo_id), &msg, err);
+        },
     );
 
     let result = match outcome {
@@ -172,6 +183,7 @@ pub(super) fn run_worker(
                     status: "failed".to_owned(),
                     error: Some(err),
                     commit_hash: outcome.commit_hash,
+                    unrecoverable: false,
                 }
             } else {
                 if let Err(status_err) = context.store.update_todo_status(
@@ -195,10 +207,13 @@ pub(super) fn run_worker(
                     status: "completed".to_owned(),
                     error: None,
                     commit_hash: outcome.commit_hash,
+                    unrecoverable: false,
                 }
             }
         }
         Err(err) => {
+            let unrecoverable = matches!(err, OrchestratorError::Unrecoverable(_));
+            let err_string = err.as_error().to_string();
             if let Err(status_err) =
                 context
                     .store
@@ -225,13 +240,19 @@ pub(super) fn run_worker(
                     );
                 }
             }
-            update_job(&context, &mut job, JobStatus::Failed, Some(err.to_string()));
+            update_job(
+                &context,
+                &mut job,
+                JobStatus::Failed,
+                Some(err_string.clone()),
+            );
             WorkerResult {
                 job_id: job.id,
                 todo_id,
                 status: "failed".to_owned(),
-                error: Some(err.to_string()),
+                error: Some(err_string),
                 commit_hash: None,
+                unrecoverable,
             }
         }
     };

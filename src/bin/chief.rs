@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chief::flow::FlowKind;
+use chief::orchestrator::OrchestratorError;
 use chief::service::{ChiefEngine, ProjectContext};
 use chief::storage::EventQuery;
 use clap::Parser;
@@ -108,36 +109,32 @@ fn run() -> Result<()> {
         .max_retries
         .unwrap_or(context.chief_toml.chief.max_retries.max(1));
 
-    let mut failure_count = 0usize;
-    loop {
-        match engine.run_next_todo(flow_kind, cli.model.clone()) {
-            Ok(Some(outcome)) => {
-                failure_count = 0;
-                println!(
-                    "completed todo {}{}",
-                    outcome.todo_id,
-                    outcome
-                        .commit_hash
-                        .as_deref()
-                        .map(|hash| format!(" @ {hash}"))
-                        .unwrap_or_default()
-                );
-            }
-            Ok(None) => {
-                println!("all todos are done");
-                break;
-            }
-            Err(err) => {
-                failure_count += 1;
-                eprintln!("run failed ({failure_count}/{max_retries}): {err:#}");
-                if failure_count >= max_retries {
-                    return Err(err).context("maximum retry count reached");
-                }
-            }
+    match engine.run_todos_until_done_with_retries(
+        flow_kind,
+        cli.model.clone(),
+        max_retries,
+        |outcome| {
+            println!(
+                "completed todo {}{}",
+                outcome.todo_id,
+                outcome
+                    .commit_hash
+                    .as_deref()
+                    .map(|hash| format!(" @ {hash}"))
+                    .unwrap_or_default()
+            );
+        },
+        |attempt, total, err| {
+            eprintln!("run failed ({attempt}/{total}): {err:#}");
+        },
+    ) {
+        Ok(()) => {
+            println!("all todos are done");
+            Ok(())
         }
+        Err(OrchestratorError::Retryable(err)) => Err(err).context("maximum retry count reached"),
+        Err(OrchestratorError::Unrecoverable(err)) => Err(err).context("unrecoverable failure"),
     }
-
-    Ok(())
 }
 
 fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String> {

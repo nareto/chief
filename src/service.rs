@@ -5,12 +5,14 @@ use crate::domain::{
 };
 use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
 use crate::git::{GitOps, ShellGitOps};
+use crate::orchestrator::{OrchestratorError, OrchestratorResult, retry_with_policy_and_hook};
 use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
@@ -225,7 +227,7 @@ impl ChiefEngine {
         self.project.store.finish_run(run_id, status)
     }
 
-    pub fn run_single_todo(
+    pub fn run_single_todo_once(
         &self,
         run_id: &str,
         job_id: &str,
@@ -234,7 +236,7 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
-    ) -> Result<TodoOutcome> {
+    ) -> OrchestratorResult<TodoOutcome> {
         let flow = build_flow(flow_kind);
         let agent = self.project.build_agent(model_override);
 
@@ -253,32 +255,99 @@ impl ChiefEngine {
         };
 
         flow.run_todo(&mut execution)
+            .map_err(|err| self.classify_runtime_error(err))
     }
 
-    pub fn run_next_todo(
+    pub fn run_single_todo(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        worker_index: usize,
+        todo: Todo,
+        flow_kind: FlowKind,
+        work_dir: PathBuf,
+        model_override: Option<String>,
+    ) -> Result<TodoOutcome> {
+        self.run_single_todo_once(
+            run_id,
+            job_id,
+            worker_index,
+            todo,
+            flow_kind,
+            work_dir,
+            model_override,
+        )
+        .map_err(OrchestratorError::into_error)
+    }
+
+    pub fn run_single_todo_with_retries<F>(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        worker_index: usize,
+        todo: Todo,
+        flow_kind: FlowKind,
+        work_dir: PathBuf,
+        model_override: Option<String>,
+        max_retries: usize,
+        mut on_retry: F,
+    ) -> OrchestratorResult<TodoOutcome>
+    where
+        F: FnMut(usize, usize, &anyhow::Error),
+    {
+        retry_with_policy_and_hook(
+            max_retries,
+            |_attempt, _max_retries| {
+                self.run_single_todo_once(
+                    run_id,
+                    job_id,
+                    worker_index,
+                    todo.clone(),
+                    flow_kind,
+                    work_dir.clone(),
+                    model_override.clone(),
+                )
+            },
+            |attempt, total, err| on_retry(attempt, total, err),
+        )
+    }
+
+    pub fn run_next_todo_once(
         &self,
         flow_kind: FlowKind,
         model_override: Option<String>,
-    ) -> Result<Option<TodoOutcome>> {
-        let run_id = self.start_run()?;
+    ) -> OrchestratorResult<Option<TodoOutcome>> {
+        let run_id = self
+            .start_run()
+            .map_err(|err| self.classify_runtime_error(err))?;
 
-        let result = (|| -> Result<Option<TodoOutcome>> {
-            let Some(next) = self.project.pick_next_todo_priority()? else {
+        let result = (|| -> OrchestratorResult<Option<TodoOutcome>> {
+            let Some(next) = self
+                .project
+                .pick_next_todo_priority()
+                .map_err(|err| self.classify_runtime_error(err))?
+            else {
                 return Ok(None);
             };
-            let Some(todo) = self.project.claim_todo(&next.id)? else {
+            let Some(todo) = self
+                .project
+                .claim_todo(&next.id)
+                .map_err(|err| self.classify_runtime_error(err))?
+            else {
                 return Ok(None);
             };
 
-            let mut job =
-                self.project
-                    .create_job(&run_id, 1, flow_kind, Some(todo.id.clone()), None)?;
+            let mut job = self
+                .project
+                .create_job(&run_id, 1, flow_kind, Some(todo.id.clone()), None)
+                .map_err(|err| self.classify_runtime_error(err))?;
             job = self
                 .project
                 .set_job_status(job, JobStatus::Running, None)
-                .context("failed to set job status running")?;
+                .context("failed to set job status running")
+                .map_err(|err| self.classify_runtime_error(err))?;
 
-            match self.run_single_todo(
+            match self.run_single_todo_once(
                 &run_id,
                 &job.id,
                 1,
@@ -347,14 +416,50 @@ impl ChiefEngine {
 
         self.finish_run(
             &run_id,
-            if result.is_ok() {
-                RunExitStatus::Success
-            } else {
-                RunExitStatus::Failure
+            match &result {
+                Ok(_) => RunExitStatus::Success,
+                Err(err) if err.is_unrecoverable() => RunExitStatus::UnrecoverableFailure,
+                Err(_) => RunExitStatus::Failure,
             },
-        )?;
+        )
+        .map_err(|err| self.classify_runtime_error(err))?;
 
         result
+    }
+
+    pub fn run_next_todo(
+        &self,
+        flow_kind: FlowKind,
+        model_override: Option<String>,
+    ) -> Result<Option<TodoOutcome>> {
+        self.run_next_todo_once(flow_kind, model_override)
+            .map_err(OrchestratorError::into_error)
+    }
+
+    pub fn run_todos_until_done_with_retries<FC, FR>(
+        &self,
+        flow_kind: FlowKind,
+        model_override: Option<String>,
+        max_retries: usize,
+        mut on_todo_completed: FC,
+        mut on_retry: FR,
+    ) -> OrchestratorResult<()>
+    where
+        FC: FnMut(&TodoOutcome),
+        FR: FnMut(usize, usize, &anyhow::Error),
+    {
+        loop {
+            let next = retry_with_policy_and_hook(
+                max_retries,
+                |_attempt, _max_retries| self.run_next_todo_once(flow_kind, model_override.clone()),
+                |attempt, total, err| on_retry(attempt, total, err),
+            )?;
+
+            let Some(outcome) = next else {
+                return Ok(());
+            };
+            on_todo_completed(&outcome);
+        }
     }
 
     pub fn process_requirements(
@@ -408,6 +513,14 @@ impl ChiefEngine {
         out
     }
 
+    fn classify_runtime_error(&self, err: anyhow::Error) -> OrchestratorError {
+        if is_known_unrecoverable_error(&err) {
+            OrchestratorError::unrecoverable(err)
+        } else {
+            OrchestratorError::retryable(err)
+        }
+    }
+
     fn log_state_update_error(
         &self,
         run_id: &str,
@@ -434,5 +547,47 @@ impl ChiefEngine {
         ) {
             warn!("failed to record state-update error event: {log_err:#}");
         }
+    }
+}
+
+fn is_known_unrecoverable_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<io::Error>() {
+            if matches!(
+                io_err.kind(),
+                io::ErrorKind::PermissionDenied
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::ReadOnlyFilesystem
+            ) {
+                return true;
+            }
+        }
+
+        if let Some(sqlite_err) = cause.downcast_ref::<rusqlite::Error>() {
+            if is_unrecoverable_sqlite_error(sqlite_err) {
+                return true;
+            }
+        }
+    }
+
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("agent binary")
+        || text.contains("template load failed")
+        || text.contains("is not a git repository")
+}
+
+fn is_unrecoverable_sqlite_error(err: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode;
+
+    match err.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy)
+        | Some(ErrorCode::DatabaseLocked)
+        | Some(ErrorCode::OperationInterrupted)
+        | Some(ErrorCode::OperationAborted) => false,
+        Some(_) => true,
+        None => matches!(
+            err,
+            rusqlite::Error::InvalidPath(_) | rusqlite::Error::SqliteSingleThreadedMode
+        ),
     }
 }
