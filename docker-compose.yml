@@ -1,33 +1,15 @@
 services:
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    command:
-      - --parent-dir
-      - /workspace/projects
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-    volumes:
-      - ./:/workspace/chief
-      - ${CHIEF_PROJECTS_PARENT:-./projects}:/workspace/projects
-    working_dir: /workspace/chief
-    ports:
-      - "8000:8000"
-
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
       args:
-        CHIEF_BACKEND_URL: http://backend:8000
+        CHIEF_BACKEND_URL: http://host.docker.internal:8000
         NEXT_PUBLIC_CHIEF_WS_BASE: ws://localhost:8000
-    depends_on:
-      - backend
     environment:
-      CHIEF_BACKEND_URL: http://backend:8000
+      CHIEF_BACKEND_URL: http://host.docker.internal:8000
       NEXT_PUBLIC_CHIEF_WS_BASE: ws://localhost:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3000:3000"
