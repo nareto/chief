@@ -19,7 +19,7 @@ Chief records all events (agent prompts/responses, diffs, test outputs) in `chie
 
 ### Iteration Loops
 
-Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of stability: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success.
+Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of convergence: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success.
 
 Chief uses two loop types:
 
@@ -148,14 +148,49 @@ Run backend over a parent directory containing multiple git projects:
 cargo run --bin backend -- --parent-dir /path/to/projects --port 8000
 ```
 
-Frontend can be served by nginx in docker compose (see below), and calls backend APIs for:
+Backend security flags/environment:
+
+- `CHIEF_API_TOKEN` (or `--api-token`): optional, but strongly recommended for deployment.
+- `--allow-origin`: CORS allowlist. Defaults to `http://localhost:3000`.
+- `--enable-terminal`: terminal websocket is disabled by default unless this flag is set.
+
+When `CHIEF_API_TOKEN` is set, sensitive routes require auth via one of:
+
+- `Authorization: Bearer <token>`
+- `X-Chief-Token: <token>`
+
+Sensitive routes include project control/write operations (start/stop/refresh, add todo, requirements, config updates, terminal websocket).
+
+Example production-style backend start:
+
+```bash
+CHIEF_API_TOKEN='replace-with-long-random-token' \
+cargo run --bin backend -- \
+  --parent-dir /path/to/projects \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --allow-origin https://chief.example.com
+```
+
+Example authenticated request:
+
+```bash
+curl -X POST http://localhost:8000/api/projects/myproj/start \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"agents":1,"flow":"tdd"}'
+```
+
+Frontend is a Next.js app (`frontend/`) and calls backend APIs for:
 
 - project status and runtime controls
 - start/stop project schedulers
 - job list and todo table
-- filtered logs
+- event tape queries (`/events`)
 - requirements ingestion
 - websocket terminal command execution
+- per-project state (`/state`)
+- file diffs (`/file_diff`)
 
 ## Docker compose
 
@@ -171,6 +206,39 @@ Projects mount is generic in `docker-compose.yml`:
 CHIEF_PROJECTS_PARENT=/absolute/path/to/projects docker compose up --build
 ```
 
+For deployment, create a `.env` file (or export env vars) and include at minimum:
+
+```dotenv
+CHIEF_PROJECTS_PARENT=/absolute/path/to/projects
+CHIEF_API_TOKEN=replace-with-long-random-token
+```
+
+Then run:
+
+```bash
+docker compose up --build
+```
+
+Compose automatically loads `.env` from the project root. Keep this file out of source control.
+
+Terminal websocket in compose:
+
+- Disabled by default (backend starts without `--enable-terminal`).
+- To enable it, add a local `docker-compose.override.yml` command override:
+
+```yaml
+services:
+  backend:
+    command:
+      - --parent-dir
+      - /workspace/projects
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --enable-terminal
+```
+
 For machine-specific setup (for example NFS), use `docker-compose.override.yml` locally. That file is gitignored.
 
 Services:
@@ -178,7 +246,7 @@ Services:
 - `backend` on `http://localhost:8000`
 - `frontend` on `http://localhost:3000`
 
-`frontend` proxies `/api/*` and websocket terminal traffic to backend.
+`frontend` rewrites `/api/*` to backend. Terminal websocket defaults to `ws://localhost:8000` (configurable with `NEXT_PUBLIC_CHIEF_WS_BASE`).
 
 ## Config (`chief.toml`) quick example
 

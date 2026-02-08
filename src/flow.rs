@@ -6,10 +6,61 @@ use crate::prompt::PromptStore;
 use crate::storage::{EventQuery, ProjectStore};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowKind {
+    #[default]
+    Tdd,
+    SinglePrompt,
+}
+
+impl FlowKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tdd => "tdd",
+            Self::SinglePrompt => "single_prompt",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FlowParseError {
+    input: String,
+}
+
+impl fmt::Display for FlowParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown flow '{}'; expected one of: tdd, single_prompt",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for FlowParseError {}
+
+impl FromStr for FlowKind {
+    type Err = FlowParseError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "tdd" => Ok(Self::Tdd),
+            "single_prompt" => Ok(Self::SinglePrompt),
+            other => Err(FlowParseError {
+                input: other.to_owned(),
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TodoOutcome {
@@ -531,10 +582,10 @@ impl TodoFlow for SinglePromptFlow {
     }
 }
 
-pub fn build_flow(flow_name: &str) -> Box<dyn TodoFlow> {
-    match flow_name {
-        "single_prompt" => Box::new(SinglePromptFlow::default()),
-        _ => Box::new(TddFlow::default()),
+pub fn build_flow(flow_kind: FlowKind) -> Box<dyn TodoFlow> {
+    match flow_kind {
+        FlowKind::SinglePrompt => Box::new(SinglePromptFlow::default()),
+        FlowKind::Tdd => Box::new(TddFlow::default()),
     }
 }
 
@@ -861,5 +912,40 @@ fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
     match value {
         Value::Object(map) => map.into_iter().collect(),
         _ => BTreeMap::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlowKind, build_flow};
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_known_flow_kinds() {
+        assert_eq!(FlowKind::from_str("tdd").unwrap(), FlowKind::Tdd);
+        assert_eq!(
+            FlowKind::from_str("single_prompt").unwrap(),
+            FlowKind::SinglePrompt
+        );
+        assert_eq!(FlowKind::from_str(" TDD ").unwrap(), FlowKind::Tdd);
+    }
+
+    #[test]
+    fn rejects_unknown_flow_kind() {
+        let err = FlowKind::from_str("unknown").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown flow"),
+            "unexpected parse error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn build_flow_matches_kind() {
+        let tdd = build_flow(FlowKind::Tdd);
+        let single_prompt = build_flow(FlowKind::SinglePrompt);
+
+        assert_eq!(tdd.name(), "tdd");
+        assert_eq!(single_prompt.name(), "single_prompt");
     }
 }

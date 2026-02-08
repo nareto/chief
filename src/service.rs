@@ -3,7 +3,7 @@ use crate::config::ChiefToml;
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoStatus,
 };
-use crate::flow::{FlowExecution, TodoOutcome, build_flow};
+use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
 use crate::git::{GitOps, ShellGitOps};
 use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -85,7 +86,7 @@ impl ProjectContext {
         &self,
         run_id: &str,
         worker_index: usize,
-        flow_name: &str,
+        flow_kind: FlowKind,
         todo_id: Option<String>,
         worktree_path: Option<String>,
     ) -> Result<JobRecord> {
@@ -95,7 +96,7 @@ impl ProjectContext {
             todo_id,
             status: JobStatus::Queued,
             worker_index,
-            flow: flow_name.to_owned(),
+            flow: flow_kind.as_str().to_owned(),
             worktree_path,
             started_at: Utc::now(),
             ended_at: None,
@@ -230,11 +231,11 @@ impl ChiefEngine {
         job_id: &str,
         worker_index: usize,
         todo: Todo,
-        flow_name: &str,
+        flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
     ) -> Result<TodoOutcome> {
-        let flow = build_flow(flow_name);
+        let flow = build_flow(flow_kind);
         let agent = self.project.build_agent(model_override);
 
         let mut execution = FlowExecution {
@@ -256,7 +257,7 @@ impl ChiefEngine {
 
     pub fn run_next_todo(
         &self,
-        flow_name: &str,
+        flow_kind: FlowKind,
         model_override: Option<String>,
     ) -> Result<Option<TodoOutcome>> {
         let run_id = self.start_run()?;
@@ -271,7 +272,7 @@ impl ChiefEngine {
 
             let mut job =
                 self.project
-                    .create_job(&run_id, 1, flow_name, Some(todo.id.clone()), None)?;
+                    .create_job(&run_id, 1, flow_kind, Some(todo.id.clone()), None)?;
             job = self
                 .project
                 .set_job_status(job, JobStatus::Running, None)
@@ -282,30 +283,63 @@ impl ChiefEngine {
                 &job.id,
                 1,
                 todo.clone(),
-                flow_name,
+                flow_kind,
                 self.project.project_dir.clone(),
                 model_override,
             ) {
                 Ok(outcome) => {
                     if let Some(commit_hash) = outcome.commit_hash.as_deref() {
-                        let _ = self.project.store.update_todo_status(
+                        if let Err(err) = self.project.store.update_todo_status(
                             &todo.id,
                             TodoStatus::Done,
                             Some(commit_hash),
+                        ) {
+                            self.log_state_update_error(
+                                &run_id,
+                                Some(&job.id),
+                                Some(&todo.id),
+                                "failed to mark todo done",
+                                &err,
+                            );
+                        }
+                    }
+                    if let Err(err) = self.project.set_job_status(job, JobStatus::Completed, None) {
+                        self.log_state_update_error(
+                            &run_id,
+                            None,
+                            Some(&todo.id),
+                            "failed to update job status to completed",
+                            &err,
                         );
                     }
-                    let _ = self.project.set_job_status(job, JobStatus::Completed, None);
                     Ok(Some(outcome))
                 }
                 Err(err) => {
-                    let _ = self.project.store.update_todo_status(
-                        &todo.id,
-                        TodoStatus::Attempted,
-                        None,
-                    );
-                    let _ =
+                    if let Err(status_err) =
                         self.project
-                            .set_job_status(job, JobStatus::Failed, Some(err.to_string()));
+                            .store
+                            .update_todo_status(&todo.id, TodoStatus::Attempted, None)
+                    {
+                        self.log_state_update_error(
+                            &run_id,
+                            Some(&job.id),
+                            Some(&todo.id),
+                            "failed to mark todo attempted",
+                            &status_err,
+                        );
+                    }
+                    if let Err(status_err) =
+                        self.project
+                            .set_job_status(job, JobStatus::Failed, Some(err.to_string()))
+                    {
+                        self.log_state_update_error(
+                            &run_id,
+                            None,
+                            Some(&todo.id),
+                            "failed to update job status to failed",
+                            &status_err,
+                        );
+                    }
                     Err(err)
                 }
             }
@@ -372,5 +406,33 @@ impl ChiefEngine {
         )?;
 
         out
+    }
+
+    fn log_state_update_error(
+        &self,
+        run_id: &str,
+        job_id: Option<&str>,
+        todo_id: Option<&str>,
+        msg: &str,
+        err: &anyhow::Error,
+    ) {
+        warn!("{msg}: {err:#}");
+        let mut payload = BTreeMap::new();
+        payload.insert(
+            "error".to_owned(),
+            serde_json::Value::String(err.to_string()),
+        );
+        if let Err(log_err) = self.project.log_project_event(
+            run_id,
+            job_id.map(str::to_owned),
+            todo_id.map(str::to_owned),
+            "warning",
+            None,
+            EventType::Error,
+            msg.to_owned(),
+            payload,
+        ) {
+            warn!("failed to record state-update error event: {log_err:#}");
+        }
     }
 }

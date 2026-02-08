@@ -3,7 +3,7 @@ use crate::domain::{
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -92,27 +92,7 @@ impl ProjectStore {
     pub fn list_todos(&self) -> Result<Vec<Todo>> {
         let conn = self.conn()?;
         self.migrate(&conn)?;
-        let mut stmt = conn.prepare(
-            "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
-             FROM todos
-             ORDER BY priority DESC, id ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let suites_text: String = row.get(4)?;
-            let suites: Vec<String> = serde_json::from_str(&suites_text).unwrap_or_default();
-            let status_text: String = row.get(5)?;
-            Ok(Todo {
-                id: row.get(0)?,
-                priority: row.get(1)?,
-                todo: row.get(2)?,
-                expectations: row.get(3)?,
-                test_suites: suites,
-                status: parse_todo_status(&status_text),
-                done_at_commit: row.get(6)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to read todos")
+        self.list_todos_with_conn(&conn)
     }
 
     pub fn list_available_todos(&self) -> Result<Vec<Todo>> {
@@ -137,40 +117,93 @@ impl ProjectStore {
         status: TodoStatus,
         done_at_commit: Option<&str>,
     ) -> Result<()> {
-        let mut todo_file = self.load_todo_file()?;
-        if let Some(todo) = todo_file.todos.iter_mut().find(|todo| todo.id == todo_id) {
-            todo.status = status;
-            if let Some(commit) = done_at_commit {
-                todo.done_at_commit = Some(commit.to_owned());
-            }
-        }
-        self.save_todo_file(&todo_file)?;
-
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         self.migrate(&conn)?;
-        conn.execute(
-            "UPDATE todos SET status = ?1, done_at_commit = COALESCE(?2, done_at_commit), updated_at = ?3 WHERE id = ?4",
-            params![status.as_str(), done_at_commit, Utc::now().to_rfc3339(), todo_id],
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE todos
+             SET status = ?1, done_at_commit = COALESCE(?2, done_at_commit), updated_at = ?3
+             WHERE id = ?4",
+            params![
+                status.as_str(),
+                done_at_commit,
+                Utc::now().to_rfc3339(),
+                todo_id
+            ],
         )?;
+        if changed == 0 {
+            return Err(anyhow!("todo '{}' not found", todo_id));
+        }
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
+    pub fn append_todo(&self, todo: Todo) -> Result<Todo> {
+        let normalized = todo.normalize();
+        let mut conn = self.conn()?;
+        self.migrate(&conn)?;
+        let tx = conn.transaction()?;
+        self.upsert_todo_row(&tx, &normalized)?;
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
+        Ok(normalized)
+    }
+
+    pub fn clean_completed_todos_with_commit(&self) -> Result<usize> {
+        let todos = self.list_todos()?;
+        let before = todos.len();
+        let retained = todos
+            .into_iter()
+            .filter(|todo| !(todo.status == TodoStatus::Done && todo.done_at_commit.is_some()))
+            .collect::<Vec<_>>();
+        self.persist_todo_list(&retained)?;
+        Ok(before.saturating_sub(retained.len()))
+    }
+
     pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
-        let mut todos = self.list_todos()?;
-        let idx = todos.iter().position(|todo| todo.id == todo_id);
-        let Some(idx) = idx else {
+        let mut conn = self.conn()?;
+        self.migrate(&conn)?;
+        let tx = conn.transaction()?;
+
+        let mut stmt = tx.prepare(
+            "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
+             FROM todos
+             WHERE id = ?1
+             LIMIT 1",
+        )?;
+
+        let Some(mut todo) = stmt
+            .query_row(params![todo_id], parse_todo_row)
+            .optional()
+            .context("failed to fetch todo for claim")?
+        else {
             return Ok(None);
         };
+        drop(stmt);
 
-        let status = todos[idx].status;
-        if status == TodoStatus::Done || status == TodoStatus::InProgress {
+        if matches!(todo.status, TodoStatus::Done | TodoStatus::InProgress) {
             return Ok(None);
         }
 
-        todos[idx].status = TodoStatus::InProgress;
-        let todo = todos[idx].clone();
+        let changed = tx.execute(
+            "UPDATE todos
+             SET status = ?1, updated_at = ?2
+             WHERE id = ?3 AND status NOT IN ('done', 'in_progress')",
+            params![
+                TodoStatus::InProgress.as_str(),
+                Utc::now().to_rfc3339(),
+                todo_id
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
 
-        self.persist_todo_list(&todos)?;
+        todo.status = TodoStatus::InProgress;
+
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
         Ok(Some(todo))
     }
 
@@ -365,14 +398,31 @@ impl ProjectStore {
         let todo_file = TodoFile {
             todos: todos.iter().cloned().map(Todo::normalize).collect(),
         };
-        self.save_todo_file(&todo_file)?;
-
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         self.migrate(&conn)?;
+        let tx = conn.transaction()?;
         for todo in todo_file.todos {
-            self.upsert_todo_row(&conn, &todo)?;
+            self.upsert_todo_row(&tx, &todo)?;
         }
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
         Ok(())
+    }
+
+    fn list_todos_with_conn(&self, conn: &Connection) -> Result<Vec<Todo>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
+             FROM todos
+             ORDER BY priority DESC, id ASC",
+        )?;
+        let rows = stmt.query_map([], parse_todo_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read todos")
+    }
+
+    fn sync_todos_file_from_conn(&self, conn: &Connection) -> Result<()> {
+        let todos = self.list_todos_with_conn(conn)?;
+        self.save_todo_file(&TodoFile { todos })
     }
 
     fn upsert_todo_row(&self, conn: &Connection, todo: &Todo) -> Result<()> {
@@ -589,6 +639,21 @@ fn parse_todo_status(value: &str) -> TodoStatus {
     }
 }
 
+fn parse_todo_row(row: &Row<'_>) -> rusqlite::Result<Todo> {
+    let suites_text: String = row.get(4)?;
+    let suites: Vec<String> = serde_json::from_str(&suites_text).unwrap_or_default();
+    let status_text: String = row.get(5)?;
+    Ok(Todo {
+        id: row.get(0)?,
+        priority: row.get(1)?,
+        todo: row.get(2)?,
+        expectations: row.get(3)?,
+        test_suites: suites,
+        status: parse_todo_status(&status_text),
+        done_at_commit: row.get(6)?,
+    })
+}
+
 fn parse_job_status(value: &str) -> JobStatus {
     match value {
         "selecting" => JobStatus::Selecting,
@@ -656,5 +721,80 @@ fn json_to_sql_value(value: Value) -> rusqlite::types::Value {
         Value::Object(obj) => {
             rusqlite::types::Value::Text(serde_json::to_string(&obj).unwrap_or_default())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectStore;
+    use crate::domain::{Todo, TodoStatus};
+    use std::fs;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn temp_project_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("chief-storage-test-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn claim_todo_updates_sqlite_and_todos_file() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: String::new(),
+            todo: "test atomic claim".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        }
+        .normalize();
+        let todo = store.append_todo(todo).expect("append_todo should succeed");
+
+        let claimed = store
+            .claim_todo(&todo.id)
+            .expect("claim_todo should succeed")
+            .expect("todo should be claimable");
+        assert_eq!(claimed.status, TodoStatus::InProgress);
+
+        let db_todo = store
+            .list_todos()
+            .expect("list_todos should succeed")
+            .into_iter()
+            .find(|item| item.id == todo.id)
+            .expect("todo should exist in db");
+        assert_eq!(db_todo.status, TodoStatus::InProgress);
+
+        let file_todo = store
+            .load_todo_file()
+            .expect("load_todo_file should succeed")
+            .todos
+            .into_iter()
+            .find(|item| item.id == todo.id)
+            .expect("todo should exist in file");
+        assert_eq!(file_todo.status, TodoStatus::InProgress);
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn update_todo_status_fails_for_missing_todo() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let err = store
+            .update_todo_status("missing-id", TodoStatus::Done, None)
+            .expect_err("missing todo should return error");
+        assert!(
+            err.to_string().contains("not found"),
+            "unexpected error message: {}",
+            err
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
     }
 }

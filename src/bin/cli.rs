@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chief::flow::FlowKind;
 use chief::service::{ChiefEngine, ProjectContext};
 use chief::storage::EventQuery;
 use clap::Parser;
@@ -36,16 +37,15 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let flow_kind: FlowKind = cli
+        .flow
+        .parse()
+        .with_context(|| format!("invalid --flow '{}'", cli.flow))?;
     let context = ProjectContext::load(&cli.project_dir)?;
 
     if cli.clean_done {
-        let mut todo_file = context.store.load_todo_file()?;
-        todo_file.todos.retain(|todo| {
-            !(todo.status == chief::domain::TodoStatus::Done && todo.done_at_commit.is_some())
-        });
-        context.store.save_todo_file(&todo_file)?;
-        context.store.sync_todos_from_file()?;
-        println!("cleaned completed todos");
+        let removed = context.store.clean_completed_todos_with_commit()?;
+        println!("cleaned completed todos ({removed} removed)");
         return Ok(());
     }
 
@@ -110,7 +110,7 @@ fn run() -> Result<()> {
 
     let mut failure_count = 0usize;
     loop {
-        match engine.run_next_todo(&cli.flow, cli.model.clone()) {
+        match engine.run_next_todo(flow_kind, cli.model.clone()) {
             Ok(Some(outcome)) => {
                 failure_count = 0;
                 println!(

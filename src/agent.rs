@@ -2,9 +2,10 @@ use crate::config::ChiefConfig;
 use crate::domain::AgentOutput;
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct AgentRequest {
@@ -145,9 +146,7 @@ impl CodingAgent for CommandAgent {
                 .context("failed to write prompt to agent stdin")?;
         }
 
-        // Timeout is currently advisory. The command is still executed synchronously.
-        let output = child
-            .wait_with_output()
+        let (output, timed_out) = wait_with_timeout(child, request.timeout_seconds)
             .context("failed while waiting for agent output")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -155,17 +154,25 @@ impl CodingAgent for CommandAgent {
         let merged = self.parse_output(&stdout, &stderr);
 
         let mut merged_output = merged;
-        if let Some(timeout_seconds) = request.timeout_seconds {
-            if timeout_seconds == 0 {
-                merged_output = format!(
-                    "timeout_seconds=0 is invalid, run still executed.\n{}",
-                    merged_output
-                );
-            }
+        if timed_out {
+            merged_output = format!(
+                "agent timed out after {} second(s) and was terminated.\n{}",
+                request.timeout_seconds.unwrap_or_default(),
+                merged_output
+            );
+        } else if request.timeout_seconds == Some(0) {
+            merged_output = format!(
+                "timeout_seconds=0 is invalid, run still executed.\n{}",
+                merged_output
+            );
         }
 
         Ok(AgentOutput {
-            exit_code: output.status.code().unwrap_or(1),
+            exit_code: if timed_out {
+                124
+            } else {
+                output.status.code().unwrap_or(1)
+            },
             command: shell_join(&command),
             stdout,
             stderr,
@@ -252,6 +259,50 @@ fn shell_escape(part: &str) -> String {
     }
     let escaped = part.replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+fn wait_with_timeout(mut child: Child, timeout_seconds: Option<u64>) -> Result<(Output, bool)> {
+    let Some(timeout_seconds) = timeout_seconds else {
+        let output = child.wait_with_output()?;
+        return Ok((output, false));
+    };
+
+    if timeout_seconds == 0 {
+        let output = child.wait_with_output()?;
+        return Ok((output, false));
+    }
+
+    let timeout = Duration::from_secs(timeout_seconds);
+    let started = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut out) = child.stdout.take() {
+                out.read_to_end(&mut stdout)?;
+            }
+            if let Some(mut err) = child.stderr.take() {
+                err.read_to_end(&mut stderr)?;
+            }
+            return Ok((
+                Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+                false,
+            ));
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child.wait_with_output()?;
+            return Ok((output, true));
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn ensure_agent_binary_available(path: &Path, agent_name: &str) -> Result<()> {
