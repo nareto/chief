@@ -150,6 +150,52 @@ impl ProjectStore {
         Ok(normalized)
     }
 
+    pub fn update_todo(&self, existing_id: &str, todo: Todo) -> Result<Todo> {
+        let mut conn = self.conn()?;
+        self.migrate(&conn)?;
+        let tx = conn.transaction()?;
+
+        let mut stmt = tx.prepare(
+            "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
+             FROM todos
+             WHERE id = ?1
+             LIMIT 1",
+        )?;
+        let existing = stmt
+            .query_row(params![existing_id], parse_todo_row)
+            .optional()
+            .context("failed to fetch todo for update")?;
+        drop(stmt);
+
+        let Some(existing) = existing else {
+            return Err(anyhow!("todo '{}' not found", existing_id));
+        };
+
+        let mut next = todo.normalize();
+        if next.id.trim().is_empty() {
+            next.id = existing.id;
+        }
+
+        if next.id != existing_id {
+            let mut conflict_stmt = tx.prepare("SELECT 1 FROM todos WHERE id = ?1 LIMIT 1")?;
+            let has_conflict = conflict_stmt
+                .query_row(params![&next.id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            drop(conflict_stmt);
+            if has_conflict {
+                return Err(anyhow!("todo '{}' already exists", next.id));
+            }
+
+            tx.execute("DELETE FROM todos WHERE id = ?1", params![existing_id])?;
+        }
+
+        self.upsert_todo_row(&tx, &next)?;
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
     pub fn clean_completed_todos_with_commit(&self) -> Result<usize> {
         let todos = self.list_todos()?;
         let before = todos.len();

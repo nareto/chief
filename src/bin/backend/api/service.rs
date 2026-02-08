@@ -4,6 +4,7 @@ use crate::api::types::{
     FileDiffQuery, FileDiffResponse, JobsResponse, LogQuery, MessageResponse, PhaseIteration,
     ProjectsResponse, RequirementsRequest, RequirementsResponse, StartProjectRequest,
     StateResponse, TodoProgress, TodoResponse, TodosResponse, UpdateChiefTomlRequest,
+    UpdateTodoRequest,
 };
 use anyhow::{Context, anyhow};
 use chief::domain::{EventType, JobStatus, Phase, Todo, TodoStatus};
@@ -111,6 +112,69 @@ impl ApiService {
             .append_todo(todo)
             .map_err(ApiError::internal)?;
         Ok(TodoResponse { todo })
+    }
+
+    pub async fn update_todo(
+        &self,
+        project: &str,
+        todo_id: &str,
+        payload: UpdateTodoRequest,
+    ) -> Result<TodoResponse, ApiError> {
+        let context = self.project_context(project).await?;
+        let current = context
+            .store
+            .list_todos()
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .find(|todo| todo.id == todo_id)
+            .ok_or_else(|| ApiError::not_found(format!("todo '{todo_id}' not found")))?;
+
+        let status = match payload.status {
+            Some(raw) => parse_todo_status_input(&raw)
+                .ok_or_else(|| ApiError::unprocessable(format!("invalid todo status '{}'", raw)))?,
+            None => current.status,
+        };
+
+        let done_at_commit = match payload.done_at_commit {
+            Some(Some(raw)) => {
+                let value = raw.trim();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_owned())
+                }
+            }
+            Some(None) => None,
+            None => current.done_at_commit.clone(),
+        };
+
+        let todo = Todo {
+            id: payload.id.unwrap_or(current.id),
+            todo: payload.todo.unwrap_or(current.todo),
+            expectations: payload.expectations.unwrap_or(current.expectations),
+            priority: payload.priority.unwrap_or(current.priority),
+            test_suites: payload.test_suites.unwrap_or(current.test_suites),
+            status,
+            done_at_commit,
+        }
+        .normalize();
+
+        if todo.todo.trim().is_empty() {
+            return Err(ApiError::unprocessable("todo text cannot be empty"));
+        }
+
+        let updated = context.store.update_todo(todo_id, todo).map_err(|err| {
+            let message = err.to_string();
+            if message.contains("not found") {
+                ApiError::not_found(message)
+            } else if message.contains("already exists") {
+                ApiError::unprocessable(message)
+            } else {
+                ApiError::internal(err)
+            }
+        })?;
+
+        Ok(TodoResponse { todo: updated })
     }
 
     pub async fn get_jobs(&self, project: &str) -> Result<JobsResponse, ApiError> {
@@ -384,6 +448,16 @@ fn parse_loop_iteration(msg: &str) -> Option<PhaseIteration> {
     let current = parts.next()?.trim().parse::<usize>().ok()?;
     let max = parts.next()?.trim().parse::<usize>().ok()?;
     Some(PhaseIteration { current, max })
+}
+
+fn parse_todo_status_input(value: &str) -> Option<TodoStatus> {
+    match value.trim() {
+        "pending" => Some(TodoStatus::Pending),
+        "in_progress" => Some(TodoStatus::InProgress),
+        "attempted" => Some(TodoStatus::Attempted),
+        "done" => Some(TodoStatus::Done),
+        _ => None,
+    }
 }
 
 fn parse_requested_types(input: Option<&str>) -> Vec<String> {

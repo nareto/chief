@@ -24,6 +24,17 @@ pub struct AddTodoRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UpdateTodoRequest {
+    pub id: Option<String>,
+    pub todo: Option<String>,
+    pub expectations: Option<String>,
+    pub priority: Option<i64>,
+    pub test_suites: Option<Vec<String>>,
+    pub status: Option<String>,
+    pub done_at_commit: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct LogQuery {
     pub limit: Option<usize>,
     pub event_type: Option<String>,

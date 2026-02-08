@@ -3,7 +3,7 @@ use crate::api::error::ApiError;
 use crate::api::terminal_ws;
 use crate::api::types::{
     AddTodoRequest, EventsQuery, FileDiffQuery, LogQuery, RequirementsRequest, StartProjectRequest,
-    UpdateChiefTomlRequest,
+    UpdateChiefTomlRequest, UpdateTodoRequest,
 };
 use crate::app::AppState;
 use axum::Json;
@@ -61,6 +61,21 @@ pub async fn add_todo(
 ) -> Result<Json<crate::api::types::TodoResponse>, ApiError> {
     auth::require_sensitive_access(&state, &headers)?;
     Ok(Json(state.service.add_todo(&project, payload).await?))
+}
+
+pub async fn update_todo(
+    Path((project, todo_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateTodoRequest>,
+) -> Result<Json<crate::api::types::TodoResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(
+        state
+            .service
+            .update_todo(&project, &todo_id, payload)
+            .await?,
+    ))
 }
 
 pub async fn get_jobs(
