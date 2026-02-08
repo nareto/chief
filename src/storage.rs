@@ -6,8 +6,44 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct DbResetRequiredError {
+    pub db_path: PathBuf,
+    pub reason: String,
+}
+
+impl DbResetRequiredError {
+    fn new(db_path: PathBuf, reason: impl Into<String>) -> Self {
+        Self {
+            db_path,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DbResetRequiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "chief.db at {} is inconsistent: {}. reset required",
+            self.db_path.display(),
+            self.reason
+        )
+    }
+}
+
+impl StdError for DbResetRequiredError {}
+
+pub fn db_reset_required_from_anyhow(err: &anyhow::Error) -> Option<DbResetRequiredError> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<DbResetRequiredError>())
+        .cloned()
+}
 
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
@@ -45,8 +81,15 @@ impl ProjectStore {
             fs::write(&self.todos_path, format!("{initial}\n"))
                 .with_context(|| format!("failed to initialize {}", self.todos_path.display()))?;
         }
-        let conn = self.conn()?;
-        self.migrate(&conn)?;
+        Ok(())
+    }
+
+    pub fn reset_db_from_todos_json(&self) -> Result<()> {
+        self.reset_db_file()?;
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("failed to open {} for reset", self.db_path.display()))?;
+        self.ensure_schema_ready(&conn)?;
+        drop(conn);
         self.sync_todos_from_file()?;
         Ok(())
     }
@@ -82,7 +125,6 @@ impl ProjectStore {
     pub fn sync_todos_from_file(&self) -> Result<()> {
         let todos = self.load_todo_file()?.todos;
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         for todo in todos {
             self.upsert_todo_row(&conn, &todo)?;
         }
@@ -91,7 +133,6 @@ impl ProjectStore {
 
     pub fn list_todos(&self) -> Result<Vec<Todo>> {
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         self.list_todos_with_conn(&conn)
     }
 
@@ -118,7 +159,6 @@ impl ProjectStore {
         done_at_commit: Option<&str>,
     ) -> Result<()> {
         let mut conn = self.conn()?;
-        self.migrate(&conn)?;
         let tx = conn.transaction()?;
         let changed = tx.execute(
             "UPDATE todos
@@ -142,7 +182,6 @@ impl ProjectStore {
     pub fn append_todo(&self, todo: Todo) -> Result<Todo> {
         let normalized = todo.normalize();
         let mut conn = self.conn()?;
-        self.migrate(&conn)?;
         let tx = conn.transaction()?;
         self.upsert_todo_row(&tx, &normalized)?;
         self.sync_todos_file_from_conn(&tx)?;
@@ -152,7 +191,6 @@ impl ProjectStore {
 
     pub fn update_todo(&self, existing_id: &str, todo: Todo) -> Result<Todo> {
         let mut conn = self.conn()?;
-        self.migrate(&conn)?;
         let tx = conn.transaction()?;
 
         let mut stmt = tx.prepare(
@@ -209,7 +247,6 @@ impl ProjectStore {
 
     pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
         let mut conn = self.conn()?;
-        self.migrate(&conn)?;
         let tx = conn.transaction()?;
 
         let mut stmt = tx.prepare(
@@ -255,7 +292,6 @@ impl ProjectStore {
 
     pub fn start_run(&self, run_id: &str) -> Result<()> {
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         conn.execute(
             "INSERT INTO runs (run_id, status, exit_status, started_at, ended_at) VALUES (?1, ?2, NULL, ?3, NULL)",
             params![run_id, "running", Utc::now().to_rfc3339()],
@@ -265,7 +301,6 @@ impl ProjectStore {
 
     pub fn finish_run(&self, run_id: &str, exit_status: RunExitStatus) -> Result<()> {
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         conn.execute(
             "UPDATE runs SET status = ?1, exit_status = ?2, ended_at = ?3 WHERE run_id = ?4",
             params![
@@ -280,7 +315,6 @@ impl ProjectStore {
 
     pub fn upsert_job(&self, job: &JobRecord) -> Result<()> {
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         conn.execute(
             "INSERT INTO jobs (id, run_id, todo_id, status, worker_index, flow, worktree_path, started_at, ended_at, error)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -311,7 +345,6 @@ impl ProjectStore {
 
     pub fn list_jobs(&self, limit: usize) -> Result<Vec<JobRecord>> {
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, run_id, todo_id, status, worker_index, flow, worktree_path, started_at, ended_at, error
              FROM jobs
@@ -346,7 +379,6 @@ impl ProjectStore {
 
     pub fn record_event(&self, event: &EventRecord) -> Result<()> {
         let conn = self.conn()?;
-        self.migrate(&conn)?;
         let payload = serde_json::to_string(&event.payload)?;
         conn.execute(
             "INSERT INTO events (run_id, job_id, todo_id, timestamp, level, phase, msg, event_type, payload)
@@ -373,7 +405,6 @@ impl ProjectStore {
             query.limit.min(1_000)
         };
         let conn = self.conn()?;
-        self.migrate(&conn)?;
 
         let mut sql = String::from(
             "SELECT id, run_id, job_id, todo_id, timestamp, level, phase, msg, event_type, payload
@@ -445,7 +476,6 @@ impl ProjectStore {
             todos: todos.iter().cloned().map(Todo::normalize).collect(),
         };
         let mut conn = self.conn()?;
-        self.migrate(&conn)?;
         let tx = conn.transaction()?;
         for todo in todo_file.todos {
             self.upsert_todo_row(&tx, &todo)?;
@@ -501,13 +531,27 @@ impl ProjectStore {
     fn conn(&self) -> Result<Connection> {
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open {}", self.db_path.display()))?;
+        if let Err(err) = self.ensure_schema_ready(&conn) {
+            return Err(DbResetRequiredError::new(self.db_path.clone(), err.to_string()).into());
+        }
         Ok(conn)
     }
 
-    fn migrate(&self, conn: &Connection) -> Result<()> {
+    fn ensure_schema_ready(&self, conn: &Connection) -> Result<()> {
+        self.create_schema(conn)?;
+        self.assert_schema_shape(conn)?;
+        conn.execute(
+            "UPDATE todos SET updated_at = ?1 WHERE updated_at IS NULL OR TRIM(updated_at) = ''",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .context("failed to enable sqlite foreign keys")?;
+        Ok(())
+    }
+
+    fn create_schema(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-            CREATE TABLE IF NOT EXISTS runs (
+            "CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
                 exit_status TEXT,
@@ -549,130 +593,107 @@ impl ProjectStore {
                 payload TEXT NOT NULL
             );",
         )
-        .context("failed to migrate sqlite schema")?;
-
-        self.rebuild_todos_table_if_legacy(conn)?;
-        self.ensure_column(conn, "todos", "done_at_commit", "TEXT")?;
-        self.ensure_column(conn, "todos", "updated_at", "TEXT")?;
-        self.ensure_column(conn, "events", "job_id", "TEXT")?;
-
-        conn.execute(
-            "UPDATE todos SET updated_at = ?1 WHERE updated_at IS NULL OR TRIM(updated_at) = ''",
-            params![Utc::now().to_rfc3339()],
-        )?;
-
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .context("failed to re-enable sqlite foreign keys")?;
+        .context("failed to initialize sqlite schema")?;
         Ok(())
     }
 
-    fn ensure_column(
+    fn assert_schema_shape(&self, conn: &Connection) -> Result<()> {
+        self.assert_table_columns(
+            conn,
+            "runs",
+            &["run_id", "status", "exit_status", "started_at", "ended_at"],
+        )?;
+        self.assert_table_columns(
+            conn,
+            "todos",
+            &[
+                "id",
+                "priority",
+                "todo",
+                "expectations",
+                "test_suites",
+                "status",
+                "done_at_commit",
+                "updated_at",
+            ],
+        )?;
+        self.assert_table_columns(
+            conn,
+            "jobs",
+            &[
+                "id",
+                "run_id",
+                "todo_id",
+                "status",
+                "worker_index",
+                "flow",
+                "worktree_path",
+                "started_at",
+                "ended_at",
+                "error",
+            ],
+        )?;
+        self.assert_table_columns(
+            conn,
+            "events",
+            &[
+                "id",
+                "run_id",
+                "job_id",
+                "todo_id",
+                "timestamp",
+                "level",
+                "phase",
+                "msg",
+                "event_type",
+                "payload",
+            ],
+        )?;
+        if self.table_has_any_foreign_key(conn, "events")? {
+            return Err(anyhow!("unexpected foreign key found on events table"));
+        }
+        Ok(())
+    }
+
+    fn assert_table_columns(
         &self,
         conn: &Connection,
         table: &str,
-        column: &str,
-        definition: &str,
+        expected: &[&str],
     ) -> Result<()> {
-        if self.table_has_column(conn, table, column)? {
-            return Ok(());
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to inspect table {table}"))?;
+        let expected_vec = expected
+            .iter()
+            .map(|col| (*col).to_owned())
+            .collect::<Vec<_>>();
+        if columns != expected_vec {
+            return Err(anyhow!(
+                "unexpected schema for table {table}: expected {:?}, got {:?}",
+                expected_vec,
+                columns
+            ));
         }
-        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
-        conn.execute(&sql, [])
-            .with_context(|| format!("failed to add column {table}.{column}"))?;
         Ok(())
     }
 
-    fn table_has_column(&self, conn: &Connection, table: &str, column: &str) -> Result<bool> {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    fn table_has_any_foreign_key(&self, conn: &Connection, table: &str) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
         let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(1)?;
-            if name == column {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(rows.next()?.is_some())
     }
 
-    fn table_columns(&self, conn: &Connection, table: &str) -> Result<Vec<String>> {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .with_context(|| format!("failed to inspect table {table}"))
-    }
-
-    fn rebuild_todos_table_if_legacy(&self, conn: &Connection) -> Result<()> {
-        let columns = self.table_columns(conn, "todos")?;
-        if columns.is_empty() {
-            return Ok(());
+    fn reset_db_file(&self) -> Result<()> {
+        match fs::remove_file(&self.db_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| {
+                format!("failed to remove inconsistent {}", self.db_path.display())
+            }),
         }
-
-        let required = [
-            "id",
-            "priority",
-            "todo",
-            "expectations",
-            "test_suites",
-            "status",
-            "done_at_commit",
-            "updated_at",
-        ];
-        let has_all_required = required.iter().all(|col| columns.iter().any(|c| c == col));
-        let needs_rebuild = !has_all_required || columns.iter().any(|col| col == "run_id");
-        if !needs_rebuild {
-            return Ok(());
-        }
-
-        let src = "__chief_todos_legacy";
-        conn.execute(&format!("ALTER TABLE todos RENAME TO {src}"), [])
-            .context("failed to rename legacy todos table")?;
-        conn.execute_batch(
-            "CREATE TABLE todos (
-                id TEXT PRIMARY KEY,
-                priority INTEGER NOT NULL,
-                todo TEXT NOT NULL,
-                expectations TEXT NOT NULL,
-                test_suites TEXT NOT NULL,
-                status TEXT NOT NULL,
-                done_at_commit TEXT,
-                updated_at TEXT NOT NULL
-            );",
-        )
-        .context("failed to create migrated todos table")?;
-
-        let expr = |name: &str, fallback: &str| -> String {
-            if columns.iter().any(|col| col == name) {
-                format!("COALESCE({name}, {fallback})")
-            } else {
-                fallback.to_owned()
-            }
-        };
-
-        let done_expr = if columns.iter().any(|col| col == "done_at_commit") {
-            "done_at_commit".to_owned()
-        } else {
-            "NULL".to_owned()
-        };
-
-        let sql = format!(
-            "INSERT INTO todos (id, priority, todo, expectations, test_suites, status, done_at_commit, updated_at)
-             SELECT {id_expr}, {priority_expr}, {todo_expr}, {expectations_expr}, {suites_expr}, {status_expr}, {done_expr}, {updated_expr}
-             FROM {src}",
-            id_expr = expr("id", "lower(hex(randomblob(16)))"),
-            priority_expr = expr("priority", "0"),
-            todo_expr = expr("todo", "''"),
-            expectations_expr = expr("expectations", "''"),
-            suites_expr = expr("test_suites", "'[]'"),
-            status_expr = expr("status", "'pending'"),
-            done_expr = done_expr,
-            updated_expr = expr("updated_at", "strftime('%Y-%m-%dT%H:%M:%fZ','now')"),
-            src = src,
-        );
-        conn.execute(&sql, [])
-            .context("failed to migrate legacy todos rows")?;
-        conn.execute(&format!("DROP TABLE {src}"), [])
-            .context("failed to drop legacy todos table")?;
-        Ok(())
     }
 }
 
@@ -774,6 +795,7 @@ fn json_to_sql_value(value: Value) -> rusqlite::types::Value {
 mod tests {
     use super::ProjectStore;
     use crate::domain::{Todo, TodoStatus};
+    use rusqlite::Connection;
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -839,6 +861,85 @@ mod tests {
             err.to_string().contains("not found"),
             "unexpected error message: {}",
             err
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn inconsistent_db_requires_confirmation_before_reset() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: String::new(),
+            todo: "survives db reset".to_owned(),
+            expectations: String::new(),
+            priority: 3,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        }
+        .normalize();
+        let todo = store.append_todo(todo).expect("append_todo should succeed");
+
+        let conn = Connection::open(project_dir.join("chief.db")).expect("db should open");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+            DROP TABLE todos;
+            CREATE TABLE todos (
+                id TEXT PRIMARY KEY,
+                run_id TEXT
+            );
+            PRAGMA foreign_keys = ON;",
+        )
+        .expect("should create inconsistent schema");
+        drop(conn);
+
+        let err = store
+            .sync_todos_from_file()
+            .expect_err("sync_todos_from_file should require db reset");
+        let reset_error = super::db_reset_required_from_anyhow(&err)
+            .expect("error should carry db reset required details");
+        assert_eq!(
+            reset_error.db_path,
+            project_dir.join("chief.db"),
+            "reset-required error should include db path"
+        );
+
+        store
+            .reset_db_from_todos_json()
+            .expect("explicit db reset should succeed");
+
+        let conn = Connection::open(project_dir.join("chief.db")).expect("db should reopen");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(todos)")
+            .expect("table info should prepare");
+        let todo_columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table info should query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("table info rows should parse");
+        assert_eq!(
+            todo_columns,
+            vec![
+                "id".to_owned(),
+                "priority".to_owned(),
+                "todo".to_owned(),
+                "expectations".to_owned(),
+                "test_suites".to_owned(),
+                "status".to_owned(),
+                "done_at_commit".to_owned(),
+                "updated_at".to_owned(),
+            ],
+            "recreated todos table should match canonical schema"
+        );
+
+        let todos = store.list_todos().expect("list_todos should succeed");
+        assert!(
+            todos.iter().any(|item| item.id == todo.id),
+            "todos should be reconstructed from todos.json after db reset"
         );
 
         let _ = fs::remove_dir_all(&project_dir);

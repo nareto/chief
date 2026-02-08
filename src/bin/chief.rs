@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use chief::flow::FlowKind;
 use chief::orchestrator::OrchestratorError;
 use chief::service::{ChiefEngine, ProjectContext};
-use chief::storage::EventQuery;
+use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
 use clap::Parser;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -30,14 +31,38 @@ struct Cli {
 }
 
 fn main() {
-    if let Err(err) = run() {
+    if let Err(err) = run_with_db_reset_prompt() {
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
+fn run_with_db_reset_prompt() -> Result<()> {
     let cli = Cli::parse();
+    match run(&cli) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let Some(reset) = db_reset_required_from_anyhow(&err) else {
+                return Err(err);
+            };
+            eprintln!(
+                "warning: chief.db is inconsistent at {}\nreason: {}\n",
+                reset.db_path.display(),
+                reset.reason
+            );
+            if !confirm_db_reset(&reset.db_path)? {
+                eprintln!("cancelled: chief.db reset declined by user");
+                return Ok(());
+            }
+            let store = ProjectStore::new(&cli.project_dir);
+            store.reset_db_from_todos_json()?;
+            eprintln!("reset complete. retrying...\n");
+            run(&cli)
+        }
+    }
+}
+
+fn run(cli: &Cli) -> Result<()> {
     let flow_kind: FlowKind = cli
         .flow
         .parse()
@@ -156,4 +181,16 @@ fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String
     }
 
     Ok(chunks.join("\n\n"))
+}
+
+fn confirm_db_reset(db_path: &std::path::Path) -> Result<bool> {
+    eprint!(
+        "Delete {} and rebuild from todos.json? [y/N]: ",
+        db_path.display()
+    );
+    io::stderr().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }

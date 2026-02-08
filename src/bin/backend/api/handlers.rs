@@ -150,6 +150,15 @@ pub async fn update_chief_toml(
     ))
 }
 
+pub async fn reset_project_db(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(state.service.reset_project_db(&project).await?))
+}
+
 pub async fn terminal_ws(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,

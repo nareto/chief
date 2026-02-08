@@ -399,6 +399,17 @@ impl ApiService {
         })
     }
 
+    pub async fn reset_project_db(&self, project: &str) -> Result<MessageResponse, ApiError> {
+        let context = self.project_context(project).await?;
+        context
+            .store
+            .reset_db_from_todos_json()
+            .map_err(ApiError::internal)?;
+        Ok(MessageResponse {
+            message: format!("reset chief.db for project {project}"),
+        })
+    }
+
     pub async fn project_dir_for_terminal(&self, project: &str) -> Result<PathBuf, ApiError> {
         let context = self.project_context(project).await?;
         Ok(context.project_dir)

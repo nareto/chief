@@ -36,6 +36,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/projects/{project}/chief_toml",
             get(handlers::get_chief_toml).put(handlers::update_chief_toml),
+        )
+        .route(
+            "/api/projects/{project}/reset_db",
+            post(handlers::reset_project_db),
         );
 
     if state.terminal_enabled {
