@@ -91,7 +91,28 @@ impl ProjectStore {
         self.ensure_schema_ready(&conn)?;
         drop(conn);
         self.sync_todos_from_file()?;
+        self.reset_in_progress_todos_to_pending()?;
         Ok(())
+    }
+
+    pub fn reset_in_progress_todos_to_pending(&self) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE todos
+             SET status = ?1, done_at_commit = NULL, updated_at = ?2
+             WHERE status = ?3",
+            params![
+                TodoStatus::Pending.as_str(),
+                Utc::now().to_rfc3339(),
+                TodoStatus::InProgress.as_str(),
+            ],
+        )?;
+        if changed > 0 {
+            self.sync_todos_file_from_conn(&tx)?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn load_todo_file(&self) -> Result<TodoFile> {
@@ -439,36 +460,26 @@ impl ProjectStore {
             bind_values.into_iter().map(json_to_sql_value).collect();
 
         let rows = stmt.query_map(rusqlite::params_from_iter(rusqlite_values), |row| {
-            let payload_text: Option<String> = row.get(9)?;
-            let payload: BTreeMap<String, serde_json::Value> = payload_text
-                .as_deref()
-                .and_then(|text| serde_json::from_str(text).ok())
-                .unwrap_or_default();
-            let phase_text: Option<String> = row.get(6)?;
-            let event_type_text: Option<String> = row.get(8)?;
-            let timestamp_text: Option<String> = row.get(4)?;
-            let level_text: Option<String> = row.get(5)?;
-            let msg_text: Option<String> = row.get(7)?;
-
-            Ok(EventRecord {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                job_id: row.get(2)?,
-                todo_id: row.get(3)?,
-                timestamp: timestamp_text
-                    .as_deref()
-                    .and_then(|value| parse_datetime(value).ok())
-                    .unwrap_or_else(Utc::now),
-                level: level_text.unwrap_or_else(|| "info".to_owned()),
-                phase: phase_text.as_deref().map(parse_phase),
-                msg: msg_text.unwrap_or_default(),
-                event_type: parse_event_type(event_type_text.as_deref().unwrap_or("msg")),
-                payload,
-            })
+            parse_event_row(row)
         })?;
 
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to query events")
+    }
+
+    pub fn query_events_after_id(&self, after_id: i64, limit: usize) -> Result<Vec<EventRecord>> {
+        let limit = if limit == 0 { 200 } else { limit.min(2_000) };
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, job_id, todo_id, timestamp, level, phase, msg, event_type, payload
+             FROM events
+             WHERE id > ?1
+             ORDER BY id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_id, limit as i64], parse_event_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to query events after id")
     }
 
     fn persist_todo_list(&self, todos: &[Todo]) -> Result<()> {
@@ -733,6 +744,35 @@ fn parse_job_status(value: &str) -> JobStatus {
     }
 }
 
+fn parse_event_row(row: &Row<'_>) -> rusqlite::Result<EventRecord> {
+    let payload_text: Option<String> = row.get(9)?;
+    let payload: BTreeMap<String, serde_json::Value> = payload_text
+        .as_deref()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_default();
+    let phase_text: Option<String> = row.get(6)?;
+    let event_type_text: Option<String> = row.get(8)?;
+    let timestamp_text: Option<String> = row.get(4)?;
+    let level_text: Option<String> = row.get(5)?;
+    let msg_text: Option<String> = row.get(7)?;
+
+    Ok(EventRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        job_id: row.get(2)?,
+        todo_id: row.get(3)?,
+        timestamp: timestamp_text
+            .as_deref()
+            .and_then(|value| parse_datetime(value).ok())
+            .unwrap_or_else(Utc::now),
+        level: level_text.unwrap_or_else(|| "info".to_owned()),
+        phase: phase_text.as_deref().map(parse_phase),
+        msg: msg_text.unwrap_or_default(),
+        event_type: parse_event_type(event_type_text.as_deref().unwrap_or("msg")),
+        payload,
+    })
+}
+
 fn parse_phase(value: &str) -> Phase {
     match value {
         "todo_selection" => Phase::TodoSelection,
@@ -878,7 +918,7 @@ mod tests {
             expectations: String::new(),
             priority: 3,
             test_suites: Vec::new(),
-            status: TodoStatus::Pending,
+            status: TodoStatus::InProgress,
             done_at_commit: None,
         }
         .normalize();
@@ -937,9 +977,12 @@ mod tests {
         );
 
         let todos = store.list_todos().expect("list_todos should succeed");
-        assert!(
-            todos.iter().any(|item| item.id == todo.id),
-            "todos should be reconstructed from todos.json after db reset"
+        let recovered = todos.iter().find(|item| item.id == todo.id);
+        assert!(recovered.is_some(), "todo should still exist after db reset");
+        assert_eq!(
+            recovered.expect("todo should be present").status,
+            TodoStatus::Pending,
+            "in_progress todos should be re-queued to pending during reset"
         );
 
         let _ = fs::remove_dir_all(&project_dir);

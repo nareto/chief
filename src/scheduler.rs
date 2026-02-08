@@ -7,12 +7,14 @@ mod worker;
 
 use crate::flow::FlowKind;
 use crate::service::{ProjectContext, ProjectRegistry};
+use crate::{domain::EventType, domain::JobStatus};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectRuntimeView {
@@ -171,11 +173,55 @@ impl Scheduler {
     }
 
     pub async fn stop_project(&self, project_name: &str) -> Result<()> {
-        let mut states = self.states.lock().await;
-        let Some(state) = states.get_mut(project_name) else {
-            return Err(anyhow!("project '{project_name}' is not running"));
+        let should_log_stop_request = {
+            let mut states = self.states.lock().await;
+            let Some(state) = states.get_mut(project_name) else {
+                return Err(anyhow!("project '{project_name}' is not running"));
+            };
+            let should_log = !state.stop_requested;
+            state.stop_requested = true;
+            should_log
         };
-        state.stop_requested = true;
+
+        if !should_log_stop_request {
+            return Ok(());
+        }
+
+        let context = self.get_project_context(project_name).await?;
+        let run_id = context
+            .store
+            .list_jobs(200)?
+            .into_iter()
+            .find(|job| {
+                matches!(
+                    job.status,
+                    JobStatus::Queued
+                        | JobStatus::Selecting
+                        | JobStatus::Running
+                        | JobStatus::Merging
+                )
+            })
+            .map(|job| job.run_id);
+
+        if let Some(run_id) = run_id {
+            if let Err(err) = context.log_project_event(
+                &run_id,
+                None,
+                None,
+                "info",
+                None,
+                EventType::Job,
+                format!("Stop requested for {project_name}; waiting for active workers to finish"),
+                BTreeMap::new(),
+            ) {
+                warn!(
+                    project = %project_name,
+                    error = %err,
+                    "failed to log immediate stop-requested event"
+                );
+            }
+        }
+
         Ok(())
     }
 }

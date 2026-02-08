@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use minijinja::Environment;
 use minijinja::value::Value as JinjaValue;
 use serde_json::Value;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,15 @@ pub trait PromptStore: Send + Sync {
 pub struct FsPromptStore {
     root: PathBuf,
 }
+
+const REQUIRED_PROMPT_FILES: [&str; 6] = [
+    "red.md",
+    "green.md",
+    "post_green.md",
+    "lint_fix.md",
+    "requirements.md",
+    "todo_select.md",
+];
 
 impl FsPromptStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
@@ -54,13 +64,27 @@ impl FsPromptStore {
             fs::create_dir_all(&self.root)
                 .with_context(|| format!("failed to create {}", self.root.display()))?;
         }
-        for (name, body) in default_templates() {
-            let path = self.root.join(name);
+        let template_source_root = resolve_template_source_root()?;
+        for template_name in REQUIRED_PROMPT_FILES {
+            let path = self.root.join(template_name);
             if path.exists() {
                 continue;
             }
-            fs::write(&path, body)
-                .with_context(|| format!("failed to create {}", path.display()))?;
+            let source_path = template_source_root.join(template_name);
+            if !source_path.exists() {
+                return Err(anyhow!(
+                    "required prompt template '{}' is missing from {}",
+                    template_name,
+                    template_source_root.display()
+                ));
+            }
+            fs::copy(&source_path, &path).with_context(|| {
+                format!(
+                    "failed to copy default prompt {} -> {}",
+                    source_path.display(),
+                    path.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -93,110 +117,31 @@ impl PromptStore for FsPromptStore {
     }
 }
 
-fn default_templates() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            "red.md",
-            r#"We are in RED phase for this todo.
+fn resolve_template_source_root() -> Result<PathBuf> {
+    if let Ok(path) = env::var("CHIEF_PROMPTS_DIR") {
+        let explicit = PathBuf::from(path);
+        if explicit.is_dir() {
+            return Ok(explicit);
+        }
+        return Err(anyhow!(
+            "CHIEF_PROMPTS_DIR points to a non-directory: {}",
+            explicit.display()
+        ));
+    }
 
-TODO:
-{{ todo.todo }}
+    let repo_prompts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompts");
+    if repo_prompts.is_dir() {
+        return Ok(repo_prompts);
+    }
 
-Expectations:
-{{ todo.expectations }}
+    let cwd_prompts = env::current_dir()
+        .context("failed to resolve current working directory")?
+        .join("prompts");
+    if cwd_prompts.is_dir() {
+        return Ok(cwd_prompts);
+    }
 
-Suites:
-{% for suite in suites %}
-- {{ suite.name }} ({{ suite.framework }}): {{ suite.test_command }}
-{% endfor %}
-
-Previous log:
-{{ previous_steps_log }}
-
-Write or refine tests only.
-If no edits are needed, respond exactly with: NO CHANGES
-"#,
-        ),
-        (
-            "green.md",
-            r#"We are in GREEN phase for this todo.
-
-TODO:
-{{ todo.todo }}
-
-Expectations:
-{{ todo.expectations }}
-
-Previous log:
-{{ previous_steps_log }}
-
-Implement code to satisfy tests and requirements.
-"#,
-        ),
-        (
-            "post_green.md",
-            r#"We are in POST_GREEN phase for this todo.
-
-TODO:
-{{ todo.todo }}
-
-Post-green commands:
-{% for command in post_green_commands %}
-- {{ command }}
-{% endfor %}
-
-Previous log:
-{{ previous_steps_log }}
-
-Fix any remaining validation failures.
-"#,
-        ),
-        (
-            "lint_fix.md",
-            r#"Linting failed.
-
-Commands:
-{% for command in lint_commands %}
-- {{ command }}
-{% endfor %}
-
-Recent lint output:
-{{ lint_errors }}
-
-Apply fixes so lint passes.
-"#,
-        ),
-        (
-            "requirements.md",
-            r#"You are processing new requirements into todos.
-
-Tasks:
-1. Inspect existing project state.
-2. Optionally scaffold if needed.
-3. Update chief.toml if required.
-4. Update {{ todos_path }} with granular todos, each with expectations and priority.
-
-Requirements:
-{{ requirements_text }}
-"#,
-        ),
-        (
-            "todo_select.md",
-            r#"You are worker {{ worker_index }} in multi-agent mode.
-
-Available todos (not done, not in progress):
-{% for todo in available_todos %}
-- [{{ todo.id }}] priority={{ todo.priority }} :: {{ todo.todo }}
-{% endfor %}
-
-Already in progress by other workers:
-{% for todo in in_progress_todos %}
-- [{{ todo.id }}] {{ todo.todo }}
-{% endfor %}
-
-Select ONE todo id that is least likely to conflict with in-progress work.
-Respond with ONLY the selected todo id.
-"#,
-        ),
-    ]
+    Err(anyhow!(
+        "could not locate prompt templates; expected a prompts directory or CHIEF_PROMPTS_DIR"
+    ))
 }

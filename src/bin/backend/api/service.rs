@@ -294,6 +294,10 @@ impl ApiService {
         Ok(StateResponse {
             project: project.to_owned(),
             running: runtime.as_ref().map(|view| view.running).unwrap_or(false),
+            stop_requested: runtime
+                .as_ref()
+                .map(|view| view.stop_requested)
+                .unwrap_or(false),
             active_agents: runtime
                 .as_ref()
                 .map(|view| view.active_workers)
@@ -413,6 +417,14 @@ impl ApiService {
     pub async fn project_dir_for_terminal(&self, project: &str) -> Result<PathBuf, ApiError> {
         let context = self.project_context(project).await?;
         Ok(context.project_dir)
+    }
+
+    pub async fn project_store_for_events(
+        &self,
+        project: &str,
+    ) -> Result<chief::storage::ProjectStore, ApiError> {
+        let context = self.project_context(project).await?;
+        Ok(context.store)
     }
 
     async fn project_context(

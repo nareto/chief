@@ -13,6 +13,22 @@ impl Scheduler {
         let engine = ChiefEngine::new(context.clone());
 
         let run_id = engine.start_run()?;
+        let recovered_in_progress = context.store.reset_in_progress_todos_to_pending()?;
+        if recovered_in_progress > 0 {
+            context.log_project_event(
+                &run_id,
+                None,
+                None,
+                "info",
+                None,
+                crate::domain::EventType::Job,
+                format!(
+                    "Recovered {} stale in-progress todo(s) to pending before supervisor start",
+                    recovered_in_progress
+                ),
+                std::collections::BTreeMap::new(),
+            )?;
+        }
         context.log_project_event(
             &run_id,
             None,

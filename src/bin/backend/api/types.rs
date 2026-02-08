@@ -110,6 +110,7 @@ pub struct ChiefTomlResponse {
 pub struct StateResponse {
     pub project: String,
     pub running: bool,
+    pub stop_requested: bool,
     pub active_agents: usize,
     pub desired_agents: usize,
     pub flow_name: String,

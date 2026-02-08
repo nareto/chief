@@ -1,5 +1,6 @@
 use crate::api::auth;
 use crate::api::error::ApiError;
+use crate::api::events_ws;
 use crate::api::terminal_ws;
 use crate::api::types::{
     AddTodoRequest, EventsQuery, FileDiffQuery, LogQuery, RequirementsRequest, StartProjectRequest,
@@ -121,6 +122,14 @@ pub async fn get_events(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<crate::api::types::EventsResponse>, ApiError> {
     Ok(Json(state.service.get_events(&project, query).await?))
+}
+
+pub async fn events_ws(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    events_ws::events_ws(project, state, ws).await
 }
 
 pub async fn get_file_diff(

@@ -29,6 +29,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/projects/{project}/state", get(handlers::get_state))
         .route("/api/projects/{project}/events", get(handlers::get_events))
+        .route("/api/projects/{project}/events/ws", get(handlers::events_ws))
         .route(
             "/api/projects/{project}/file_diff",
             get(handlers::get_file_diff),

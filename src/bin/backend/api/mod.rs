@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod error;
+pub mod events_ws;
 pub mod handlers;
 pub mod router;
 pub mod service;
