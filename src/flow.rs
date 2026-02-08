@@ -4,17 +4,17 @@ use crate::domain::{AgentOutput, EventRecord, EventType, LoopDecision, Phase, To
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::{EventQuery, ProjectStore};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -145,10 +145,13 @@ impl<'a> FlowExecution<'a> {
             .into_iter()
             .filter(|event| event.todo_id.as_deref() == Some(&self.todo.id))
             .filter(|event| allowed.contains(event.event_type.as_str()))
-            .take(limit)
             .collect::<Vec<_>>();
 
-        filtered.reverse();
+        filtered.sort_by_key(|event| event.id);
+        if filtered.len() > limit {
+            let keep_from = filtered.len() - limit;
+            filtered = filtered.split_off(keep_from);
+        }
 
         if filtered.is_empty() {
             return Ok("No previous attempts recorded.".to_owned());
@@ -969,8 +972,22 @@ fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowKind, build_flow};
+    use super::{build_flow, FlowExecution, FlowKind};
+    use crate::agent::{AgentRequest, CodingAgent};
+    use crate::config::ChiefConfig;
+    use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
+    use crate::git::GitOps;
+    use crate::prompt::PromptStore;
+    use crate::storage::ProjectStore;
+    use anyhow::{anyhow, Result};
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use uuid::Uuid;
 
     #[test]
     fn parses_known_flow_kinds() {
@@ -999,5 +1016,191 @@ mod tests {
 
         assert_eq!(tdd.name(), "tdd");
         assert_eq!(single_prompt.name(), "single_prompt");
+    }
+
+    fn temp_project_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("chief-flow-test-{}", Uuid::new_v4()))
+    }
+
+    #[derive(Debug)]
+    struct NoopPromptStore;
+
+    impl PromptStore for NoopPromptStore {
+        fn render_json(&self, _template_name: &str, _data: &Value) -> Result<String> {
+            Err(anyhow!("not used in this test"))
+        }
+
+        fn exists(&self, _template_name: &str) -> bool {
+            false
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopAgent;
+
+    impl CodingAgent for NoopAgent {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
+            Err(anyhow!("not used in this test"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopGitOps {
+        root: PathBuf,
+    }
+
+    impl GitOps for NoopGitOps {
+        fn repo_root(&self) -> &Path {
+            &self.root
+        }
+
+        fn changed_files(&self, _cwd: &Path) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn diff(&self, _cwd: &Path, _against_ref: Option<&str>) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn diff_summary_for_files(&self, _cwd: &Path, _files: &[String]) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn commit_and_tag(&self, _cwd: &Path, _message: &str) -> Result<String> {
+            Ok("noop-commit".to_owned())
+        }
+
+        fn create_worktree(&self, _branch: &str, _worktree_path: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn merge_branch_into_main(&self, _branch: &str, _main_branch: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn remove_worktree(&self, _worktree_path: &Path, _branch: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn current_branch(&self) -> Result<String> {
+            Ok("main".to_owned())
+        }
+    }
+
+    #[test]
+    fn previous_steps_log_orders_entries_oldest_first_within_limit() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "order logs".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo: todo.clone(),
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        execution
+            .log_event(
+                "info",
+                Some(Phase::Red),
+                EventType::TestRun,
+                "oldest event",
+                BTreeMap::new(),
+            )
+            .expect("oldest event should log");
+        execution
+            .log_event(
+                "info",
+                Some(Phase::Red),
+                EventType::TestRun,
+                "middle event",
+                BTreeMap::new(),
+            )
+            .expect("middle event should log");
+        execution
+            .log_event(
+                "info",
+                Some(Phase::Red),
+                EventType::TestRun,
+                "newest event",
+                BTreeMap::new(),
+            )
+            .expect("newest event should log");
+
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-1".to_owned(),
+                job_id: Some("job-1".to_owned()),
+                todo_id: Some("other-todo".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "info".to_owned(),
+                phase: Some(Phase::Red),
+                msg: "other todo event".to_owned(),
+                event_type: EventType::TestRun,
+                payload: BTreeMap::new(),
+            })
+            .expect("other todo event should log");
+
+        let log = execution
+            .previous_steps_log(Phase::Red, &[EventType::TestRun], 2)
+            .expect("previous_steps_log should succeed");
+        let entries = log.split("\n\n").collect::<Vec<_>>();
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "should keep only the last 2 matching events"
+        );
+        assert!(
+            entries[0].starts_with("[1] test_run: middle event"),
+            "first entry should be the oldest among returned events, got: {}",
+            entries[0]
+        );
+        assert!(
+            entries[1].starts_with("[2] test_run: newest event"),
+            "second entry should be the newest among returned events, got: {}",
+            entries[1]
+        );
+        assert!(
+            !log.contains("oldest event"),
+            "entries older than limit should be dropped"
+        );
+        assert!(
+            !log.contains("other todo event"),
+            "entries from other todos must be excluded"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
     }
 }

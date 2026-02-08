@@ -1,12 +1,13 @@
 use crate::config::ChiefConfig;
 use crate::domain::AgentOutput;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::Arc;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -149,9 +150,12 @@ impl CodingAgent for CommandAgent {
                 .context("failed to write prompt to agent stdin")?;
         }
 
-        let (output, wait_state) =
-            wait_with_timeout(child, request.timeout_seconds, request.cancel_signal.as_deref())
-            .context("failed while waiting for agent output")?;
+        let (output, wait_state) = wait_with_timeout(
+            child,
+            request.timeout_seconds,
+            request.cancel_signal.as_deref(),
+        )
+        .context("failed while waiting for agent output")?;
 
         if wait_state == WaitState::Cancelled {
             return Err(anyhow!(AgentCancelledError));
@@ -307,27 +311,20 @@ fn wait_with_timeout(
         return Ok((output, WaitState::Completed));
     }
 
+    let mut stdout_handle = child.stdout.take().map(spawn_reader_thread);
+    let mut stderr_handle = child.stderr.take().map(spawn_reader_thread);
+
     let timeout = Duration::from_secs(timeout_seconds);
     let started = Instant::now();
 
     loop {
         if let Some(status) = child.try_wait()? {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_end(&mut stdout)?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_end(&mut stderr)?;
-            }
-            return Ok((
-                Output {
-                    status,
-                    stdout,
-                    stderr,
-                },
+            return collect_output(
+                status,
+                stdout_handle.take(),
+                stderr_handle.take(),
                 WaitState::Completed,
-            ));
+            );
         }
 
         if cancel_signal
@@ -335,18 +332,70 @@ fn wait_with_timeout(
             .unwrap_or(false)
         {
             let _ = child.kill();
-            let output = child.wait_with_output()?;
-            return Ok((output, WaitState::Cancelled));
+            let status = child.wait()?;
+            return collect_output(
+                status,
+                stdout_handle.take(),
+                stderr_handle.take(),
+                WaitState::Cancelled,
+            );
         }
 
         if started.elapsed() >= timeout {
             let _ = child.kill();
-            let output = child.wait_with_output()?;
-            return Ok((output, WaitState::TimedOut));
+            let status = child.wait()?;
+            return collect_output(
+                status,
+                stdout_handle.take(),
+                stderr_handle.take(),
+                WaitState::TimedOut,
+            );
         }
 
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn collect_output(
+    status: ExitStatus,
+    stdout_handle: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    stderr_handle: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    wait_state: WaitState,
+) -> Result<(Output, WaitState)> {
+    let stdout = join_reader(stdout_handle, "stdout")?;
+    let stderr = join_reader(stderr_handle, "stderr")?;
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        wait_state,
+    ))
+}
+
+fn spawn_reader_thread<R>(mut reader: R) -> JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_reader(
+    handle: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+    let read_result = handle
+        .join()
+        .map_err(|_| anyhow!("agent {stream_name} reader thread panicked"))?;
+    read_result.with_context(|| format!("failed to read agent {stream_name}"))
 }
 
 pub fn ensure_agent_binary_available(path: &Path, agent_name: &str) -> Result<()> {
@@ -365,4 +414,26 @@ pub fn ensure_agent_binary_available(path: &Path, agent_name: &str) -> Result<()
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_with_timeout_handles_large_stdout_without_false_timeout() {
+        let mut process = Command::new("sh");
+        process
+            .arg("-lc")
+            .arg("dd if=/dev/zero bs=1024 count=512 2>/dev/null");
+        process.stdout(Stdio::piped());
+        process.stderr(Stdio::piped());
+        let child = process.spawn().expect("spawn dd");
+
+        let (output, state) =
+            wait_with_timeout(child, Some(5), None).expect("wait_with_timeout should succeed");
+        assert_eq!(state, WaitState::Completed);
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 512 * 1024);
+    }
 }
