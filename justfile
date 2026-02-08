@@ -3,10 +3,14 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 build:
     docker compose build frontend
 
+sync-frontend-deps:
+    @LOCK_HASH="$$(sha256sum frontend/package-lock.json | awk '{print $$1}')"; STAMP_PATH="frontend/node_modules/.package-lock.sha256"; STAMP_HASH="$$(cat "$$STAMP_PATH" 2>/dev/null || true)"; if [ ! -d frontend/node_modules ] || [ "$$LOCK_HASH" != "$$STAMP_HASH" ]; then docker compose run --rm --no-deps frontend npm ci; mkdir -p frontend/node_modules; printf '%s\n' "$$LOCK_HASH" > "$$STAMP_PATH"; fi
+
 build-chief:
     cargo build --bin chief
 
 up:
+    just sync-frontend-deps
     docker compose up -d frontend
 
 down:
@@ -20,6 +24,6 @@ backend:
 
 dev:
     just down
-    docker compose build frontend
+    just sync-frontend-deps
     docker compose up -d frontend
     just backend
