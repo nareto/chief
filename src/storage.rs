@@ -482,6 +482,37 @@ impl ProjectStore {
             .context("failed to query events after id")
     }
 
+    pub fn trim_events_to_recent_runs(&self, keep_runs: usize) -> Result<usize> {
+        let keep_runs = keep_runs.max(1);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
+            "WITH keep AS (
+                SELECT run_id
+                FROM runs
+                ORDER BY started_at DESC
+                LIMIT ?1
+            ),
+            fallback_keep AS (
+                SELECT run_id
+                FROM events
+                GROUP BY run_id
+                ORDER BY MAX(id) DESC
+                LIMIT ?1
+            )
+            DELETE FROM events
+            WHERE run_id NOT IN (
+                SELECT run_id FROM keep
+                UNION
+                SELECT run_id FROM fallback_keep
+                WHERE NOT EXISTS (SELECT 1 FROM keep)
+            )",
+            params![keep_runs as i64],
+        )?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     fn persist_todo_list(&self, todos: &[Todo]) -> Result<()> {
         let todo_file = TodoFile {
             todos: todos.iter().cloned().map(Todo::normalize).collect(),
@@ -834,8 +865,10 @@ fn json_to_sql_value(value: Value) -> rusqlite::types::Value {
 #[cfg(test)]
 mod tests {
     use super::ProjectStore;
-    use crate::domain::{Todo, TodoStatus};
+    use crate::domain::{EventRecord, EventType, Todo, TodoStatus};
+    use chrono::Utc;
     use rusqlite::Connection;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -986,6 +1019,78 @@ mod tests {
             recovered.expect("todo should be present").status,
             TodoStatus::Pending,
             "in_progress todos should be re-queued to pending during reset"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn trim_events_keeps_only_latest_runs() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        for index in 1..=4 {
+            let run_id = format!("run-{index}");
+            store.start_run(&run_id).expect("start_run should succeed");
+            store
+                .record_event(&EventRecord {
+                    id: None,
+                    run_id: run_id.clone(),
+                    job_id: None,
+                    todo_id: None,
+                    timestamp: Utc::now(),
+                    level: "info".to_owned(),
+                    phase: None,
+                    msg: format!("event for {run_id}"),
+                    event_type: EventType::Msg,
+                    payload: BTreeMap::new(),
+                })
+                .expect("record_event should succeed");
+        }
+
+        let conn = Connection::open(project_dir.join("chief.db")).expect("db should open");
+        conn.execute(
+            "UPDATE runs SET started_at = ?1 WHERE run_id = 'run-1'",
+            ["2024-01-01T00:00:00Z"],
+        )
+        .expect("should update run-1 started_at");
+        conn.execute(
+            "UPDATE runs SET started_at = ?1 WHERE run_id = 'run-2'",
+            ["2024-01-02T00:00:00Z"],
+        )
+        .expect("should update run-2 started_at");
+        conn.execute(
+            "UPDATE runs SET started_at = ?1 WHERE run_id = 'run-3'",
+            ["2024-01-03T00:00:00Z"],
+        )
+        .expect("should update run-3 started_at");
+        conn.execute(
+            "UPDATE runs SET started_at = ?1 WHERE run_id = 'run-4'",
+            ["2024-01-04T00:00:00Z"],
+        )
+        .expect("should update run-4 started_at");
+        drop(conn);
+
+        let deleted = store
+            .trim_events_to_recent_runs(2)
+            .expect("trim_events_to_recent_runs should succeed");
+        assert_eq!(deleted, 2, "two older runs should be removed");
+
+        let remaining = store
+            .query_events(super::EventQuery {
+                limit: 10,
+                ..super::EventQuery::default()
+            })
+            .expect("query_events should succeed");
+        let remaining_run_ids = remaining
+            .into_iter()
+            .map(|event| event.run_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining_run_ids,
+            vec!["run-4".to_owned(), "run-3".to_owned()],
+            "only latest two runs should remain",
         );
 
         let _ = fs::remove_dir_all(&project_dir);

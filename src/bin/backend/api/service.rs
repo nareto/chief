@@ -668,6 +668,24 @@ impl ApiService {
         })
     }
 
+    pub async fn trim_project_db(
+        &self,
+        project: &str,
+        keep_runs: usize,
+    ) -> Result<MessageResponse, ApiError> {
+        if keep_runs == 0 {
+            return Err(ApiError::unprocessable("keep_runs must be at least 1"));
+        }
+        let context = self.project_context(project).await?;
+        let deleted = context
+            .store
+            .trim_events_to_recent_runs(keep_runs)
+            .map_err(ApiError::internal)?;
+        Ok(MessageResponse {
+            message: format!("trimmed {deleted} events; kept the last {keep_runs} runs"),
+        })
+    }
+
     pub async fn project_dir_for_terminal(&self, project: &str) -> Result<PathBuf, ApiError> {
         let context = self.project_context(project).await?;
         Ok(context.project_dir)

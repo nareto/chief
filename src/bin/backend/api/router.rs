@@ -53,6 +53,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/projects/{project}/reset_db",
             post(handlers::reset_project_db),
+        )
+        .route(
+            "/api/projects/{project}/trim_db",
+            post(handlers::trim_project_db),
         );
 
     if state.terminal_enabled {

@@ -4,7 +4,8 @@ use crate::api::events_ws;
 use crate::api::terminal_ws;
 use crate::api::types::{
     AddTodoRequest, EventsQuery, FileDiffQuery, LogQuery, RequirementsRequest,
-    RunSuiteCheckRequest, StartProjectRequest, UpdateChiefTomlRequest, UpdateTodoRequest,
+    RunSuiteCheckRequest, StartProjectRequest, TrimProjectDbRequest, UpdateChiefTomlRequest,
+    UpdateTodoRequest,
 };
 use crate::app::AppState;
 use axum::Json;
@@ -207,6 +208,21 @@ pub async fn reset_project_db(
 ) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
     auth::require_sensitive_access(&state, &headers)?;
     Ok(Json(state.service.reset_project_db(&project).await?))
+}
+
+pub async fn trim_project_db(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<TrimProjectDbRequest>,
+) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(
+        state
+            .service
+            .trim_project_db(&project, payload.keep_runs)
+            .await?,
+    ))
 }
 
 pub async fn terminal_ws(

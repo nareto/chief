@@ -68,6 +68,11 @@ pub struct RunSuiteCheckRequest {
     pub target: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TrimProjectDbRequest {
+    pub keep_runs: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub message: String,
