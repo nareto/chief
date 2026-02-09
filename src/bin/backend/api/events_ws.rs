@@ -127,5 +127,8 @@ async fn send_message(
     payload: EventsWsMessage,
 ) -> Result<(), ()> {
     let json = serde_json::to_string(&payload).map_err(|_| ())?;
-    sender.send(Message::Text(json.into())).await.map_err(|_| ())
+    sender
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| ())
 }

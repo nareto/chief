@@ -231,7 +231,8 @@ pub(super) fn run_worker(
             }
         }
         Err(err) => {
-            let cancelled = cancel_signal.load(Ordering::SeqCst) || is_agent_cancelled_error(err.as_error());
+            let cancelled =
+                cancel_signal.load(Ordering::SeqCst) || is_agent_cancelled_error(err.as_error());
             if cancelled {
                 if let Err(status_err) =
                     context

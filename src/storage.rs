@@ -978,7 +978,10 @@ mod tests {
 
         let todos = store.list_todos().expect("list_todos should succeed");
         let recovered = todos.iter().find(|item| item.id == todo.id);
-        assert!(recovered.is_some(), "todo should still exist after db reset");
+        assert!(
+            recovered.is_some(),
+            "todo should still exist after db reset"
+        );
         assert_eq!(
             recovered.expect("todo should be present").status,
             TodoStatus::Pending,

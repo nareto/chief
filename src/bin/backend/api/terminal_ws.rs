@@ -31,7 +31,9 @@ async fn handle_terminal(mut socket: WebSocket, project_dir: PathBuf) {
         Ok(session) => session,
         Err(err) => {
             let _ = socket
-                .send(Message::Text(format!("terminal unavailable: {err}\r\n").into()))
+                .send(Message::Text(
+                    format!("terminal unavailable: {err}\r\n").into(),
+                ))
                 .await;
             return;
         }
@@ -52,8 +54,9 @@ async fn handle_terminal(mut socket: WebSocket, project_dir: PathBuf) {
                     }
                 }
                 Err(err) => {
-                    let _ =
-                        output_tx.blocking_send(format!("\r\n[terminal read error: {err}]\r\n").into_bytes());
+                    let _ = output_tx.blocking_send(
+                        format!("\r\n[terminal read error: {err}]\r\n").into_bytes(),
+                    );
                     break;
                 }
             }

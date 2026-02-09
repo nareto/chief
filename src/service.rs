@@ -1,6 +1,4 @@
-use crate::agent::{
-    AgentCancelledError, CodingAgent, CommandAgent, is_agent_cancelled_error,
-};
+use crate::agent::{AgentCancelledError, CodingAgent, CommandAgent, is_agent_cancelled_error};
 use crate::config::ChiefToml;
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoStatus,
