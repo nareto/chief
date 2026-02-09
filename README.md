@@ -83,7 +83,7 @@ Adding a new strategy means implementing `TodoFlow` and (optionally) custom `Pha
 
 ## Multi-agent backend model
 
-The backend manages multiple projects under one parent directory.
+The backend manages multiple projects under one projects directory, plus optional manual project paths.
 
 For each project, the scheduler supports configurable parallel coding agents:
 
@@ -142,10 +142,20 @@ cargo run --bin chief -- --project-dir /path/to/project --tail-events 50
 
 ## Backend usage
 
-Run backend over a parent directory containing multiple git projects:
+Run backend over a projects directory containing multiple git projects:
 
 ```bash
-cargo run --bin chief_backend -- --parent-dir /path/to/projects --port 8000
+cargo run --bin chief_backend -- --projects-dir /path/to/projects --port 8000
+```
+
+Add extra projects outside that directory with one or more `--project` flags:
+
+```bash
+cargo run --bin chief_backend -- \
+  --projects-dir /path/to/projects \
+  --project /path/to/another/repo \
+  --project /path/to/one-more/repo \
+  --port 8000
 ```
 
 Backend security flags/environment:
@@ -166,7 +176,8 @@ Example production-style backend start:
 ```bash
 CHIEF_API_TOKEN='replace-with-long-random-token' \
 cargo run --bin chief_backend -- \
-  --parent-dir /path/to/projects \
+  --projects-dir /path/to/projects \
+  --project /path/to/another/repo \
   --host 0.0.0.0 \
   --port 8000 \
   --allow-origin https://chief.example.com
@@ -203,13 +214,13 @@ docker compose up --build
 Projects mount is generic in `docker-compose.yml`:
 
 ```bash
-CHIEF_PROJECTS_PARENT=/absolute/path/to/projects docker compose up --build
+CHIEF_PROJECTS_DIR=/absolute/path/to/projects docker compose up --build
 ```
 
 For deployment, create a `.env` file (or export env vars) and include at minimum:
 
 ```dotenv
-CHIEF_PROJECTS_PARENT=/absolute/path/to/projects
+CHIEF_PROJECTS_DIR=/absolute/path/to/projects
 CHIEF_API_TOKEN=replace-with-long-random-token
 ```
 
@@ -230,7 +241,7 @@ Terminal websocket in compose:
 services:
   backend:
     command:
-      - --parent-dir
+      - --projects-dir
       - /workspace/projects
       - --host
       - 0.0.0.0

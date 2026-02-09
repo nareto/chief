@@ -15,8 +15,10 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "chief_backend")]
 #[command(about = "Chief multi-project backend server")]
 pub struct BackendCli {
-    #[arg(long, default_value = ".")]
-    pub parent_dir: PathBuf,
+    #[arg(long = "projects-dir", alias = "parent-dir", default_value = ".")]
+    pub projects_dir: PathBuf,
+    #[arg(long = "project")]
+    pub project: Vec<PathBuf>,
     #[arg(long, default_value = "0.0.0.0")]
     pub host: String,
     #[arg(long, default_value_t = 8000)]
@@ -47,12 +49,13 @@ pub async fn run() -> Result<()> {
 
     let cli = BackendCli::parse();
 
-    let registry = ProjectRegistry::discover(&cli.parent_dir).with_context(|| {
-        format!(
-            "failed discovering projects from {}",
-            cli.parent_dir.display()
-        )
-    })?;
+    let registry =
+        ProjectRegistry::discover(&cli.projects_dir, &cli.project).with_context(|| {
+            format!(
+                "failed discovering projects from {}",
+                cli.projects_dir.display()
+            )
+        })?;
 
     let scheduler = Scheduler::new(registry);
     let state = Arc::new(AppState {

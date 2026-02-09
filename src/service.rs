@@ -12,7 +12,7 @@ use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -164,17 +164,36 @@ impl ProjectContext {
 
 #[derive(Debug, Clone)]
 pub struct ProjectRegistry {
-    parent_dir: PathBuf,
+    projects_dir: PathBuf,
+    manual_project_dirs: Vec<PathBuf>,
     projects: HashMap<String, ProjectContext>,
 }
 
 impl ProjectRegistry {
-    pub fn discover(parent_dir: impl AsRef<Path>) -> Result<Self> {
-        let parent_dir = parent_dir.as_ref().to_path_buf();
-        let mut projects = HashMap::new();
+    pub fn discover(
+        projects_dir: impl AsRef<Path>,
+        manual_project_dirs: &[PathBuf],
+    ) -> Result<Self> {
+        let projects_dir = projects_dir.as_ref().to_path_buf();
+        let manual_project_dirs = manual_project_dirs.to_vec();
+        let projects = Self::discover_projects(&projects_dir, &manual_project_dirs)?;
 
-        for entry in fs::read_dir(&parent_dir)
-            .with_context(|| format!("failed to read {}", parent_dir.display()))?
+        Ok(Self {
+            projects_dir,
+            manual_project_dirs,
+            projects,
+        })
+    }
+
+    fn discover_projects(
+        projects_dir: &Path,
+        manual_project_dirs: &[PathBuf],
+    ) -> Result<HashMap<String, ProjectContext>> {
+        let mut projects = HashMap::new();
+        let mut seen_paths = HashSet::new();
+
+        for entry in fs::read_dir(projects_dir)
+            .with_context(|| format!("failed to read {}", projects_dir.display()))?
         {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -184,20 +203,82 @@ impl ProjectRegistry {
             if !path.join(".git").exists() {
                 continue;
             }
+
+            let normalized = Self::normalize_project_path(&path);
+            if !seen_paths.insert(normalized) {
+                continue;
+            }
+
             let Ok(context) = ProjectContext::load(&path) else {
                 continue;
             };
-            projects.insert(context.name.clone(), context);
+            Self::insert_project(&mut projects, context)?;
         }
 
-        Ok(Self {
-            parent_dir,
-            projects,
-        })
+        let cwd =
+            std::env::current_dir().context("failed resolving current directory for --project")?;
+        for manual_project_dir in manual_project_dirs {
+            let project_dir = if manual_project_dir.is_absolute() {
+                manual_project_dir.clone()
+            } else {
+                cwd.join(manual_project_dir)
+            };
+
+            if !project_dir.exists() {
+                return Err(anyhow!(
+                    "manual project path does not exist: {}",
+                    manual_project_dir.display()
+                ));
+            }
+            if !project_dir.is_dir() {
+                return Err(anyhow!(
+                    "manual project path is not a directory: {}",
+                    manual_project_dir.display()
+                ));
+            }
+
+            let normalized = Self::normalize_project_path(&project_dir);
+            if !seen_paths.insert(normalized) {
+                continue;
+            }
+
+            let context = ProjectContext::load(&project_dir).with_context(|| {
+                format!(
+                    "failed loading manual project from {}",
+                    manual_project_dir.display()
+                )
+            })?;
+            Self::insert_project(&mut projects, context)?;
+        }
+
+        Ok(projects)
     }
 
-    pub fn parent_dir(&self) -> &Path {
-        &self.parent_dir
+    fn normalize_project_path(path: &Path) -> PathBuf {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn insert_project(
+        projects: &mut HashMap<String, ProjectContext>,
+        context: ProjectContext,
+    ) -> Result<()> {
+        if let Some(existing) = projects.get(&context.name) {
+            if existing.project_dir != context.project_dir {
+                return Err(anyhow!(
+                    "duplicate project name '{}' for '{}' and '{}'",
+                    context.name,
+                    existing.project_dir.display(),
+                    context.project_dir.display()
+                ));
+            }
+            return Ok(());
+        }
+        projects.insert(context.name.clone(), context);
+        Ok(())
+    }
+
+    pub fn projects_dir(&self) -> &Path {
+        &self.projects_dir
     }
 
     pub fn list_projects(&self) -> Vec<ProjectContext> {
@@ -211,7 +292,7 @@ impl ProjectRegistry {
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        *self = Self::discover(&self.parent_dir)?;
+        *self = Self::discover(&self.projects_dir, &self.manual_project_dirs)?;
         Ok(())
     }
 }
@@ -617,5 +698,108 @@ fn is_unrecoverable_sqlite_error(err: &rusqlite::Error) -> bool {
             err,
             rusqlite::Error::InvalidPath(_) | rusqlite::Error::SqliteSingleThreadedMode
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectRegistry;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use uuid::Uuid;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("chief-project-registry-{label}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).expect("failed creating temporary directory");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn init_git_repo(path: &Path) {
+        fs::create_dir_all(path).expect("failed creating git repo directory");
+        let output = Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(path)
+            .output()
+            .expect("failed to run git init");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn discover_merges_projects_dir_and_manual_projects() {
+        let projects_root = TempDir::new("projects-root");
+        let manual_root = TempDir::new("manual-root");
+
+        let in_tree = projects_root.path.join("in-tree");
+        let ignored = projects_root.path.join("not-a-repo");
+        let manual = manual_root.path.join("manual-repo");
+        init_git_repo(&in_tree);
+        fs::create_dir_all(&ignored).expect("failed creating non-repo directory");
+        init_git_repo(&manual);
+
+        let registry =
+            ProjectRegistry::discover(&projects_root.path, std::slice::from_ref(&manual))
+                .expect("project discovery should succeed");
+        let names = registry
+            .list_projects()
+            .into_iter()
+            .map(|project| project.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["in-tree".to_owned(), "manual-repo".to_owned()]);
+    }
+
+    #[test]
+    fn discover_dedupes_manual_project_already_in_projects_dir() {
+        let projects_root = TempDir::new("dedupe-root");
+        let shared = projects_root.path.join("shared");
+        init_git_repo(&shared);
+
+        let registry =
+            ProjectRegistry::discover(&projects_root.path, std::slice::from_ref(&shared))
+                .expect("project discovery should succeed");
+        let names = registry
+            .list_projects()
+            .into_iter()
+            .map(|project| project.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["shared".to_owned()]);
+    }
+
+    #[test]
+    fn discover_errors_on_duplicate_project_names() {
+        let projects_root = TempDir::new("dupe-names-root");
+        let manual_root = TempDir::new("dupe-names-manual");
+
+        let in_tree = projects_root.path.join("same-name");
+        let manual = manual_root.path.join("same-name");
+        init_git_repo(&in_tree);
+        init_git_repo(&manual);
+
+        let err = ProjectRegistry::discover(&projects_root.path, std::slice::from_ref(&manual))
+            .expect_err("discovery should fail for duplicate project names");
+        assert!(
+            err.to_string().contains("duplicate project name"),
+            "unexpected error: {err:#}"
+        );
     }
 }

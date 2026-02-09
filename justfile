@@ -23,7 +23,7 @@ frontend:
     docker compose up -d frontend
 
 backend port="8000":
-    cargo run --bin chief_backend -- --parent-dir "${CHIEF_PROJECTS_PARENT:-../../}" --host 0.0.0.0 --port {{port}} --enable-terminal --allow-origin http://localhost:3000
+    cargo run --bin chief_backend -- --projects-dir "${CHIEF_PROJECTS_DIR:-${CHIEF_PROJECTS_PARENT:-../../}}" --host 0.0.0.0 --port {{port}} --enable-terminal --allow-origin http://localhost:3000
 
 dev:
     just frontend
