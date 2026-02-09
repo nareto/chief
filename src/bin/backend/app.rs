@@ -37,6 +37,8 @@ pub struct BackendCli {
     pub max_agents_per_project: usize,
     #[arg(long, default_value_t = false)]
     pub enable_terminal: bool,
+    #[arg(long, default_value_t = false)]
+    pub verbose: bool,
     #[arg(long, env = "CHIEF_API_TOKEN")]
     pub api_token: Option<String>,
 }
@@ -109,15 +111,19 @@ pub async fn run() -> Result<()> {
         },
     });
 
-    let app = build_router(state)
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                .on_request(DefaultOnRequest::new().level(Level::INFO))
-                .on_response(DefaultOnResponse::new().level(Level::INFO))
-                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
-        )
-        .layer(build_cors_layer(&cli.allow_origins)?);
+    let app = if cli.verbose {
+        build_router(state)
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                    .on_request(DefaultOnRequest::new().level(Level::INFO))
+                    .on_response(DefaultOnResponse::new().level(Level::INFO))
+                    .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+            )
+            .layer(build_cors_layer(&cli.allow_origins)?)
+    } else {
+        build_router(state).layer(build_cors_layer(&cli.allow_origins)?)
+    };
     let app = if cli.frontend_dir.exists() {
         app.fallback_service(ServeDir::new(&cli.frontend_dir))
     } else {
