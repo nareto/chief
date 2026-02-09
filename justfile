@@ -33,10 +33,10 @@ logs:
 
 frontend:
     just sync-frontend-deps
-    docker compose up -d frontend
+    docker compose up -d --no-deps --force-recreate frontend
 
 backend port="8000" default_agents="1" max_agents="8" frontend_dir="frontend":
-    cargo run --bin chief_backend -- --projects-dir "${PROJECTS_DIR}" --host 0.0.0.0 --port {{port}} --frontend-dir "{{frontend_dir}}" --default-agents-per-project {{default_agents}} --max-agents-per-project {{max_agents}} --enable-terminal --allow-origin http://localhost:3000 --project "${PROJECT}"
+    cargo run --bin chief_backend -- --projects-dir "${PROJECTS_DIR}" --host 0.0.0.0 --port {{port}} --frontend-dir "{{frontend_dir}}" --default-agents-per-project {{default_agents}} --max-agents-per-project {{max_agents}} --enable-terminal --allow-origin http://localhost:3000 --allow-origin "http://${FRONTEND_HOST}:3000" --project "${PROJECT}"
 
 dev:
     just frontend
