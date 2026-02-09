@@ -187,6 +187,19 @@ pub async fn run_suite_check(
     ))
 }
 
+pub async fn run_suite_check_stream(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RunSuiteCheckRequest>,
+) -> Result<Response, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    state
+        .service
+        .run_suite_check_stream(&project, payload)
+        .await
+}
+
 pub async fn reset_project_db(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,

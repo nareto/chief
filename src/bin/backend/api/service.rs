@@ -3,10 +3,15 @@ use crate::api::types::{
     ActiveJobResponse, AddTodoRequest, ChiefTomlResponse, EventsQuery, EventsResponse,
     FileDiffQuery, FileDiffResponse, JobsResponse, LogQuery, MessageResponse, PhaseIteration,
     ProjectsResponse, RequirementsRequest, RequirementsResponse, RunSuiteCheckRequest,
-    RunSuiteCheckResponse, StartProjectRequest, StateResponse, TodoProgress, TodoResponse,
-    TodosResponse, UpdateChiefTomlRequest, UpdateTodoRequest,
+    RunSuiteCheckResponse, RunSuiteCheckStreamEvent, StartProjectRequest, StateResponse,
+    SuiteCheckOutputStream, TodoProgress, TodoResponse, TodosResponse, UpdateChiefTomlRequest,
+    UpdateTodoRequest,
 };
 use anyhow::{Context, anyhow};
+use axum::body::Body;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue};
+use axum::response::{IntoResponse, Response};
 use chief::domain::{EventType, JobStatus, Phase, Todo, TodoStatus};
 use chief::flow::{
     FlowKind, SuiteCommandKind, execute_suite_command, suite_command_cwd, suite_command_for_kind,
@@ -15,17 +20,32 @@ use chief::git::GitOps;
 use chief::scheduler::Scheduler;
 use chief::service::ChiefEngine;
 use chief::storage::EventQuery;
+use futures_util::stream;
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct ApiService {
     scheduler: Scheduler,
     default_agents_per_project: usize,
+}
+
+struct SuiteCheckPlan {
+    suite_name: String,
+    kind: SuiteCommandKind,
+    command: String,
+    cwd: PathBuf,
+    cwd_display: String,
+    env: BTreeMap<String, String>,
 }
 
 impl ApiService {
@@ -416,6 +436,179 @@ impl ApiService {
         project: &str,
         payload: RunSuiteCheckRequest,
     ) -> Result<RunSuiteCheckResponse, ApiError> {
+        let SuiteCheckPlan {
+            suite_name,
+            kind,
+            command,
+            cwd,
+            cwd_display,
+            env,
+        } = self.prepare_suite_check_plan(project, &payload).await?;
+        let kind_label = kind.as_str();
+        info!(
+            project,
+            suite = %suite_name,
+            kind = %kind_label,
+            cwd = %cwd_display,
+            command = %command,
+            "running suite check command"
+        );
+        let cancel_signal = Arc::new(AtomicBool::new(false));
+
+        let output = tokio::task::spawn_blocking(move || {
+            execute_suite_command(&command, &cwd, &env, &cancel_signal)
+        })
+        .await
+        .map_err(|err| {
+            error!(
+                project,
+                suite = %suite_name,
+                kind = %kind_label,
+                error = %err,
+                "suite command task join failed"
+            );
+            ApiError::internal(anyhow!("suite command task failed: {err}"))
+        })?;
+
+        let output = match output {
+            Ok(result) => result,
+            Err(err) => {
+                error!(
+                    project,
+                    suite = %suite_name,
+                    kind = %kind_label,
+                    error = %err,
+                    "suite command execution failed"
+                );
+                return Err(ApiError::internal(err));
+            }
+        };
+
+        info!(
+            project,
+            suite = %suite_name,
+            kind = %kind_label,
+            exit_code = output.exit_code,
+            stdout_len = output.stdout.len(),
+            stderr_len = output.stderr.len(),
+            "suite check command finished"
+        );
+
+        Ok(RunSuiteCheckResponse {
+            suite: suite_name,
+            kind,
+            command: output.command,
+            cwd: cwd_display,
+            exit_code: output.exit_code,
+            output: output.merged_output,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    pub async fn run_suite_check_stream(
+        &self,
+        project: &str,
+        payload: RunSuiteCheckRequest,
+    ) -> Result<Response, ApiError> {
+        let plan = self.prepare_suite_check_plan(project, &payload).await?;
+        info!(
+            project,
+            suite = %plan.suite_name,
+            kind = %plan.kind.as_str(),
+            cwd = %plan.cwd_display,
+            command = %plan.command,
+            "running suite check command (stream)"
+        );
+
+        let (sender, receiver) = tokio_mpsc::channel::<Vec<u8>>(128);
+        send_stream_event_async(
+            &sender,
+            RunSuiteCheckStreamEvent::Started {
+                suite: plan.suite_name.clone(),
+                kind: plan.kind,
+                command: plan.command.clone(),
+                cwd: plan.cwd_display.clone(),
+            },
+        )
+        .await;
+
+        let project_name = project.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let SuiteCheckPlan {
+                suite_name,
+                kind,
+                command,
+                cwd,
+                cwd_display,
+                env,
+            } = plan;
+            let kind_label = kind.as_str().to_owned();
+
+            match execute_suite_command_streaming(
+                &suite_name,
+                kind,
+                &command,
+                &cwd,
+                &cwd_display,
+                &env,
+                &sender,
+            ) {
+                Ok(result) => {
+                    info!(
+                        project = %project_name,
+                        suite = %result.suite,
+                        kind = %kind_label,
+                        exit_code = result.exit_code,
+                        stdout_len = result.stdout.len(),
+                        stderr_len = result.stderr.len(),
+                        "suite check stream command finished"
+                    );
+                    send_stream_event_blocking(
+                        &sender,
+                        RunSuiteCheckStreamEvent::Completed { result },
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        project = %project_name,
+                        suite = %suite_name,
+                        kind = %kind_label,
+                        error = %err,
+                        "suite check stream command failed"
+                    );
+                    send_stream_event_blocking(
+                        &sender,
+                        RunSuiteCheckStreamEvent::Error {
+                            error: err.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+
+        let body_stream = stream::unfold(receiver, |mut receiver| async move {
+            receiver
+                .recv()
+                .await
+                .map(|chunk| (Ok::<Vec<u8>, std::convert::Infallible>(chunk), receiver))
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-ndjson; charset=utf-8"),
+        );
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+        Ok((headers, Body::from_stream(body_stream)).into_response())
+    }
+
+    async fn prepare_suite_check_plan(
+        &self,
+        project: &str,
+        payload: &RunSuiteCheckRequest,
+    ) -> Result<SuiteCheckPlan, ApiError> {
         let mut context = self.project_context(project).await?;
         context.refresh().map_err(ApiError::internal)?;
 
@@ -450,68 +643,17 @@ impl ApiService {
                     }
                 ))
             })?;
+
         let cwd = suite_command_cwd(&context.project_dir, &suite);
         let cwd_display = cwd.display().to_string();
-        let kind_label = payload.kind.as_str();
-        info!(
-            project,
-            suite = %suite.name,
-            kind = %kind_label,
-            cwd = %cwd_display,
-            command = %command,
-            "running suite check command"
-        );
-        let env = suite.env.clone();
-        let cancel_signal = Arc::new(AtomicBool::new(false));
 
-        let output = tokio::task::spawn_blocking(move || {
-            execute_suite_command(&command, &cwd, &env, &cancel_signal)
-        })
-        .await
-        .map_err(|err| {
-            error!(
-                project,
-                suite = %suite.name,
-                kind = %kind_label,
-                error = %err,
-                "suite command task join failed"
-            );
-            ApiError::internal(anyhow!("suite command task failed: {err}"))
-        })?;
-
-        let output = match output {
-            Ok(result) => result,
-            Err(err) => {
-                error!(
-                    project,
-                    suite = %suite.name,
-                    kind = %kind_label,
-                    error = %err,
-                    "suite command execution failed"
-                );
-                return Err(ApiError::internal(err));
-            }
-        };
-
-        info!(
-            project,
-            suite = %suite.name,
-            kind = %kind_label,
-            exit_code = output.exit_code,
-            stdout_len = output.stdout.len(),
-            stderr_len = output.stderr.len(),
-            "suite check command finished"
-        );
-
-        Ok(RunSuiteCheckResponse {
-            suite: suite.name,
+        Ok(SuiteCheckPlan {
+            suite_name: suite.name,
             kind: payload.kind,
-            command: output.command,
-            cwd: cwd_display,
-            exit_code: output.exit_code,
-            output: output.merged_output,
-            stdout: output.stdout,
-            stderr: output.stderr,
+            command,
+            cwd,
+            cwd_display,
+            env: suite.env,
         })
     }
 
@@ -555,6 +697,205 @@ impl ApiService {
                 }
             })
     }
+}
+
+enum SuiteStreamChunk {
+    Chunk {
+        stream: SuiteCheckOutputStream,
+        text: String,
+    },
+    Done {
+        stream: SuiteCheckOutputStream,
+    },
+    Error {
+        stream: SuiteCheckOutputStream,
+        message: String,
+    },
+}
+
+fn execute_suite_command_streaming(
+    suite_name: &str,
+    kind: SuiteCommandKind,
+    command: &str,
+    cwd: &std::path::Path,
+    cwd_display: &str,
+    env: &BTreeMap<String, String>,
+    stream_sender: &tokio_mpsc::Sender<Vec<u8>>,
+) -> anyhow::Result<RunSuiteCheckResponse> {
+    let mut process = Command::new("sh");
+    process.arg("-lc").arg(command);
+    process.current_dir(cwd);
+    process.envs(env.iter());
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("failed to run command: {command}"))?;
+
+    let (chunk_sender, chunk_receiver) = mpsc::channel::<SuiteStreamChunk>();
+    let stdout_reader = spawn_suite_stream_reader(
+        child.stdout.take(),
+        SuiteCheckOutputStream::Stdout,
+        chunk_sender.clone(),
+    );
+    let stderr_reader = spawn_suite_stream_reader(
+        child.stderr.take(),
+        SuiteCheckOutputStream::Stderr,
+        chunk_sender,
+    );
+
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut merged_output = String::new();
+    let mut read_error: Option<String> = None;
+
+    while !(stdout_done && stderr_done) {
+        let chunk = chunk_receiver
+            .recv()
+            .map_err(|_| anyhow!("suite command output stream disconnected"))?;
+
+        match chunk {
+            SuiteStreamChunk::Chunk { stream, text } => {
+                match stream {
+                    SuiteCheckOutputStream::Stdout => stdout.push_str(&text),
+                    SuiteCheckOutputStream::Stderr => stderr.push_str(&text),
+                }
+                merged_output.push_str(&text);
+                send_stream_event_blocking(
+                    stream_sender,
+                    RunSuiteCheckStreamEvent::Chunk { stream, text },
+                );
+            }
+            SuiteStreamChunk::Done { stream } => match stream {
+                SuiteCheckOutputStream::Stdout => stdout_done = true,
+                SuiteCheckOutputStream::Stderr => stderr_done = true,
+            },
+            SuiteStreamChunk::Error { stream, message } => {
+                read_error = Some(format!(
+                    "failed reading {} stream: {message}",
+                    suite_stream_label(stream)
+                ));
+                break;
+            }
+        }
+    }
+
+    if read_error.is_some() {
+        let _ = child.kill();
+    }
+    let status = child.wait().context("failed waiting for suite command")?;
+    join_suite_stream_reader(stdout_reader, "stdout")?;
+    join_suite_stream_reader(stderr_reader, "stderr")?;
+    if let Some(message) = read_error {
+        return Err(anyhow!(message));
+    }
+
+    Ok(RunSuiteCheckResponse {
+        suite: suite_name.to_owned(),
+        kind,
+        command: command.to_owned(),
+        cwd: cwd_display.to_owned(),
+        exit_code: status.code().unwrap_or(1),
+        output: merged_output.trim().to_owned(),
+        stdout,
+        stderr,
+    })
+}
+
+fn spawn_suite_stream_reader<T>(
+    pipe: Option<T>,
+    stream: SuiteCheckOutputStream,
+    sender: mpsc::Sender<SuiteStreamChunk>,
+) -> JoinHandle<anyhow::Result<()>>
+where
+    T: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let Some(pipe) = pipe else {
+            let _ = sender.send(SuiteStreamChunk::Done { stream });
+            return Ok(());
+        };
+
+        let mut reader = BufReader::new(pipe);
+        loop {
+            let mut bytes = Vec::new();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if sender
+                        .send(SuiteStreamChunk::Chunk { stream, text })
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(SuiteStreamChunk::Error {
+                        stream,
+                        message: err.to_string(),
+                    });
+                    return Ok(());
+                }
+            }
+        }
+
+        let _ = sender.send(SuiteStreamChunk::Done { stream });
+        Ok(())
+    })
+}
+
+fn join_suite_stream_reader(
+    handle: JoinHandle<anyhow::Result<()>>,
+    stream_name: &str,
+) -> anyhow::Result<()> {
+    match handle.join() {
+        Ok(result) => result.with_context(|| format!("failed reading {stream_name} stream")),
+        Err(_) => Err(anyhow!("{stream_name} stream reader thread panicked")),
+    }
+}
+
+fn suite_stream_label(stream: SuiteCheckOutputStream) -> &'static str {
+    match stream {
+        SuiteCheckOutputStream::Stdout => "stdout",
+        SuiteCheckOutputStream::Stderr => "stderr",
+    }
+}
+
+fn send_stream_event_blocking(
+    sender: &tokio_mpsc::Sender<Vec<u8>>,
+    event: RunSuiteCheckStreamEvent,
+) -> bool {
+    let payload = match stream_event_payload(&event) {
+        Ok(payload) => payload,
+        Err(err) => {
+            error!(error = %err, "failed to encode suite stream event");
+            return false;
+        }
+    };
+    sender.blocking_send(payload).is_ok()
+}
+
+async fn send_stream_event_async(
+    sender: &tokio_mpsc::Sender<Vec<u8>>,
+    event: RunSuiteCheckStreamEvent,
+) -> bool {
+    let payload = match stream_event_payload(&event) {
+        Ok(payload) => payload,
+        Err(err) => {
+            error!(error = %err, "failed to encode suite stream event");
+            return false;
+        }
+    };
+    sender.send(payload).await.is_ok()
+}
+
+fn stream_event_payload(event: &RunSuiteCheckStreamEvent) -> anyhow::Result<Vec<u8>> {
+    let mut payload = serde_json::to_vec(event).context("failed serializing suite stream event")?;
+    payload.push(b'\n');
+    Ok(payload)
 }
 
 fn run_git_capture(project_dir: &PathBuf, args: &[&str]) -> Result<String, ApiError> {

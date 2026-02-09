@@ -127,7 +127,7 @@ pub struct ChiefTomlResponse {
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct RunSuiteCheckResponse {
     pub suite: String,
     pub kind: SuiteCommandKind,
@@ -137,6 +137,34 @@ pub struct RunSuiteCheckResponse {
     pub output: String,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteCheckOutputStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunSuiteCheckStreamEvent {
+    Started {
+        suite: String,
+        kind: SuiteCommandKind,
+        command: String,
+        cwd: String,
+    },
+    Chunk {
+        stream: SuiteCheckOutputStream,
+        text: String,
+    },
+    Completed {
+        result: RunSuiteCheckResponse,
+    },
+    Error {
+        error: String,
+    },
 }
 
 #[derive(Debug, Serialize)]

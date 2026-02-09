@@ -47,6 +47,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(handlers::run_suite_check),
         )
         .route(
+            "/api/projects/{project}/suite_checks/stream",
+            post(handlers::run_suite_check_stream),
+        )
+        .route(
             "/api/projects/{project}/reset_db",
             post(handlers::reset_project_db),
         );
