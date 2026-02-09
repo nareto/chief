@@ -510,6 +510,8 @@ impl ProjectStore {
             params![keep_runs as i64],
         )?;
         tx.commit()?;
+        conn.execute_batch("VACUUM;")
+            .context("failed to compact chief.db after trim")?;
         Ok(deleted)
     }
 
@@ -1091,6 +1093,54 @@ mod tests {
             remaining_run_ids,
             vec!["run-4".to_owned(), "run-3".to_owned()],
             "only latest two runs should remain",
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn trim_events_reclaims_db_space() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        for index in 1..=8 {
+            let run_id = format!("run-{index}");
+            store.start_run(&run_id).expect("start_run should succeed");
+            for event_index in 0..30 {
+                store
+                    .record_event(&EventRecord {
+                        id: None,
+                        run_id: run_id.clone(),
+                        job_id: None,
+                        todo_id: None,
+                        timestamp: Utc::now(),
+                        level: "info".to_owned(),
+                        phase: None,
+                        msg: format!("event {event_index} {}", "x".repeat(4096)),
+                        event_type: EventType::Msg,
+                        payload: BTreeMap::new(),
+                    })
+                    .expect("record_event should succeed");
+            }
+        }
+
+        let db_path = project_dir.join("chief.db");
+        let size_before = fs::metadata(&db_path)
+            .expect("db metadata before trim should be readable")
+            .len();
+
+        let deleted = store
+            .trim_events_to_recent_runs(1)
+            .expect("trim_events_to_recent_runs should succeed");
+        assert!(deleted > 0, "trim should delete older events");
+
+        let size_after = fs::metadata(&db_path)
+            .expect("db metadata after trim should be readable")
+            .len();
+        assert!(
+            size_after < size_before,
+            "expected chief.db to shrink after trim (before={size_before}, after={size_after})"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
