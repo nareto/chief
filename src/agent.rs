@@ -60,8 +60,13 @@ trait CommandBackedAgent {
 }
 
 impl CommandBackedAgent for CodexAgent {
-    fn build_command(&self, disallowed_paths: &[String]) -> Vec<String> {
-        let mut cmd = vec!["codex".to_owned(), "exec".to_owned(), "--json".to_owned()];
+    fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
+        let mut cmd = vec![
+            "codex".to_owned(),
+            "exec".to_owned(),
+            "--json".to_owned(),
+            "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+        ];
         cmd.extend(self.extra_args.iter().cloned());
         if let Some(model) = &self.model {
             cmd.push("-m".to_owned());
@@ -70,12 +75,6 @@ impl CommandBackedAgent for CodexAgent {
         if let Some(reasoning_effort) = &self.model_reasoning_effort {
             cmd.push("--config".to_owned());
             cmd.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-        }
-        if !disallowed_paths.is_empty() {
-            for path in disallowed_paths {
-                cmd.push("--config".to_owned());
-                cmd.push(format!("sandbox_disallow_path=\"{path}\""));
-            }
         }
         cmd.push("-".to_owned());
         cmd
@@ -92,22 +91,15 @@ impl CommandBackedAgent for CodexAgent {
 }
 
 impl CommandBackedAgent for ClaudeAgent {
-    fn build_command(&self, disallowed_paths: &[String]) -> Vec<String> {
+    fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
         let mut cmd = vec![
             "claude".to_owned(),
             "-p".to_owned(),
             "-".to_owned(),
-            "--permission-mode".to_owned(),
-            "acceptEdits".to_owned(),
+            "--dangerously-skip-permissions".to_owned(),
             "--verbose".to_owned(),
         ];
         cmd.extend(self.extra_args.iter().cloned());
-        for path in disallowed_paths {
-            cmd.push("--disallowedTools".to_owned());
-            cmd.push(format!("Edit:{path}"));
-            cmd.push("--disallowedTools".to_owned());
-            cmd.push(format!("Write:{path}"));
-        }
         cmd
     }
 
@@ -434,6 +426,48 @@ pub fn ensure_agent_binary_available(path: &Path, agent_name: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_command_uses_full_permissions_without_sandbox() {
+        let agent = CodexAgent {
+            model: None,
+            model_reasoning_effort: None,
+            extra_args: Vec::new(),
+        };
+
+        let command = agent.build_command(&["src".to_owned()]);
+        assert!(
+            command
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+            "codex command should include no-sandbox full-permissions flag: {command:?}"
+        );
+        assert!(
+            !command
+                .iter()
+                .any(|arg| arg.contains("sandbox_disallow_path")),
+            "codex command should not include sandbox disallow path when full-permissions mode is enabled: {command:?}"
+        );
+    }
+
+    #[test]
+    fn claude_command_uses_full_permissions_mode() {
+        let agent = ClaudeAgent {
+            extra_args: Vec::new(),
+        };
+
+        let command = agent.build_command(&["src".to_owned()]);
+        assert!(
+            command
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"),
+            "claude command should include full-permissions flag: {command:?}"
+        );
+        assert!(
+            !command.iter().any(|arg| arg == "--disallowedTools"),
+            "claude command should not include tool-level write restrictions in full-permissions mode: {command:?}"
+        );
+    }
 
     #[test]
     fn wait_with_timeout_handles_large_stdout_without_false_timeout() {

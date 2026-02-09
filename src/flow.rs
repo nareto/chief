@@ -244,6 +244,13 @@ impl<'a> FlowExecution<'a> {
         let mut lines = Vec::with_capacity(filtered.len());
         for (idx, event) in filtered.iter().enumerate() {
             let mut line = format!("[{}] {}: {}", idx + 1, event.event_type.as_str(), event.msg);
+            if let Some(command) = event.payload.get("command").and_then(Value::as_str) {
+                let command = command.trim();
+                if !command.is_empty() {
+                    line.push_str("\ncommand: ");
+                    line.push_str(command);
+                }
+            }
             if let Some(output) = event.payload.get("output").and_then(Value::as_str) {
                 let tail = output
                     .lines()
@@ -1279,6 +1286,84 @@ mod tests {
         assert!(
             !log.contains("other todo event"),
             "entries from other todos must be excluded"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn previous_steps_log_includes_command_and_truncated_output() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "include command".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let mut chief_config = ChiefConfig::default();
+        chief_config.agent_log_max_output_lines = 2;
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        let mut payload = BTreeMap::new();
+        payload.insert(
+            "command".to_owned(),
+            Value::String("cargo test --lib".to_owned()),
+        );
+        payload.insert(
+            "output".to_owned(),
+            Value::String("line-a\nline-b\nline-c".to_owned()),
+        );
+
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::Green),
+                EventType::TestRun,
+                "test failed",
+                payload,
+            )
+            .expect("event should log");
+
+        let log = execution
+            .previous_steps_log(Phase::Green, &[EventType::TestRun], 1)
+            .expect("previous_steps_log should succeed");
+        assert!(
+            log.contains("command: cargo test --lib"),
+            "expected command to be included in log entry, got: {log}"
+        );
+        assert!(
+            log.contains("line-b\nline-c"),
+            "expected only the configured output tail to be present, got: {log}"
+        );
+        assert!(
+            !log.contains("line-a"),
+            "old output lines beyond tail limit should be omitted, got: {log}"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
