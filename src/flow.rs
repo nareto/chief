@@ -414,6 +414,10 @@ pub trait LoopPolicy: Send + Sync {
     ) -> Result<()>;
 }
 
+fn phase_label_for_log(phase: Phase) -> String {
+    phase.as_str().to_ascii_uppercase()
+}
+
 #[derive(Debug, Clone)]
 pub struct ConvergenceLoopPolicy {
     pub required_stable_iterations: usize,
@@ -439,10 +443,19 @@ impl LoopPolicy for ConvergenceLoopPolicy {
         strategy: &mut dyn PhaseStrategy,
         execution: &mut FlowExecution<'_>,
     ) -> Result<()> {
+        let phase = strategy.phase();
+        let phase_label = phase_label_for_log(phase);
         let mut stable = 0usize;
         if strategy.check_goal_before_loop() {
             let pre = strategy.check_goal(execution, -1, &AgentOutput::success("precheck", ""))?;
             if matches!(pre, LoopDecision::Success) {
+                execution.log_event(
+                    "info",
+                    Some(phase),
+                    EventType::PhaseChange,
+                    format!("{phase_label} phase done during pre-check"),
+                    BTreeMap::new(),
+                )?;
                 return Ok(());
             }
         }
@@ -450,7 +463,7 @@ impl LoopPolicy for ConvergenceLoopPolicy {
         for iteration in 0..self.max_loops {
             execution.log_event(
                 "info",
-                Some(strategy.phase()),
+                Some(phase),
                 EventType::PhaseChange,
                 format!(
                     "{} loop iteration {}/{}",
@@ -464,17 +477,73 @@ impl LoopPolicy for ConvergenceLoopPolicy {
             let output = strategy.attempt_fix(execution)?;
             let decision = strategy.check_goal(execution, iteration as isize, &output)?;
             match decision {
-                LoopDecision::Success => return Ok(()),
+                LoopDecision::Success => {
+                    execution.log_event(
+                        "info",
+                        Some(phase),
+                        EventType::PhaseChange,
+                        format!(
+                            "{phase_label} phase done on iteration {}/{}",
+                            iteration + 1,
+                            self.max_loops
+                        ),
+                        BTreeMap::new(),
+                    )?;
+                    return Ok(());
+                }
                 LoopDecision::Stable => {
                     stable += 1;
                     if stable >= self.required_stable_iterations {
+                        execution.log_event(
+                            "info",
+                            Some(phase),
+                            EventType::PhaseChange,
+                            format!(
+                                "{phase_label} phase done after stable result {}/{}",
+                                stable, self.required_stable_iterations
+                            ),
+                            BTreeMap::new(),
+                        )?;
                         return Ok(());
                     }
+                    execution.log_event(
+                        "info",
+                        Some(phase),
+                        EventType::PhaseChange,
+                        format!(
+                            "{phase_label} phase stable {stable}/{}; retrying to confirm",
+                            self.required_stable_iterations
+                        ),
+                        BTreeMap::new(),
+                    )?;
                 }
-                LoopDecision::Retry => stable = 0,
+                LoopDecision::Retry => {
+                    stable = 0;
+                    execution.log_event(
+                        "warning",
+                        Some(phase),
+                        EventType::PhaseChange,
+                        format!(
+                            "{phase_label} phase retrying after iteration {}/{}",
+                            iteration + 1,
+                            self.max_loops
+                        ),
+                        BTreeMap::new(),
+                    )?;
+                }
             }
         }
 
+        execution.log_event(
+            "warning",
+            Some(phase),
+            EventType::PhaseFailure,
+            format!(
+                "{phase_label} phase retry loop exhausted after {} iterations",
+                self.max_loops
+            ),
+            BTreeMap::new(),
+        )?;
         Err(anyhow!("convergence loop failed to converge"))
     }
 }
@@ -500,9 +569,18 @@ impl LoopPolicy for UntilPassLoopPolicy {
         strategy: &mut dyn PhaseStrategy,
         execution: &mut FlowExecution<'_>,
     ) -> Result<()> {
+        let phase = strategy.phase();
+        let phase_label = phase_label_for_log(phase);
         if strategy.check_goal_before_loop() {
             let pre = strategy.check_goal(execution, -1, &AgentOutput::success("precheck", ""))?;
             if matches!(pre, LoopDecision::Success) {
+                execution.log_event(
+                    "info",
+                    Some(phase),
+                    EventType::PhaseChange,
+                    format!("{phase_label} phase done during pre-check"),
+                    BTreeMap::new(),
+                )?;
                 return Ok(());
             }
         }
@@ -510,7 +588,7 @@ impl LoopPolicy for UntilPassLoopPolicy {
         for iteration in 0..self.max_loops {
             execution.log_event(
                 "info",
-                Some(strategy.phase()),
+                Some(phase),
                 EventType::PhaseChange,
                 format!(
                     "{} loop iteration {}/{}",
@@ -523,10 +601,42 @@ impl LoopPolicy for UntilPassLoopPolicy {
             let output = strategy.attempt_fix(execution)?;
             let decision = strategy.check_goal(execution, iteration as isize, &output)?;
             if matches!(decision, LoopDecision::Success) {
+                execution.log_event(
+                    "info",
+                    Some(phase),
+                    EventType::PhaseChange,
+                    format!(
+                        "{phase_label} phase done on iteration {}/{}",
+                        iteration + 1,
+                        self.max_loops
+                    ),
+                    BTreeMap::new(),
+                )?;
                 return Ok(());
             }
+            execution.log_event(
+                "warning",
+                Some(phase),
+                EventType::PhaseChange,
+                format!(
+                    "{phase_label} phase retrying after iteration {}/{}",
+                    iteration + 1,
+                    self.max_loops
+                ),
+                BTreeMap::new(),
+            )?;
         }
 
+        execution.log_event(
+            "warning",
+            Some(phase),
+            EventType::PhaseFailure,
+            format!(
+                "{phase_label} phase retry loop exhausted after {} iterations",
+                self.max_loops
+            ),
+            BTreeMap::new(),
+        )?;
         Err(anyhow!("until-pass loop failed to reach success"))
     }
 }
@@ -564,13 +674,34 @@ impl TodoFlow for TddFlow {
         if !suites.is_empty() {
             let mut red = RedPhaseStrategy::new(suites.clone());
             self.red_loop.run(&mut red, execution)?;
+            execution.log_event(
+                "info",
+                Some(Phase::Red),
+                EventType::PhaseChange,
+                "RED phase done; starting GREEN phase",
+                BTreeMap::new(),
+            )?;
         }
 
         let mut green = GreenPhaseStrategy::new(suites.clone());
         self.green_loop.run(&mut green, execution)?;
+        execution.log_event(
+            "info",
+            Some(Phase::Green),
+            EventType::PhaseChange,
+            "GREEN phase done; starting POST_GREEN phase",
+            BTreeMap::new(),
+        )?;
 
         let mut post_green = PostGreenPhaseStrategy::new(suites);
         self.post_green_loop.run(&mut post_green, execution)?;
+        execution.log_event(
+            "info",
+            Some(Phase::PostGreen),
+            EventType::PhaseChange,
+            "POST_GREEN phase done; preparing commit",
+            BTreeMap::new(),
+        )?;
 
         let commit_hash = execution
             .git

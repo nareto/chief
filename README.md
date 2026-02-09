@@ -30,7 +30,7 @@ Chief uses two loop types:
 
 **Chief performs destructive Git operations.**
 
-To recover from failed TDD cycles, this tool utilizes `git checkout` to revert changes. It assumes it is the sole actor in the repository during execution.
+To recover from failed TDD cycles, this tool may use `git reset --hard` and `git clean -fd` to revert local changes between retry loops. It assumes it is the sole actor in the repository during execution.
 
 - **Start Clean:** Ensure you have no uncommitted changes or untracked files before running.
 - **Hands Off:** Do not modify files manually while the script is active.

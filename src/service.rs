@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
@@ -396,14 +397,77 @@ impl ChiefEngine {
     where
         F: FnMut(usize, usize, &anyhow::Error),
     {
+        let todo_id = todo.id.clone();
         retry_with_policy_and_hook(
             max_retries,
-            |_attempt, _max_retries| {
+            |attempt, total| {
                 if cancel_signal.load(Ordering::SeqCst) {
                     return Err(OrchestratorError::unrecoverable(anyhow!(
                         AgentCancelledError
                     )));
                 }
+
+                if attempt > 1 {
+                    self.log_runtime_event(
+                        run_id,
+                        Some(job_id),
+                        Some(&todo_id),
+                        "info",
+                        Some(Phase::Red),
+                        EventType::PhaseChange,
+                        format!("Retry loop {attempt}/{total} started; restarting RED phase"),
+                        BTreeMap::new(),
+                    );
+
+                    match self.reset_retry_workspace(&work_dir) {
+                        Ok(changed_files) => {
+                            if !changed_files.is_empty() {
+                                let mut payload = BTreeMap::new();
+                                payload.insert(
+                                    "files".to_owned(),
+                                    serde_json::Value::Array(
+                                        changed_files
+                                            .iter()
+                                            .cloned()
+                                            .map(serde_json::Value::String)
+                                            .collect(),
+                                    ),
+                                );
+                                self.log_runtime_event(
+                                    run_id,
+                                    Some(job_id),
+                                    Some(&todo_id),
+                                    "warning",
+                                    Some(Phase::Red),
+                                    EventType::GitOp,
+                                    format!(
+                                        "Retry cleanup: discarded local git changes before loop {attempt}/{total}"
+                                    ),
+                                    payload,
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            let mut payload = BTreeMap::new();
+                            payload.insert(
+                                "error".to_owned(),
+                                serde_json::Value::String(err.to_string()),
+                            );
+                            self.log_runtime_event(
+                                run_id,
+                                Some(job_id),
+                                Some(&todo_id),
+                                "warning",
+                                Some(Phase::Red),
+                                EventType::Error,
+                                format!("Retry cleanup failed before loop {attempt}/{total}"),
+                                payload,
+                            );
+                            return Err(self.classify_runtime_error(err));
+                        }
+                    }
+                }
+
                 self.run_single_todo_once(
                     run_id,
                     job_id,
@@ -415,7 +479,33 @@ impl ChiefEngine {
                     cancel_signal.clone(),
                 )
             },
-            |attempt, total, err| on_retry(attempt, total, err),
+            |attempt, total, err| {
+                let mut payload = BTreeMap::new();
+                payload.insert(
+                    "attempt".to_owned(),
+                    serde_json::Value::from(attempt as i64),
+                );
+                payload.insert("total".to_owned(), serde_json::Value::from(total as i64));
+                payload.insert(
+                    "error".to_owned(),
+                    serde_json::Value::String(err.to_string()),
+                );
+                self.log_runtime_event(
+                    run_id,
+                    Some(job_id),
+                    Some(&todo_id),
+                    "warning",
+                    Some(Phase::Red),
+                    EventType::PhaseChange,
+                    format!(
+                        "Retry loop {attempt}/{total} finished with recoverable failure; preparing retry loop {}/{}",
+                        attempt + 1,
+                        total
+                    ),
+                    payload,
+                );
+                on_retry(attempt, total, err);
+            },
         )
     }
 
@@ -628,6 +718,61 @@ impl ChiefEngine {
         } else {
             OrchestratorError::retryable(err)
         }
+    }
+
+    fn log_runtime_event(
+        &self,
+        run_id: &str,
+        job_id: Option<&str>,
+        todo_id: Option<&str>,
+        level: &str,
+        phase: Option<Phase>,
+        event_type: EventType,
+        msg: impl Into<String>,
+        payload: BTreeMap<String, serde_json::Value>,
+    ) {
+        if let Err(log_err) = self.project.log_project_event(
+            run_id,
+            job_id.map(str::to_owned),
+            todo_id.map(str::to_owned),
+            level,
+            phase,
+            event_type,
+            msg,
+            payload,
+        ) {
+            warn!("failed to record runtime event: {log_err:#}");
+        }
+    }
+
+    fn reset_retry_workspace(&self, work_dir: &Path) -> Result<Vec<String>> {
+        let changed_files = self.project.git.changed_files(work_dir)?;
+        if changed_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.run_git_command(work_dir, &["reset", "--hard", "HEAD"])?;
+        self.run_git_command(work_dir, &["clean", "-fd"])?;
+        Ok(changed_files)
+    }
+
+    fn run_git_command(&self, cwd: &Path, args: &[&str]) -> Result<()> {
+        let output = Command::new("git")
+            .arg("-c")
+            .arg("safe.directory=*")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "git {} failed in {}: {}",
+                args.join(" "),
+                cwd.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
     }
 
     fn log_state_update_error(

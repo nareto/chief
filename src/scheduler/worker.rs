@@ -155,12 +155,7 @@ pub(super) fn run_worker(
         model_override,
         cancel_signal.clone(),
         max_retries,
-        |attempt, total, err| {
-            let msg = format!(
-                "worker todo execution failed ({attempt}/{total}), retrying non-deterministic loop"
-            );
-            report_state_update_error(&context, &run_id, Some(&job.id), Some(&todo_id), &msg, err);
-        },
+        |_attempt, _total, _err| {},
     );
 
     let result = match outcome {
