@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -105,7 +107,15 @@ pub async fn run() -> Result<()> {
         },
     });
 
-    let app = build_router(state).layer(build_cors_layer(&cli.allow_origins)?);
+    let app = build_router(state)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
+        .layer(build_cors_layer(&cli.allow_origins)?);
     let app = if cli.frontend_dir.exists() {
         app.fallback_service(ServeDir::new(&cli.frontend_dir))
     } else {
