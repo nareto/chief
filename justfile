@@ -1,10 +1,23 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
+set dotenv-load := true
 
 build:
     docker compose build frontend
 
 sync-frontend-deps:
-    @LOCK_HASH="$$(sha256sum frontend/package-lock.json | awk '{print $$1}')"; STAMP_PATH="frontend/node_modules/.package-lock.sha256"; STAMP_HASH="$$(cat "$$STAMP_PATH" 2>/dev/null || true)"; if [ ! -d frontend/node_modules ] || [ "$$LOCK_HASH" != "$$STAMP_HASH" ]; then docker compose run --rm --no-deps frontend npm ci; mkdir -p frontend/node_modules; printf '%s\n' "$$LOCK_HASH" > "$$STAMP_PATH"; fi
+    #!/bin/bash
+    set -euo pipefail
+
+    LOCK_HASH="$(sha256sum frontend/package-lock.json | awk '{print $1}')"
+    STAMP_PATH="frontend/node_modules/.package-lock.sha256"
+    STAMP_HASH="$(cat "$STAMP_PATH" 2>/dev/null || true)"
+
+    if [ ! -d frontend/node_modules ] || [ "$LOCK_HASH" != "$STAMP_HASH" ]; then
+        docker compose stop frontend >/dev/null 2>&1 || true
+        docker compose run --rm --no-deps frontend npm ci
+        mkdir -p frontend/node_modules
+        printf '%s\n' "$LOCK_HASH" > "$STAMP_PATH"
+    fi
 
 build-chief:
     cargo build --bin chief
@@ -23,7 +36,7 @@ frontend:
     docker compose up -d frontend
 
 backend port="8000":
-    cargo run --bin chief_backend -- --projects-dir "${CHIEF_PROJECTS_DIR:-${CHIEF_PROJECTS_PARENT:-../../}}" --host 0.0.0.0 --port {{port}} --enable-terminal --allow-origin http://localhost:3000
+    cargo run --bin chief_backend -- --projects-dir "${PROJECTS_DIR}" --host 0.0.0.0 --port {{port}} --enable-terminal --allow-origin http://localhost:3000 --project "${PROJECT}"
 
 dev:
     just frontend
