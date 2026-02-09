@@ -1,4 +1,5 @@
 use chief::domain::{EventRecord, JobRecord, Todo};
+use chief::flow::SuiteCommandKind;
 use chief::scheduler::ProjectRuntimeView;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,13 @@ pub struct UpdateChiefTomlRequest {
     pub content: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RunSuiteCheckRequest {
+    pub suite: String,
+    pub kind: SuiteCommandKind,
+    pub target: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub message: String,
@@ -104,6 +112,18 @@ pub struct FileDiffResponse {
 #[derive(Debug, Serialize)]
 pub struct ChiefTomlResponse {
     pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunSuiteCheckResponse {
+    pub suite: String,
+    pub kind: SuiteCommandKind,
+    pub command: String,
+    pub cwd: String,
+    pub exit_code: i32,
+    pub output: String,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Debug, Serialize)]

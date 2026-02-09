@@ -4,17 +4,17 @@ use crate::domain::{AgentOutput, EventRecord, EventType, LoopDecision, Phase, To
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::{EventQuery, ProjectStore};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -69,6 +69,88 @@ impl FromStr for FlowKind {
 pub struct TodoOutcome {
     pub todo_id: String,
     pub commit_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteCommandKind {
+    Test,
+    Lint,
+    PostGreen,
+}
+
+impl SuiteCommandKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Lint => "lint",
+            Self::PostGreen => "post_green",
+        }
+    }
+}
+
+pub fn suite_command_cwd(project_dir: &Path, suite: &TestSuiteConfig) -> PathBuf {
+    project_dir.join(&suite.test_root)
+}
+
+pub fn suite_command_for_kind(
+    suite: &TestSuiteConfig,
+    kind: SuiteCommandKind,
+    target_override: Option<&str>,
+) -> Option<String> {
+    match kind {
+        SuiteCommandKind::Test => Some(replace_target_placeholder(
+            &suite.test_command,
+            suite,
+            target_override,
+        )),
+        SuiteCommandKind::Lint => suite
+            .lint_command
+            .as_ref()
+            .map(|cmd| replace_target_placeholder(cmd, suite, target_override)),
+        SuiteCommandKind::PostGreen => suite.post_green_command.clone(),
+    }
+}
+
+pub fn execute_suite_command(
+    command: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    cancel_signal: &Arc<AtomicBool>,
+) -> Result<AgentOutput> {
+    let mut process = Command::new("sh");
+    process.arg("-lc").arg(command);
+    process.current_dir(cwd);
+    process.envs(env.iter());
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("failed to run command: {command}"))?;
+    let output = wait_for_command_with_cancel(&mut child, cancel_signal)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(AgentOutput {
+        exit_code: output.status.code().unwrap_or(1),
+        command: command.to_owned(),
+        merged_output: format!("{stdout}\n{stderr}").trim().to_owned(),
+        stdout,
+        stderr,
+    })
+}
+
+fn replace_target_placeholder(
+    command: &str,
+    suite: &TestSuiteConfig,
+    target_override: Option<&str>,
+) -> String {
+    let target = target_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| suite.default_target.clone())
+        .unwrap_or_else(|| ".".to_owned());
+    command.replace("{target}", &target)
 }
 
 pub struct FlowExecution<'a> {
@@ -188,58 +270,31 @@ impl<'a> FlowExecution<'a> {
         env: &BTreeMap<String, String>,
     ) -> Result<AgentOutput> {
         self.ensure_not_cancelled()?;
-
-        let mut process = Command::new("sh");
-        process.arg("-lc").arg(command);
-        process.current_dir(cwd);
-        process.envs(env.iter());
-        process.stdout(Stdio::piped());
-        process.stderr(Stdio::piped());
-        let mut child = process
-            .spawn()
-            .with_context(|| format!("failed to run command: {command}"))?;
-        let output = wait_for_command_with_cancel(&mut child, &self.cancel_signal)?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Ok(AgentOutput {
-            exit_code: output.status.code().unwrap_or(1),
-            command: command.to_owned(),
-            merged_output: format!("{stdout}\n{stderr}").trim().to_owned(),
-            stdout,
-            stderr,
-        })
+        execute_suite_command(command, cwd, env, &self.cancel_signal)
     }
 
     pub fn run_test_suite(&self, suite: &TestSuiteConfig) -> Result<AgentOutput> {
-        let target = suite
-            .default_target
-            .clone()
-            .unwrap_or_else(|| ".".to_owned());
-        let cmd = suite.test_command.replace("{target}", &target);
-        let cwd = self.project_dir.join(&suite.test_root);
+        let cmd = suite_command_for_kind(suite, SuiteCommandKind::Test, None)
+            .unwrap_or_else(|| suite.test_command.clone());
+        let cwd = suite_command_cwd(&self.project_dir, suite);
         self.run_suite_command(&cmd, &cwd, &suite.env)
     }
 
     pub fn run_lint_suite(&self, suite: &TestSuiteConfig) -> Result<Option<AgentOutput>> {
-        let Some(lint_command) = &suite.lint_command else {
+        let Some(cmd) = suite_command_for_kind(suite, SuiteCommandKind::Lint, None) else {
             return Ok(None);
         };
-        let target = suite
-            .default_target
-            .clone()
-            .unwrap_or_else(|| ".".to_owned());
-        let cmd = lint_command.replace("{target}", &target);
-        let cwd = self.project_dir.join(&suite.test_root);
+        let cwd = suite_command_cwd(&self.project_dir, suite);
         let out = self.run_suite_command(&cmd, &cwd, &suite.env)?;
         Ok(Some(out))
     }
 
     pub fn run_post_green_suite(&self, suite: &TestSuiteConfig) -> Result<Option<AgentOutput>> {
-        let Some(command) = &suite.post_green_command else {
+        let Some(command) = suite_command_for_kind(suite, SuiteCommandKind::PostGreen, None) else {
             return Ok(None);
         };
-        let cwd = self.project_dir.join(&suite.test_root);
-        let out = self.run_suite_command(command, &cwd, &suite.env)?;
+        let cwd = suite_command_cwd(&self.project_dir, suite);
+        let out = self.run_suite_command(&command, &cwd, &suite.env)?;
         Ok(Some(out))
     }
 
@@ -972,21 +1027,21 @@ fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_flow, FlowExecution, FlowKind};
+    use super::{FlowExecution, FlowKind, build_flow};
     use crate::agent::{AgentRequest, CodingAgent};
     use crate::config::ChiefConfig;
     use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
     use crate::git::GitOps;
     use crate::prompt::PromptStore;
     use crate::storage::ProjectStore;
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use uuid::Uuid;
 
     #[test]

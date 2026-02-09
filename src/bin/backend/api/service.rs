@@ -2,13 +2,15 @@ use crate::api::error::ApiError;
 use crate::api::types::{
     ActiveJobResponse, AddTodoRequest, ChiefTomlResponse, EventsQuery, EventsResponse,
     FileDiffQuery, FileDiffResponse, JobsResponse, LogQuery, MessageResponse, PhaseIteration,
-    ProjectsResponse, RequirementsRequest, RequirementsResponse, StartProjectRequest,
-    StateResponse, TodoProgress, TodoResponse, TodosResponse, UpdateChiefTomlRequest,
-    UpdateTodoRequest,
+    ProjectsResponse, RequirementsRequest, RequirementsResponse, RunSuiteCheckRequest,
+    RunSuiteCheckResponse, StartProjectRequest, StateResponse, TodoProgress, TodoResponse,
+    TodosResponse, UpdateChiefTomlRequest, UpdateTodoRequest,
 };
 use anyhow::{Context, anyhow};
 use chief::domain::{EventType, JobStatus, Phase, Todo, TodoStatus};
-use chief::flow::FlowKind;
+use chief::flow::{
+    FlowKind, SuiteCommandKind, execute_suite_command, suite_command_cwd, suite_command_for_kind,
+};
 use chief::git::GitOps;
 use chief::scheduler::Scheduler;
 use chief::service::ChiefEngine;
@@ -16,6 +18,8 @@ use chief::storage::EventQuery;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Clone)]
 pub struct ApiService {
@@ -400,6 +404,69 @@ impl ApiService {
 
         Ok(MessageResponse {
             message: "chief.toml updated".to_owned(),
+        })
+    }
+
+    pub async fn run_suite_check(
+        &self,
+        project: &str,
+        payload: RunSuiteCheckRequest,
+    ) -> Result<RunSuiteCheckResponse, ApiError> {
+        let mut context = self.project_context(project).await?;
+        context.refresh().map_err(ApiError::internal)?;
+
+        let suite_name = payload.suite.trim();
+        if suite_name.is_empty() {
+            return Err(ApiError::unprocessable("suite is required"));
+        }
+        if payload.kind == SuiteCommandKind::PostGreen {
+            return Err(ApiError::unprocessable(
+                "kind 'post_green' is not supported by this endpoint",
+            ));
+        }
+
+        let suite = context
+            .chief_toml
+            .suites
+            .iter()
+            .find(|suite| suite.name == suite_name)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found(format!("suite '{}' not found", payload.suite)))?;
+
+        let target_override = payload.target.as_deref();
+        let command =
+            suite_command_for_kind(&suite, payload.kind, target_override).ok_or_else(|| {
+                ApiError::unprocessable(format!(
+                    "suite '{}' has no {} command configured",
+                    suite.name,
+                    match payload.kind {
+                        SuiteCommandKind::Lint => "lint",
+                        SuiteCommandKind::Test => "test",
+                        SuiteCommandKind::PostGreen => "post-green",
+                    }
+                ))
+            })?;
+        let cwd = suite_command_cwd(&context.project_dir, &suite);
+        let cwd_display = cwd.display().to_string();
+        let env = suite.env.clone();
+        let cancel_signal = Arc::new(AtomicBool::new(false));
+
+        let output = tokio::task::spawn_blocking(move || {
+            execute_suite_command(&command, &cwd, &env, &cancel_signal)
+        })
+        .await
+        .map_err(|err| ApiError::internal(anyhow!("suite command task failed: {err}")))?
+        .map_err(ApiError::internal)?;
+
+        Ok(RunSuiteCheckResponse {
+            suite: suite.name,
+            kind: payload.kind,
+            command: output.command,
+            cwd: cwd_display,
+            exit_code: output.exit_code,
+            output: output.merged_output,
+            stdout: output.stdout,
+            stderr: output.stderr,
         })
     }
 

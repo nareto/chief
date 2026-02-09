@@ -3,8 +3,8 @@ use crate::api::error::ApiError;
 use crate::api::events_ws;
 use crate::api::terminal_ws;
 use crate::api::types::{
-    AddTodoRequest, EventsQuery, FileDiffQuery, LogQuery, RequirementsRequest, StartProjectRequest,
-    UpdateChiefTomlRequest, UpdateTodoRequest,
+    AddTodoRequest, EventsQuery, FileDiffQuery, LogQuery, RequirementsRequest,
+    RunSuiteCheckRequest, StartProjectRequest, UpdateChiefTomlRequest, UpdateTodoRequest,
 };
 use crate::app::AppState;
 use axum::Json;
@@ -156,6 +156,18 @@ pub async fn update_chief_toml(
     auth::require_sensitive_access(&state, &headers)?;
     Ok(Json(
         state.service.update_chief_toml(&project, payload).await?,
+    ))
+}
+
+pub async fn run_suite_check(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RunSuiteCheckRequest>,
+) -> Result<Json<crate::api::types::RunSuiteCheckResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(
+        state.service.run_suite_check(&project, payload).await?,
     ))
 }
 
