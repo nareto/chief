@@ -18,11 +18,17 @@ down:
 logs:
     docker compose logs -f frontend
 
-backend:
-    cargo run --bin chief_backend -- --parent-dir "${CHIEF_PROJECTS_PARENT:-../../}" --host 0.0.0.0 --port 8000 --enable-terminal --allow-origin http://localhost:3000
-
-dev:
-    just down
+frontend:
     just sync-frontend-deps
     docker compose up -d frontend
+
+backend port="8000":
+    cargo run --bin chief_backend -- --parent-dir "${CHIEF_PROJECTS_PARENT:-../../}" --host 0.0.0.0 --port {{port}} --enable-terminal --allow-origin http://localhost:3000
+
+dev:
+    just frontend
+
+dev-full:
+    just down
+    just frontend
     just backend
