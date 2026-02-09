@@ -25,171 +25,186 @@ pub trait CodingAgent: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub enum AgentKind {
-    Codex,
-    Claude,
-}
-
-#[derive(Debug, Clone)]
-pub struct CommandAgent {
-    kind: AgentKind,
+pub struct CodexAgent {
     model: Option<String>,
     model_reasoning_effort: Option<String>,
     extra_args: Vec<String>,
 }
 
-impl CommandAgent {
+impl CodexAgent {
     pub fn from_config(config: &ChiefConfig, model_override: Option<String>) -> Self {
-        let kind = if config.agent.eq_ignore_ascii_case("claude") {
-            AgentKind::Claude
-        } else {
-            AgentKind::Codex
-        };
-
-        let model = model_override.or_else(|| config.model.clone());
         Self {
-            kind,
-            model,
+            model: model_override.or_else(|| config.model.clone()),
             model_reasoning_effort: config.model_reasoning_effort.clone(),
             extra_args: config.agent_extra_args.clone(),
         }
     }
+}
 
-    fn build_command(&self, disallowed_paths: &[String]) -> Vec<String> {
-        match self.kind {
-            AgentKind::Codex => {
-                let mut cmd = vec!["codex".to_owned(), "exec".to_owned(), "--json".to_owned()];
-                cmd.extend(self.extra_args.iter().cloned());
-                if let Some(model) = &self.model {
-                    cmd.push("-m".to_owned());
-                    cmd.push(model.clone());
-                }
-                if let Some(reasoning_effort) = &self.model_reasoning_effort {
-                    cmd.push("--config".to_owned());
-                    cmd.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-                }
-                if !disallowed_paths.is_empty() {
-                    for path in disallowed_paths {
-                        cmd.push("--config".to_owned());
-                        cmd.push(format!("sandbox_disallow_path=\"{path}\""));
-                    }
-                }
-                cmd.push("-".to_owned());
-                cmd
-            }
-            AgentKind::Claude => {
-                let mut cmd = vec![
-                    "claude".to_owned(),
-                    "-p".to_owned(),
-                    "-".to_owned(),
-                    "--permission-mode".to_owned(),
-                    "acceptEdits".to_owned(),
-                    "--verbose".to_owned(),
-                ];
-                cmd.extend(self.extra_args.iter().cloned());
-                for path in disallowed_paths {
-                    cmd.push("--disallowedTools".to_owned());
-                    cmd.push(format!("Edit:{path}"));
-                    cmd.push("--disallowedTools".to_owned());
-                    cmd.push(format!("Write:{path}"));
-                }
-                cmd
-            }
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct ClaudeAgent {
+    extra_args: Vec<String>,
+}
 
-    fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
-        match self.kind {
-            AgentKind::Codex => {
-                let parsed = parse_codex_json_output(raw_stdout);
-                if parsed.trim().is_empty() {
-                    raw_stdout.trim().to_owned()
-                } else {
-                    parsed
-                }
-            }
-            AgentKind::Claude => {
-                if raw_stdout.trim().is_empty() {
-                    raw_stderr.trim().to_owned()
-                } else {
-                    raw_stdout.trim().to_owned()
-                }
-            }
+impl ClaudeAgent {
+    pub fn from_config(config: &ChiefConfig, _model_override: Option<String>) -> Self {
+        Self {
+            extra_args: config.agent_extra_args.clone(),
         }
     }
 }
 
-impl CodingAgent for CommandAgent {
-    fn name(&self) -> &str {
-        match self.kind {
-            AgentKind::Codex => "codex",
-            AgentKind::Claude => "claude",
+trait CommandBackedAgent {
+    fn build_command(&self, disallowed_paths: &[String]) -> Vec<String>;
+    fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String;
+}
+
+impl CommandBackedAgent for CodexAgent {
+    fn build_command(&self, disallowed_paths: &[String]) -> Vec<String> {
+        let mut cmd = vec!["codex".to_owned(), "exec".to_owned(), "--json".to_owned()];
+        cmd.extend(self.extra_args.iter().cloned());
+        if let Some(model) = &self.model {
+            cmd.push("-m".to_owned());
+            cmd.push(model.clone());
         }
+        if let Some(reasoning_effort) = &self.model_reasoning_effort {
+            cmd.push("--config".to_owned());
+            cmd.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+        }
+        if !disallowed_paths.is_empty() {
+            for path in disallowed_paths {
+                cmd.push("--config".to_owned());
+                cmd.push(format!("sandbox_disallow_path=\"{path}\""));
+            }
+        }
+        cmd.push("-".to_owned());
+        cmd
+    }
+
+    fn parse_output(&self, raw_stdout: &str, _raw_stderr: &str) -> String {
+        let parsed = parse_codex_json_output(raw_stdout);
+        if parsed.trim().is_empty() {
+            raw_stdout.trim().to_owned()
+        } else {
+            parsed
+        }
+    }
+}
+
+impl CommandBackedAgent for ClaudeAgent {
+    fn build_command(&self, disallowed_paths: &[String]) -> Vec<String> {
+        let mut cmd = vec![
+            "claude".to_owned(),
+            "-p".to_owned(),
+            "-".to_owned(),
+            "--permission-mode".to_owned(),
+            "acceptEdits".to_owned(),
+            "--verbose".to_owned(),
+        ];
+        cmd.extend(self.extra_args.iter().cloned());
+        for path in disallowed_paths {
+            cmd.push("--disallowedTools".to_owned());
+            cmd.push(format!("Edit:{path}"));
+            cmd.push("--disallowedTools".to_owned());
+            cmd.push(format!("Write:{path}"));
+        }
+        cmd
+    }
+
+    fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
+        if raw_stdout.trim().is_empty() {
+            raw_stderr.trim().to_owned()
+        } else {
+            raw_stdout.trim().to_owned()
+        }
+    }
+}
+
+fn run_command_backed_agent(
+    agent: &impl CommandBackedAgent,
+    request: AgentRequest,
+) -> Result<AgentOutput> {
+    let command = agent.build_command(&request.disallowed_paths);
+    if command.is_empty() {
+        return Err(anyhow!("agent command is empty"));
+    }
+
+    let mut process = Command::new(&command[0]);
+    process.args(&command[1..]);
+    process.current_dir(&request.cwd);
+    process.stdin(Stdio::piped());
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("failed to spawn agent command: {}", shell_join(&command)))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(request.prompt.as_bytes())
+            .context("failed to write prompt to agent stdin")?;
+    }
+
+    let (output, wait_state) = wait_with_timeout(
+        child,
+        request.timeout_seconds,
+        request.cancel_signal.as_deref(),
+    )
+    .context("failed while waiting for agent output")?;
+
+    if wait_state == WaitState::Cancelled {
+        return Err(anyhow!(AgentCancelledError));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let merged = agent.parse_output(&stdout, &stderr);
+
+    let mut merged_output = merged;
+    if wait_state == WaitState::TimedOut {
+        merged_output = format!(
+            "agent timed out after {} second(s) and was terminated.\n{}",
+            request.timeout_seconds.unwrap_or_default(),
+            merged_output
+        );
+    } else if request.timeout_seconds == Some(0) {
+        merged_output = format!(
+            "timeout_seconds=0 is invalid, run still executed.\n{}",
+            merged_output
+        );
+    }
+
+    Ok(AgentOutput {
+        exit_code: if wait_state == WaitState::TimedOut {
+            124
+        } else {
+            output.status.code().unwrap_or(1)
+        },
+        command: shell_join(&command),
+        stdout,
+        stderr,
+        merged_output,
+    })
+}
+
+impl CodingAgent for CodexAgent {
+    fn name(&self) -> &str {
+        "codex"
     }
 
     fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
-        let command = self.build_command(&request.disallowed_paths);
-        if command.is_empty() {
-            return Err(anyhow!("agent command is empty"));
-        }
+        run_command_backed_agent(self, request)
+    }
+}
 
-        let mut process = Command::new(&command[0]);
-        process.args(&command[1..]);
-        process.current_dir(&request.cwd);
-        process.stdin(Stdio::piped());
-        process.stdout(Stdio::piped());
-        process.stderr(Stdio::piped());
+impl CodingAgent for ClaudeAgent {
+    fn name(&self) -> &str {
+        "claude"
+    }
 
-        let mut child = process
-            .spawn()
-            .with_context(|| format!("failed to spawn agent command: {}", shell_join(&command)))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(request.prompt.as_bytes())
-                .context("failed to write prompt to agent stdin")?;
-        }
-
-        let (output, wait_state) = wait_with_timeout(
-            child,
-            request.timeout_seconds,
-            request.cancel_signal.as_deref(),
-        )
-        .context("failed while waiting for agent output")?;
-
-        if wait_state == WaitState::Cancelled {
-            return Err(anyhow!(AgentCancelledError));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let merged = self.parse_output(&stdout, &stderr);
-
-        let mut merged_output = merged;
-        if wait_state == WaitState::TimedOut {
-            merged_output = format!(
-                "agent timed out after {} second(s) and was terminated.\n{}",
-                request.timeout_seconds.unwrap_or_default(),
-                merged_output
-            );
-        } else if request.timeout_seconds == Some(0) {
-            merged_output = format!(
-                "timeout_seconds=0 is invalid, run still executed.\n{}",
-                merged_output
-            );
-        }
-
-        Ok(AgentOutput {
-            exit_code: if wait_state == WaitState::TimedOut {
-                124
-            } else {
-                output.status.code().unwrap_or(1)
-            },
-            command: shell_join(&command),
-            stdout,
-            stderr,
-            merged_output,
-        })
+    fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
+        run_command_backed_agent(self, request)
     }
 }
 

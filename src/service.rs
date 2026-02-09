@@ -1,4 +1,6 @@
-use crate::agent::{AgentCancelledError, CodingAgent, CommandAgent, is_agent_cancelled_error};
+use crate::agent::{
+    AgentCancelledError, ClaudeAgent, CodexAgent, CodingAgent, is_agent_cancelled_error,
+};
 use crate::config::ChiefToml;
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoStatus,
@@ -68,10 +70,17 @@ impl ProjectContext {
     }
 
     pub fn build_agent(&self, model_override: Option<String>) -> Arc<dyn CodingAgent> {
-        Arc::new(CommandAgent::from_config(
-            &self.chief_toml.chief,
-            model_override,
-        ))
+        if self.chief_toml.chief.agent.eq_ignore_ascii_case("claude") {
+            Arc::new(ClaudeAgent::from_config(
+                &self.chief_toml.chief,
+                model_override,
+            ))
+        } else {
+            Arc::new(CodexAgent::from_config(
+                &self.chief_toml.chief,
+                model_override,
+            ))
+        }
     }
 
     pub fn pick_next_todo_priority(&self) -> Result<Option<Todo>> {
