@@ -75,13 +75,15 @@ impl ProjectRuntime {
 pub struct Scheduler {
     registry: Arc<RwLock<ProjectRegistry>>,
     states: Arc<Mutex<HashMap<String, ProjectRuntime>>>,
+    max_agents_per_project: usize,
 }
 
 impl Scheduler {
-    pub fn new(registry: ProjectRegistry) -> Self {
+    pub fn new(registry: ProjectRegistry, max_agents_per_project: usize) -> Self {
         Self {
             registry: Arc::new(RwLock::new(registry)),
             states: Arc::new(Mutex::new(HashMap::new())),
+            max_agents_per_project: max_agents_per_project.max(1),
         }
     }
 
@@ -131,9 +133,8 @@ impl Scheduler {
         flow_kind: FlowKind,
         model_override: Option<String>,
     ) -> Result<()> {
-        let context = self.get_project_context(&project_name).await?;
-        let max_agents = context.chief_toml.backend.max_agents_per_project.max(1);
-        let desired_agents = agents.clamp(1, max_agents);
+        self.get_project_context(&project_name).await?;
+        let desired_agents = agents.clamp(1, self.max_agents_per_project);
 
         let should_spawn = {
             let mut states = self.states.lock().await;

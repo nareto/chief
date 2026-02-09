@@ -27,10 +27,27 @@ pub struct BackendCli {
     pub frontend_dir: PathBuf,
     #[arg(long = "allow-origin")]
     pub allow_origins: Vec<String>,
+    #[arg(long, default_value_t = 1)]
+    pub default_agents_per_project: usize,
+    #[arg(long, default_value_t = 8)]
+    pub max_agents_per_project: usize,
     #[arg(long, default_value_t = false)]
     pub enable_terminal: bool,
     #[arg(long, env = "CHIEF_API_TOKEN")]
     pub api_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendRuntimeSettings {
+    pub host: String,
+    pub port: u16,
+    pub projects_dir: String,
+    pub projects: Vec<String>,
+    pub frontend_dir: String,
+    pub allow_origins: Vec<String>,
+    pub enable_terminal: bool,
+    pub default_agents_per_project: usize,
+    pub max_agents_per_project: usize,
 }
 
 #[derive(Clone)]
@@ -38,6 +55,7 @@ pub struct AppState {
     pub service: ApiService,
     pub terminal_enabled: bool,
     pub api_token: Option<String>,
+    pub backend_settings: BackendRuntimeSettings,
 }
 
 pub async fn run() -> Result<()> {
@@ -57,11 +75,34 @@ pub async fn run() -> Result<()> {
             )
         })?;
 
-    let scheduler = Scheduler::new(registry);
+    let default_agents_per_project = cli.default_agents_per_project.max(1);
+    let max_agents_per_project = cli.max_agents_per_project.max(1);
+    let effective_allow_origins = if cli.allow_origins.is_empty() {
+        vec!["http://localhost:3000".to_owned()]
+    } else {
+        cli.allow_origins.clone()
+    };
+
+    let scheduler = Scheduler::new(registry, max_agents_per_project);
     let state = Arc::new(AppState {
-        service: ApiService::new(scheduler),
+        service: ApiService::new(scheduler, default_agents_per_project),
         terminal_enabled: cli.enable_terminal,
-        api_token: cli.api_token,
+        api_token: cli.api_token.clone(),
+        backend_settings: BackendRuntimeSettings {
+            host: cli.host.clone(),
+            port: cli.port,
+            projects_dir: cli.projects_dir.display().to_string(),
+            projects: cli
+                .project
+                .iter()
+                .map(|project| project.display().to_string())
+                .collect(),
+            frontend_dir: cli.frontend_dir.display().to_string(),
+            allow_origins: effective_allow_origins,
+            enable_terminal: cli.enable_terminal,
+            default_agents_per_project,
+            max_agents_per_project,
+        },
     });
 
     let app = build_router(state).layer(build_cors_layer(&cli.allow_origins)?);

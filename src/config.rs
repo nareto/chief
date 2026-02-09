@@ -10,8 +10,6 @@ pub struct ChiefToml {
     #[serde(default)]
     pub chief: ChiefConfig,
     #[serde(default)]
-    pub backend: BackendConfig,
-    #[serde(default)]
     pub suites: Vec<TestSuiteConfig>,
 }
 
@@ -85,35 +83,6 @@ impl Default for ChiefConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendConfig {
-    #[serde(default = "default_backend_host")]
-    pub host: String,
-    #[serde(default = "default_backend_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub projects_parent_dir: Option<String>,
-    #[serde(default = "default_frontend_dir")]
-    pub frontend_dir: String,
-    #[serde(default = "default_agents_per_project")]
-    pub default_agents_per_project: usize,
-    #[serde(default = "default_max_agents_per_project")]
-    pub max_agents_per_project: usize,
-}
-
-impl Default for BackendConfig {
-    fn default() -> Self {
-        Self {
-            host: default_backend_host(),
-            port: default_backend_port(),
-            projects_parent_dir: None,
-            frontend_dir: default_frontend_dir(),
-            default_agents_per_project: default_agents_per_project(),
-            max_agents_per_project: default_max_agents_per_project(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestSuiteConfig {
     pub name: String,
     pub language: String,
@@ -172,26 +141,6 @@ fn default_agent_log_max_output_lines() -> usize {
 
 fn default_agent_log_max_output_chars() -> usize {
     1_500
-}
-
-fn default_backend_host() -> String {
-    "0.0.0.0".to_owned()
-}
-
-fn default_backend_port() -> u16 {
-    8000
-}
-
-fn default_frontend_dir() -> String {
-    "frontend".to_owned()
-}
-
-fn default_agents_per_project() -> usize {
-    1
-}
-
-fn default_max_agents_per_project() -> usize {
-    8
 }
 
 fn default_test_root() -> String {

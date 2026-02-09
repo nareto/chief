@@ -20,6 +20,22 @@ pub async fn list_projects(
     Ok(Json(state.service.list_projects().await))
 }
 
+pub async fn get_backend_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::api::types::BackendSettingsResponse>, ApiError> {
+    Ok(Json(crate::api::types::BackendSettingsResponse {
+        host: state.backend_settings.host.clone(),
+        port: state.backend_settings.port,
+        projects_dir: state.backend_settings.projects_dir.clone(),
+        projects: state.backend_settings.projects.clone(),
+        frontend_dir: state.backend_settings.frontend_dir.clone(),
+        allow_origins: state.backend_settings.allow_origins.clone(),
+        enable_terminal: state.backend_settings.enable_terminal,
+        default_agents_per_project: state.backend_settings.default_agents_per_project,
+        max_agents_per_project: state.backend_settings.max_agents_per_project,
+    }))
+}
+
 pub async fn refresh_projects(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

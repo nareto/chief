@@ -9,15 +9,6 @@ agent_log_max_output_lines = 10
 agent_log_max_output_chars = 1500
 use_agent_log_truncation_for_stdout_logs = false
 
-[backend]
-host = "0.0.0.0"
-port = 8000
-# projects_parent_dir can be set for backend default project discovery.
-# projects_parent_dir = "/workspace/projects"
-frontend_dir = "frontend"
-default_agents_per_project = 1
-max_agents_per_project = 8
-
 # -----------------------------
 # Rust project suite
 # -----------------------------

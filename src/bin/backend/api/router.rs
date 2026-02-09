@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut app = Router::new()
+        .route("/api/backend/settings", get(handlers::get_backend_settings))
         .route("/api/projects", get(handlers::list_projects))
         .route("/api/projects/refresh", post(handlers::refresh_projects))
         .route(

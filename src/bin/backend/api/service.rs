@@ -24,11 +24,15 @@ use std::sync::atomic::AtomicBool;
 #[derive(Clone)]
 pub struct ApiService {
     scheduler: Scheduler,
+    default_agents_per_project: usize,
 }
 
 impl ApiService {
-    pub fn new(scheduler: Scheduler) -> Self {
-        Self { scheduler }
+    pub fn new(scheduler: Scheduler, default_agents_per_project: usize) -> Self {
+        Self {
+            scheduler,
+            default_agents_per_project: default_agents_per_project.max(1),
+        }
     }
 
     pub async fn list_projects(&self) -> ProjectsResponse {
@@ -51,10 +55,9 @@ impl ApiService {
         project: String,
         payload: StartProjectRequest,
     ) -> Result<MessageResponse, ApiError> {
-        let context = self.project_context(&project).await?;
         let agents = payload
             .agents
-            .unwrap_or(context.chief_toml.backend.default_agents_per_project)
+            .unwrap_or(self.default_agents_per_project)
             .max(1);
 
         let flow_kind = payload

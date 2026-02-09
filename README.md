@@ -57,7 +57,7 @@ There is no centralized database.
 Core library modules:
 
 - `src/domain.rs`: strongly-typed core models (`Todo`, `EventRecord`, `JobRecord`, `Phase`, `TodoStatus`, etc).
-- `src/config.rs`: `chief.toml` parsing for `[chief]`, `[backend]`, and `[[suites]]`.
+- `src/config.rs`: `chief.toml` parsing for `[chief]` and `[[suites]]`.
 - `src/storage.rs`: per-project SQLite + `todos.json` synchronization.
 - `src/prompt.rs`: prompt loading/rendering from `prompts/*.md` using Jinja syntax (`minijinja`).
 - `src/agent.rs`: coding-agent abstraction and concrete CLI agent adapters.
@@ -268,10 +268,6 @@ model = "gpt-5"
 max_retries = 10
 agent_timeout_seconds = 2700
 
-[backend]
-default_agents_per_project = 1
-max_agents_per_project = 8
-
 [[suites]]
 name = "backend"
 language = "Rust"
@@ -284,6 +280,7 @@ post_green_command = "cargo test"
 ```
 
 See `chief.toml.example` for more patterns.
+Backend runtime settings are configured on the `chief_backend` command line (see `just backend`).
 
 ## Current status
 

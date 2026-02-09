@@ -79,6 +79,19 @@ pub struct ProjectsResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BackendSettingsResponse {
+    pub host: String,
+    pub port: u16,
+    pub projects_dir: String,
+    pub projects: Vec<String>,
+    pub frontend_dir: String,
+    pub allow_origins: Vec<String>,
+    pub enable_terminal: bool,
+    pub default_agents_per_project: usize,
+    pub max_agents_per_project: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct TodoResponse {
     pub todo: Todo,
 }
