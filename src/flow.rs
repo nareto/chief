@@ -10,11 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -947,32 +949,55 @@ fn wait_for_command_with_cancel(
     child: &mut std::process::Child,
     cancel_signal: &Arc<AtomicBool>,
 ) -> Result<std::process::Output> {
-    loop {
+    let stdout_reader = spawn_pipe_reader(child.stdout.take());
+    let stderr_reader = spawn_pipe_reader(child.stderr.take());
+    let mut cancelled = false;
+
+    let status = loop {
         if let Some(status) = child.try_wait()? {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            if let Some(mut out) = child.stdout.take() {
-                use std::io::Read;
-                out.read_to_end(&mut stdout)?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                use std::io::Read;
-                err.read_to_end(&mut stderr)?;
-            }
-            return Ok(std::process::Output {
-                status,
-                stdout,
-                stderr,
-            });
+            break status;
         }
 
         if cancel_signal.load(Ordering::SeqCst) {
+            cancelled = true;
             let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!(AgentCancelledError));
+            break child.wait()?;
         }
 
         std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let stdout = join_pipe_reader(stdout_reader, "stdout")?;
+    let stderr = join_pipe_reader(stderr_reader, "stderr")?;
+
+    if cancelled {
+        return Err(anyhow!(AgentCancelledError));
+    }
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn spawn_pipe_reader<T>(pipe: Option<T>) -> JoinHandle<Result<Vec<u8>>>
+where
+    T: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut data = Vec::new();
+        if let Some(mut stream) = pipe {
+            stream.read_to_end(&mut data)?;
+        }
+        Ok(data)
+    })
+}
+
+fn join_pipe_reader(handle: JoinHandle<Result<Vec<u8>>>, stream_name: &str) -> Result<Vec<u8>> {
+    match handle.join() {
+        Ok(result) => result.with_context(|| format!("failed reading {stream_name} stream")),
+        Err(_) => Err(anyhow!("{stream_name} reader thread panicked")),
     }
 }
 

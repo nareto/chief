@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct ApiService {
@@ -451,6 +452,15 @@ impl ApiService {
             })?;
         let cwd = suite_command_cwd(&context.project_dir, &suite);
         let cwd_display = cwd.display().to_string();
+        let kind_label = payload.kind.as_str();
+        info!(
+            project,
+            suite = %suite.name,
+            kind = %kind_label,
+            cwd = %cwd_display,
+            command = %command,
+            "running suite check command"
+        );
         let env = suite.env.clone();
         let cancel_signal = Arc::new(AtomicBool::new(false));
 
@@ -458,8 +468,40 @@ impl ApiService {
             execute_suite_command(&command, &cwd, &env, &cancel_signal)
         })
         .await
-        .map_err(|err| ApiError::internal(anyhow!("suite command task failed: {err}")))?
-        .map_err(ApiError::internal)?;
+        .map_err(|err| {
+            error!(
+                project,
+                suite = %suite.name,
+                kind = %kind_label,
+                error = %err,
+                "suite command task join failed"
+            );
+            ApiError::internal(anyhow!("suite command task failed: {err}"))
+        })?;
+
+        let output = match output {
+            Ok(result) => result,
+            Err(err) => {
+                error!(
+                    project,
+                    suite = %suite.name,
+                    kind = %kind_label,
+                    error = %err,
+                    "suite command execution failed"
+                );
+                return Err(ApiError::internal(err));
+            }
+        };
+
+        info!(
+            project,
+            suite = %suite.name,
+            kind = %kind_label,
+            exit_code = output.exit_code,
+            stdout_len = output.stdout.len(),
+            stderr_len = output.stderr.len(),
+            "suite check command finished"
+        );
 
         Ok(RunSuiteCheckResponse {
             suite: suite.name,
