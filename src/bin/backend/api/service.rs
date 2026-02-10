@@ -291,6 +291,9 @@ impl ApiService {
             .git
             .changed_files(&context.project_dir)
             .map_err(ApiError::internal)?;
+        let chief_db_size_bytes = fs::metadata(&context.store.db_path)
+            .map(|metadata| metadata.len())
+            .ok();
 
         let active_job = jobs
             .iter()
@@ -344,6 +347,7 @@ impl ApiService {
             last_activity: recent_events
                 .first()
                 .map(|event| event.timestamp.to_rfc3339()),
+            chief_db_size_bytes,
             dirty_files,
             todos: TodoProgress {
                 available: available_todos,
