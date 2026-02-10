@@ -1,7 +1,7 @@
 use crate::api::handlers;
 use crate::app::AppState;
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use std::sync::Arc;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -19,8 +19,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::get_todos).post(handlers::add_todo),
         )
         .route(
+            "/api/projects/{project}/todos/done",
+            delete(handlers::delete_done_todos),
+        )
+        .route(
             "/api/projects/{project}/todos/{todo_id}",
-            put(handlers::update_todo),
+            put(handlers::update_todo).delete(handlers::delete_todo),
         )
         .route("/api/projects/{project}/jobs", get(handlers::get_jobs))
         .route("/api/projects/{project}/logs", get(handlers::get_logs))

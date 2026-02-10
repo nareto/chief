@@ -96,6 +96,24 @@ pub async fn update_todo(
     ))
 }
 
+pub async fn delete_todo(
+    Path((project, todo_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(state.service.delete_todo(&project, &todo_id).await?))
+}
+
+pub async fn delete_done_todos(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(state.service.delete_done_todos(&project).await?))
+}
+
 pub async fn get_jobs(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,

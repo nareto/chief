@@ -207,6 +207,39 @@ impl ApiService {
         Ok(TodoResponse { todo: updated })
     }
 
+    pub async fn delete_todo(
+        &self,
+        project: &str,
+        todo_id: &str,
+    ) -> Result<MessageResponse, ApiError> {
+        let context = self.project_context(project).await?;
+
+        context.store.delete_todo(todo_id).map_err(|err| {
+            let message = err.to_string();
+            if message.contains("not found") {
+                ApiError::not_found(message)
+            } else {
+                ApiError::internal(err)
+            }
+        })?;
+
+        Ok(MessageResponse {
+            message: format!("deleted todo '{todo_id}'"),
+        })
+    }
+
+    pub async fn delete_done_todos(&self, project: &str) -> Result<MessageResponse, ApiError> {
+        let context = self.project_context(project).await?;
+        let deleted = context
+            .store
+            .delete_done_todos()
+            .map_err(ApiError::internal)?;
+
+        Ok(MessageResponse {
+            message: format!("deleted {deleted} done todo(s)"),
+        })
+    }
+
     pub async fn get_jobs(&self, project: &str) -> Result<JobsResponse, ApiError> {
         let context = self.project_context(project).await?;
         let jobs = context.store.list_jobs(200).map_err(ApiError::internal)?;

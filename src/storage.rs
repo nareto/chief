@@ -255,6 +255,33 @@ impl ProjectStore {
         Ok(next)
     }
 
+    pub fn delete_todo(&self, todo_id: &str) -> Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        let changed = tx.execute("DELETE FROM todos WHERE id = ?1", params![todo_id])?;
+        if changed == 0 {
+            return Err(anyhow!("todo '{}' not found", todo_id));
+        }
+
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_done_todos(&self) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        let deleted = tx.execute(
+            "DELETE FROM todos WHERE status = ?1",
+            params![TodoStatus::Done.as_str()],
+        )?;
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     pub fn clean_completed_todos_with_commit(&self) -> Result<usize> {
         let todos = self.list_todos()?;
         let before = todos.len();
@@ -937,6 +964,115 @@ mod tests {
             err.to_string().contains("not found"),
             "unexpected error message: {}",
             err
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn delete_todo_removes_from_sqlite_and_todos_file() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: String::new(),
+            todo: "delete me".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        }
+        .normalize();
+        let todo = store.append_todo(todo).expect("append_todo should succeed");
+
+        store
+            .delete_todo(&todo.id)
+            .expect("delete_todo should succeed");
+
+        let db_todo = store
+            .list_todos()
+            .expect("list_todos should succeed")
+            .into_iter()
+            .find(|item| item.id == todo.id);
+        assert!(db_todo.is_none(), "todo should be removed from sqlite");
+
+        let file_todo = store
+            .load_todo_file()
+            .expect("load_todo_file should succeed")
+            .todos
+            .into_iter()
+            .find(|item| item.id == todo.id);
+        assert!(
+            file_todo.is_none(),
+            "todo should be removed from todos.yaml"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn delete_done_todos_removes_only_done_items() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let pending = store
+            .append_todo(
+                Todo {
+                    id: "pending-item".to_owned(),
+                    todo: "keep pending".to_owned(),
+                    expectations: String::new(),
+                    priority: 1,
+                    test_suites: Vec::new(),
+                    status: TodoStatus::Pending,
+                    done_at_commit: None,
+                }
+                .normalize(),
+            )
+            .expect("append pending should succeed");
+        let done = store
+            .append_todo(
+                Todo {
+                    id: "done-item".to_owned(),
+                    todo: "remove done".to_owned(),
+                    expectations: String::new(),
+                    priority: 2,
+                    test_suites: Vec::new(),
+                    status: TodoStatus::Done,
+                    done_at_commit: None,
+                }
+                .normalize(),
+            )
+            .expect("append done should succeed");
+
+        let deleted = store
+            .delete_done_todos()
+            .expect("delete_done_todos should succeed");
+        assert_eq!(deleted, 1, "exactly one done todo should be removed");
+
+        let remaining = store.list_todos().expect("list_todos should succeed");
+        assert!(
+            remaining.iter().any(|item| item.id == pending.id),
+            "pending todo should remain",
+        );
+        assert!(
+            remaining.iter().all(|item| item.id != done.id),
+            "done todo should be deleted",
+        );
+
+        let file_todos = store
+            .load_todo_file()
+            .expect("load_todo_file should succeed")
+            .todos;
+        assert!(
+            file_todos.iter().any(|item| item.id == pending.id),
+            "pending todo should remain in file",
+        );
+        assert!(
+            file_todos.iter().all(|item| item.id != done.id),
+            "done todo should be removed from file",
         );
 
         let _ = fs::remove_dir_all(&project_dir);
