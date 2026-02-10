@@ -1047,6 +1047,7 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
         "todo_selection" => Ok(Phase::TodoSelection),
         "red" => Ok(Phase::Red),
         "green" => Ok(Phase::Green),
+        "single_prompt" => Ok(Phase::SinglePrompt),
         "post_green" => Ok(Phase::PostGreen),
         "exit" => Ok(Phase::Exit),
         other => Err(ApiError::unprocessable(format!(

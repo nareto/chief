@@ -81,6 +81,14 @@ struct AgentRunWithGitChanges {
     had_git_changes: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SinglePromptFailureContext {
+    failed_lint: bool,
+    failed_test: bool,
+    lint_tail_output: String,
+    test_tail_output: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SuiteCommandKind {
@@ -280,6 +288,60 @@ impl<'a> FlowExecution<'a> {
         Ok(lines.join("\n\n"))
     }
 
+    fn latest_single_prompt_failure_context(&self) -> Result<SinglePromptFailureContext> {
+        let events = self.store.query_events(EventQuery {
+            limit: 200,
+            event_type: None,
+            phase: Some(Phase::SinglePrompt),
+            level: None,
+            contains_text: None,
+        })?;
+
+        let mut lint_failure: Option<EventRecord> = None;
+        let mut test_failure: Option<EventRecord> = None;
+
+        for event in events {
+            if event.run_id != self.run_id {
+                continue;
+            }
+            if event.todo_id.as_deref() != Some(&self.todo.id) {
+                continue;
+            }
+            if event_exit_code(&event).unwrap_or(0) == 0 {
+                continue;
+            }
+
+            match event.event_type {
+                EventType::Lint if lint_failure.is_none() => lint_failure = Some(event),
+                EventType::TestRun if test_failure.is_none() => test_failure = Some(event),
+                _ => {}
+            }
+
+            if lint_failure.is_some() && test_failure.is_some() {
+                break;
+            }
+        }
+
+        let max_output_lines = self.chief_config.agent_log_max_output_lines;
+        let lint_tail_output = lint_failure
+            .as_ref()
+            .and_then(|event| event.payload.get("output").and_then(Value::as_str))
+            .map(|output| tail_output_lines(output, max_output_lines))
+            .unwrap_or_default();
+        let test_tail_output = test_failure
+            .as_ref()
+            .and_then(|event| event.payload.get("output").and_then(Value::as_str))
+            .map(|output| tail_output_lines(output, max_output_lines))
+            .unwrap_or_default();
+
+        Ok(SinglePromptFailureContext {
+            failed_lint: lint_failure.is_some(),
+            failed_test: test_failure.is_some(),
+            lint_tail_output,
+            test_tail_output,
+        })
+    }
+
     pub fn run_suite_command(
         &self,
         command: &str,
@@ -446,6 +508,27 @@ impl<'a> FlowExecution<'a> {
         }
         Ok(())
     }
+}
+
+fn event_exit_code(event: &EventRecord) -> Option<i64> {
+    let value = event.payload.get("exit_code")?;
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn tail_output_lines(output: &str, max_lines: usize) -> String {
+    output
+        .lines()
+        .rev()
+        .take(max_lines.max(1))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub trait PhaseStrategy {
@@ -814,7 +897,7 @@ impl TodoFlow for SinglePromptFlow {
 
         execution.log_event(
             "info",
-            Some(Phase::Green),
+            Some(Phase::SinglePrompt),
             EventType::PhaseChange,
             "SINGLE_PROMPT loop done; preparing commit",
             BTreeMap::new(),
@@ -922,34 +1005,28 @@ impl SinglePromptPhaseStrategy {
 
 impl PhaseStrategy for SinglePromptPhaseStrategy {
     fn phase(&self) -> Phase {
-        Phase::Green
+        Phase::SinglePrompt
     }
 
     fn attempt_fix(&mut self, execution: &mut FlowExecution<'_>) -> Result<AgentOutput> {
-        let previous_steps_log = execution.previous_steps_log(
-            Phase::Green,
-            &[
-                EventType::TestRun,
-                EventType::PhaseFailure,
-                EventType::PostGreenOutput,
-                EventType::AgentResponse,
-                EventType::Diff,
-                EventType::Lint,
-            ],
-            12,
-        )?;
+        let failure_context = execution.latest_single_prompt_failure_context()?;
 
         let prompt = execution.prompts.render_json(
             "singleprompt.md",
             &json!({
                 "todo": execution.todo,
                 "suites": self.candidate_suites,
-                "previous_steps_log": previous_steps_log,
                 "iteration": self.attempts + 1,
+                "run_id": execution.run_id,
+                "first_attempt": self.attempts == 0,
+                "failed_lint": failure_context.failed_lint,
+                "failed_test": failure_context.failed_test,
+                "lint_tail_output": failure_context.lint_tail_output,
+                "test_tail_output": failure_context.test_tail_output,
             }),
         )?;
 
-        let run = execution.run_agent_with_git_changes(Phase::Green, prompt, Vec::new())?;
+        let run = execution.run_agent_with_git_changes(Phase::SinglePrompt, prompt, Vec::new())?;
         let output = run.output.clone();
         self.last_agent_run = Some(run);
         self.attempts += 1;
@@ -985,13 +1062,13 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
         if suites_for_checks.is_empty() {
             execution.log_event(
                 "info",
-                Some(Phase::Green),
+                Some(Phase::SinglePrompt),
                 EventType::PhaseChange,
                 "single_prompt: no touched/involved suites; skipping lint+test commands",
                 BTreeMap::new(),
             )?;
         } else {
-            let all_pass = run_test_and_lint(execution, &suites_for_checks, Phase::Green)?;
+            let all_pass = run_test_and_lint(execution, &suites_for_checks, Phase::SinglePrompt)?;
             if !all_pass {
                 return Ok(LoopDecision::Retry);
             }
@@ -1000,7 +1077,7 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
         if run.output.exit_code != 0 {
             execution.log_event(
                 "warning",
-                Some(Phase::Green),
+                Some(Phase::SinglePrompt),
                 EventType::PhaseFailure,
                 "single_prompt agent step failed",
                 payload_from_json(json!({
@@ -1014,7 +1091,7 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
         if run.had_git_changes {
             execution.log_event(
                 "warning",
-                Some(Phase::Green),
+                Some(Phase::SinglePrompt),
                 EventType::PhaseFailure,
                 "single_prompt iteration changed files; waiting for two consecutive no-change iterations",
                 payload_from_json(json!({ "touched_files": run.touched_files })),
@@ -1024,7 +1101,7 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
 
         execution.log_event(
             "info",
-            Some(Phase::Green),
+            Some(Phase::SinglePrompt),
             EventType::PhaseChange,
             "single_prompt iteration had no git file changes",
             BTreeMap::new(),

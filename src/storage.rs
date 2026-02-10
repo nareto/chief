@@ -811,6 +811,7 @@ fn parse_phase(value: &str) -> Phase {
         "todo_selection" => Phase::TodoSelection,
         "red" => Phase::Red,
         "green" => Phase::Green,
+        "single_prompt" => Phase::SinglePrompt,
         "post_green" => Phase::PostGreen,
         "exit" => Phase::Exit,
         _ => Phase::Start,

@@ -10,6 +10,7 @@ pub enum Phase {
     TodoSelection,
     Red,
     Green,
+    SinglePrompt,
     PostGreen,
     Exit,
 }
@@ -21,6 +22,7 @@ impl Phase {
             Self::TodoSelection => "todo_selection",
             Self::Red => "red",
             Self::Green => "green",
+            Self::SinglePrompt => "single_prompt",
             Self::PostGreen => "post_green",
             Self::Exit => "exit",
         }
