@@ -46,8 +46,8 @@ Chief is a Rust TDD orchestration system with:
 
 The system keeps **per-project** state local:
 
-- `chief.toml`
-- `todos.json`
+- `chief.yaml`
+- `todos.yaml`
 - `chief.db` (SQLite)
 
 There is no centralized database.
@@ -57,8 +57,8 @@ There is no centralized database.
 Core library modules:
 
 - `src/domain.rs`: strongly-typed core models (`Todo`, `EventRecord`, `JobRecord`, `Phase`, `TodoStatus`, etc).
-- `src/config.rs`: `chief.toml` parsing for `[chief]` and `[[suites]]`.
-- `src/storage.rs`: per-project SQLite + `todos.json` synchronization.
+- `src/config.rs`: `chief.yaml` parsing for `chief` and `suites`.
+- `src/storage.rs`: per-project SQLite + `todos.yaml` synchronization.
 - `src/prompt.rs`: prompt loading/rendering from `prompts/*.md` using Jinja syntax (`minijinja`).
 - `src/agent.rs`: coding-agent abstraction and concrete CLI agent adapters.
 - `src/git.rs`: git/worktree operations.
@@ -76,7 +76,7 @@ Core library modules:
 
 Included flows:
 
-- `single_prompt` (default): convergence loop with per-iteration checks.
+- `single_prompt` (default): convergence loop with per-iteration checks; always runs all configured suites.
 - `tdd`: legacy RED -> GREEN -> POST_GREEN flow.
 
 Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
@@ -259,28 +259,28 @@ Services:
 
 `frontend` rewrites `/api/*` to backend. Terminal websocket defaults to `ws://localhost:8000` (configurable with `NEXT_PUBLIC_CHIEF_WS_BASE`).
 
-## Config (`chief.toml`) quick example
+## Config (`chief.yaml`) quick example
 
-```toml
-[chief]
-flow = "single_prompt"
-agent = "codex"
-model = "gpt-5"
-max_retries = 10
-agent_timeout_seconds = 2700
+```yaml
+chief:
+  flow: single_prompt
+  agent: codex
+  model: gpt-5
+  max_retries: 10
+  agent_timeout_seconds: 2700
 
-[[suites]]
-name = "backend"
-language = "Rust"
-framework = "cargo test"
-test_root = "."
-test_command = "cargo test"
-target_type = "project"
-lint_command = "cargo clippy"
-post_green_command = "cargo test"
+suites:
+  - name: backend
+    language: Rust
+    framework: cargo test
+    test_root: .
+    test_command: cargo test
+    target_type: project
+    lint_command: cargo clippy
+    post_green_command: cargo test
 ```
 
-See `chief.example.toml` for more patterns.
+See `chief.example.yaml` for more patterns.
 Backend runtime settings are configured on the `chief_backend` command line (see `just backend`).
 
 ## Current status

@@ -885,11 +885,7 @@ impl TodoFlow for SinglePromptFlow {
     }
 
     fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
-        let candidate_suites = if execution.todo.test_suites.is_empty() {
-            execution.all_suites.to_vec()
-        } else {
-            execution.selected_suites()
-        };
+        let candidate_suites = execution.all_suites.to_vec();
 
         let mut strategy = SinglePromptPhaseStrategy::new(candidate_suites);
         self.loop_policy.run(&mut strategy, execution)?;
@@ -1566,7 +1562,7 @@ fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowExecution, FlowKind, build_flow};
+    use super::{FlowExecution, FlowKind, TestSuiteConfig, build_flow};
     use crate::agent::{AgentRequest, CodingAgent};
     use crate::config::ChiefConfig;
     use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
@@ -1579,8 +1575,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
     #[test]
@@ -1639,6 +1635,85 @@ mod tests {
 
         fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
             Err(anyhow!("not used in this test"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct SuccessfulAgent;
+
+    impl CodingAgent for SuccessfulAgent {
+        fn name(&self) -> &str {
+            "success"
+        }
+
+        fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
+            Ok(AgentOutput {
+                exit_code: 0,
+                command: "success-agent".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                merged_output: String::new(),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingPromptStore {
+        rendered_suite_names: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl RecordingPromptStore {
+        fn rendered_suite_names(&self) -> Vec<Vec<String>> {
+            self.rendered_suite_names
+                .lock()
+                .expect("rendered suites mutex poisoned")
+                .clone()
+        }
+    }
+
+    impl PromptStore for RecordingPromptStore {
+        fn render_json(&self, _template_name: &str, data: &Value) -> Result<String> {
+            let suite_names = data
+                .get("suites")
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            self.rendered_suite_names
+                .lock()
+                .expect("rendered suites mutex poisoned")
+                .push(suite_names);
+            Ok("single prompt request".to_owned())
+        }
+
+        fn exists(&self, _template_name: &str) -> bool {
+            true
+        }
+    }
+
+    fn suite_named(name: &str) -> TestSuiteConfig {
+        TestSuiteConfig {
+            name: name.to_owned(),
+            language: "Rust".to_owned(),
+            framework: "cargo test".to_owned(),
+            test_root: ".".to_owned(),
+            test_command: "cargo test".to_owned(),
+            target_type: crate::domain::TargetType::Project,
+            default_target: None,
+            file_patterns: Vec::new(),
+            disallow_write_globs: Vec::new(),
+            test_init: None,
+            test_setup: None,
+            post_green_command: None,
+            lint_command: None,
+            lint_fix_command: None,
+            env: BTreeMap::new(),
+            strip_root_from_target: true,
         }
     }
 
@@ -1871,6 +1946,65 @@ mod tests {
         assert!(
             !log.contains("line-a"),
             "old output lines beyond tail limit should be omitted, got: {log}"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_uses_all_suites_in_prompt_even_when_todo_sets_subset() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "run single prompt with all suites".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: vec!["backend".to_owned()],
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = RecordingPromptStore::default();
+        let agent = SuccessfulAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+        let suites = vec![suite_named("backend"), suite_named("frontend")];
+
+        let mut execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &suites,
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        let flow = build_flow(FlowKind::SinglePrompt);
+        let outcome = flow
+            .run_todo(&mut execution)
+            .expect("single_prompt flow should complete");
+        assert_eq!(outcome.todo_id, "todo-1");
+
+        let rendered = prompts.rendered_suite_names();
+        assert!(
+            !rendered.is_empty(),
+            "single_prompt should render at least one prompt"
+        );
+        assert_eq!(
+            rendered[0],
+            vec!["backend".to_owned(), "frontend".to_owned()],
+            "single_prompt prompt should include all configured suites, not todo subset"
         );
 
         let _ = fs::remove_dir_all(&project_dir);

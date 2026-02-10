@@ -6,22 +6,22 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ChiefToml {
+pub struct ChiefYaml {
     #[serde(default)]
     pub chief: ChiefConfig,
     #[serde(default)]
     pub suites: Vec<TestSuiteConfig>,
 }
 
-impl ChiefToml {
+impl ChiefYaml {
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         if content.trim().is_empty() {
             return Ok(Self::default());
         }
-        let cfg: Self = toml::from_str(&content)
-            .with_context(|| format!("failed to parse TOML {}", path.display()))?;
+        let cfg: Self = serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse YAML {}", path.display()))?;
         Ok(cfg)
     }
 

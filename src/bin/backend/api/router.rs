@@ -39,8 +39,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::get_file_diff),
         )
         .route(
-            "/api/projects/{project}/chief_toml",
-            get(handlers::get_chief_toml).put(handlers::update_chief_toml),
+            "/api/projects/{project}/chief_yaml",
+            get(handlers::get_chief_yaml).put(handlers::update_chief_yaml),
         )
         .route(
             "/api/projects/{project}/suite_checks",

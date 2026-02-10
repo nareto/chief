@@ -1,0 +1,66 @@
+chief:
+  flow: single_prompt # set to tdd to use the legacy red/green/post-green workflow
+  agent: codex
+  # model: gpt-5
+  # model_reasoning_effort: high
+  agent_extra_args: []
+  max_retries: 10
+  agent_timeout_seconds: 2700
+  agent_log_max_output_lines: 10
+  agent_log_max_output_chars: 1500
+  use_agent_log_truncation_for_stdout_logs: false
+
+suites:
+  # -----------------------------
+  # Rust project suite
+  # -----------------------------
+  - name: backend
+    language: Rust
+    framework: cargo test
+    test_root: .
+    test_command: cargo test
+    target_type: project
+    default_target: .
+    file_patterns: []
+    lint_command: cargo clippy
+    # lint_fix_command: cargo fmt
+    post_green_command: cargo test
+    env: {}
+    strip_root_from_target: true
+
+# -----------------------------
+# Python project suite
+# -----------------------------
+# suites:
+#   - name: backend
+#     language: Python
+#     framework: pytest
+#     test_root: .
+#     test_command: pytest {target} -v
+#     target_type: file
+#     default_target: .
+#     file_patterns: [test_*.py, "*_test.py"]
+#     lint_command: ruff check {target}
+#     lint_fix_command: ruff check --fix {target}
+#     post_green_command: pytest -q
+#     env: {}
+#     strip_root_from_target: true
+
+# -----------------------------
+# TypeScript project suite
+# -----------------------------
+# suites:
+#   - name: frontend
+#     language: TypeScript
+#     framework: Vitest
+#     test_root: frontend
+#     test_command: npm run test -- {target}
+#     target_type: file
+#     default_target: src
+#     file_patterns: ["*.test.ts", "*.test.tsx"]
+#     lint_command: npm run lint
+#     lint_fix_command: npm run lint -- --fix
+#     post_green_command: npm run build
+#     env:
+#       NODE_ENV: test
+#     strip_root_from_target: true

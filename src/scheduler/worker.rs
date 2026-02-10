@@ -144,7 +144,7 @@ pub(super) fn run_worker(
     }
 
     let todo_id = todo.id.clone();
-    let max_retries = context.chief_toml.chief.max_retries.max(1);
+    let max_retries = context.chief_yaml.chief.max_retries.max(1);
     let outcome = engine.run_single_todo_with_retries(
         &run_id,
         &job.id,

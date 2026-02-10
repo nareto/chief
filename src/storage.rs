@@ -66,7 +66,7 @@ impl ProjectStore {
         let project_dir = project_dir.as_ref().to_path_buf();
         Self {
             db_path: project_dir.join("chief.db"),
-            todos_path: project_dir.join("todos.json"),
+            todos_path: project_dir.join("todos.yaml"),
             project_dir,
         }
     }
@@ -77,14 +77,14 @@ impl ProjectStore {
                 .with_context(|| format!("failed to create {}", self.project_dir.display()))?;
         }
         if !self.todos_path.exists() {
-            let initial = serde_json::to_string_pretty(&TodoFile::default())?;
+            let initial = serde_yaml::to_string(&TodoFile::default())?;
             fs::write(&self.todos_path, format!("{initial}\n"))
                 .with_context(|| format!("failed to initialize {}", self.todos_path.display()))?;
         }
         Ok(())
     }
 
-    pub fn reset_db_from_todos_json(&self) -> Result<()> {
+    pub fn reset_db_from_todos_file(&self) -> Result<()> {
         self.reset_db_file()?;
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open {} for reset", self.db_path.display()))?;
@@ -121,8 +121,8 @@ impl ProjectStore {
         if content.trim().is_empty() {
             return Ok(TodoFile::default());
         }
-        let parsed: TodoFile = serde_json::from_str(&content)
-            .with_context(|| format!("invalid JSON in {}", self.todos_path.display()))?;
+        let parsed: TodoFile = serde_yaml::from_str(&content)
+            .with_context(|| format!("invalid YAML in {}", self.todos_path.display()))?;
         Ok(TodoFile {
             todos: parsed.todos.into_iter().map(Todo::normalize).collect(),
         })
@@ -137,7 +137,7 @@ impl ProjectStore {
                 .map(Todo::normalize)
                 .collect(),
         };
-        let body = serde_json::to_string_pretty(&normalized)?;
+        let body = serde_yaml::to_string(&normalized)?;
         fs::write(&self.todos_path, format!("{body}\n"))
             .with_context(|| format!("failed to write {}", self.todos_path.display()))?;
         Ok(())
@@ -985,7 +985,7 @@ mod tests {
         );
 
         store
-            .reset_db_from_todos_json()
+            .reset_db_from_todos_file()
             .expect("explicit db reset should succeed");
 
         let conn = Connection::open(project_dir.join("chief.db")).expect("db should reopen");

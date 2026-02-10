@@ -57,7 +57,7 @@ pub struct FileDiffQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateChiefTomlRequest {
+pub struct UpdateChiefYamlRequest {
     pub content: String,
 }
 
@@ -128,7 +128,7 @@ pub struct FileDiffResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ChiefTomlResponse {
+pub struct ChiefYamlResponse {
     pub content: String,
 }
 

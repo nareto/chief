@@ -1,7 +1,7 @@
 use crate::agent::{
     AgentCancelledError, ClaudeAgent, CodexAgent, CodingAgent, is_agent_cancelled_error,
 };
-use crate::config::ChiefToml;
+use crate::config::ChiefYaml;
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoStatus,
 };
@@ -27,7 +27,7 @@ pub struct ProjectContext {
     pub name: String,
     pub project_dir: PathBuf,
     pub config_path: PathBuf,
-    pub chief_toml: ChiefToml,
+    pub chief_yaml: ChiefYaml,
     pub store: ProjectStore,
     pub prompts: FsPromptStore,
     pub git: ShellGitOps,
@@ -36,8 +36,8 @@ pub struct ProjectContext {
 impl ProjectContext {
     pub fn load(project_dir: impl AsRef<Path>) -> Result<Self> {
         let project_dir = project_dir.as_ref().to_path_buf();
-        let config_path = project_dir.join("chief.toml");
-        let chief_toml = ChiefToml::load_or_default(&config_path)?;
+        let config_path = project_dir.join("chief.yaml");
+        let chief_yaml = ChiefYaml::load_or_default(&config_path)?;
 
         let store = ProjectStore::new(&project_dir);
         store.init()?;
@@ -57,7 +57,7 @@ impl ProjectContext {
             name,
             project_dir,
             config_path,
-            chief_toml,
+            chief_yaml,
             store,
             prompts,
             git,
@@ -65,20 +65,20 @@ impl ProjectContext {
     }
 
     pub fn refresh(&mut self) -> Result<()> {
-        self.chief_toml = ChiefToml::load_or_default(&self.config_path)?;
+        self.chief_yaml = ChiefYaml::load_or_default(&self.config_path)?;
         self.store.sync_todos_from_file()?;
         Ok(())
     }
 
     pub fn build_agent(&self, model_override: Option<String>) -> Arc<dyn CodingAgent> {
-        if self.chief_toml.chief.agent.eq_ignore_ascii_case("claude") {
+        if self.chief_yaml.chief.agent.eq_ignore_ascii_case("claude") {
             Arc::new(ClaudeAgent::from_config(
-                &self.chief_toml.chief,
+                &self.chief_yaml.chief,
                 model_override,
             ))
         } else {
             Arc::new(CodexAgent::from_config(
-                &self.chief_toml.chief,
+                &self.chief_yaml.chief,
                 model_override,
             ))
         }
@@ -347,8 +347,8 @@ impl ChiefEngine {
             prompts: &self.project.prompts,
             agent: agent.as_ref(),
             git: &self.project.git,
-            chief_config: &self.project.chief_toml.chief,
-            all_suites: &self.project.chief_toml.suites,
+            chief_config: &self.project.chief_yaml.chief,
+            all_suites: &self.project.chief_yaml.suites,
             todo,
             cancel_signal,
         };
@@ -680,7 +680,7 @@ impl ChiefEngine {
             let response = agent.run(crate::agent::AgentRequest {
                 prompt,
                 cwd: self.project.project_dir.clone(),
-                timeout_seconds: Some(self.project.chief_toml.chief.agent_timeout_seconds),
+                timeout_seconds: Some(self.project.chief_yaml.chief.agent_timeout_seconds),
                 disallowed_paths: Vec::new(),
                 cancel_signal: None,
             })?;

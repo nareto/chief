@@ -102,7 +102,7 @@ impl Scheduler {
             .into_iter()
             .map(|project| {
                 let runtime = states.get(&project.name);
-                let configured_flow = project.chief_toml.chief.flow.trim();
+                let configured_flow = project.chief_yaml.chief.flow.trim();
                 let configured_flow_name = configured_flow
                     .parse::<FlowKind>()
                     .map(|kind| kind.as_str().to_owned())

@@ -20,7 +20,7 @@ test_root: {{ suite.test_root }}
 
 If you need more context you can check:
 - git history
-- `todos.json` for the list of previous and future todos
+- `todos.yaml` for the list of previous and future todos
 
 {% if not first_attempt %}
 Keep in mind this is not your first attempt at this todo.

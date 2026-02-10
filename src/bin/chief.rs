@@ -55,7 +55,7 @@ fn run_with_db_reset_prompt() -> Result<()> {
                 return Ok(());
             }
             let store = ProjectStore::new(&cli.project_dir);
-            store.reset_db_from_todos_json()?;
+            store.reset_db_from_todos_file()?;
             eprintln!("reset complete. retrying...\n");
             run(&cli)
         }
@@ -64,7 +64,7 @@ fn run_with_db_reset_prompt() -> Result<()> {
 
 fn run(cli: &Cli) -> Result<()> {
     let context = ProjectContext::load(&cli.project_dir)?;
-    let configured_flow = context.chief_toml.chief.flow.trim();
+    let configured_flow = context.chief_yaml.chief.flow.trim();
     let flow_input = cli.flow.as_deref().unwrap_or(configured_flow);
     let flow_kind: FlowKind = flow_input
         .parse()
@@ -98,7 +98,7 @@ fn run(cli: &Cli) -> Result<()> {
                 let tail = output
                     .lines()
                     .rev()
-                    .take(context.chief_toml.chief.agent_log_max_output_lines)
+                    .take(context.chief_yaml.chief.agent_log_max_output_lines)
                     .collect::<Vec<_>>()
                     .into_iter()
                     .rev()
@@ -133,7 +133,7 @@ fn run(cli: &Cli) -> Result<()> {
     let engine = ChiefEngine::new(context.clone());
     let max_retries = cli
         .max_retries
-        .unwrap_or(context.chief_toml.chief.max_retries.max(1));
+        .unwrap_or(context.chief_yaml.chief.max_retries.max(1));
 
     match engine.run_todos_until_done_with_retries(
         flow_kind,
@@ -186,7 +186,7 @@ fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String
 
 fn confirm_db_reset(db_path: &std::path::Path) -> Result<bool> {
     eprint!(
-        "Delete {} and rebuild from todos.json? [y/N]: ",
+        "Delete {} and rebuild from todos.yaml? [y/N]: ",
         db_path.display()
     );
     io::stderr().flush()?;

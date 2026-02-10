@@ -28,7 +28,7 @@ pub(super) async fn select_todo_id(
     )?;
 
     let agent = context.build_agent(model_override);
-    let timeout_seconds = context.chief_toml.chief.agent_timeout_seconds;
+    let timeout_seconds = context.chief_yaml.chief.agent_timeout_seconds;
     let response = tokio::task::spawn_blocking({
         let project_dir = context.project_dir.clone();
         move || {

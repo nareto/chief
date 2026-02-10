@@ -1,10 +1,10 @@
 use crate::api::error::ApiError;
 use crate::api::types::{
-    ActiveJobResponse, AddTodoRequest, ChiefTomlResponse, EventsQuery, EventsResponse,
+    ActiveJobResponse, AddTodoRequest, ChiefYamlResponse, EventsQuery, EventsResponse,
     FileDiffQuery, FileDiffResponse, JobsResponse, LogQuery, MessageResponse, PhaseIteration,
     ProjectsResponse, RequirementsRequest, RequirementsResponse, RunSuiteCheckRequest,
     RunSuiteCheckResponse, RunSuiteCheckStreamEvent, StartProjectRequest, StateResponse,
-    SuiteCheckOutputStream, TodoProgress, TodoResponse, TodosResponse, UpdateChiefTomlRequest,
+    SuiteCheckOutputStream, TodoProgress, TodoResponse, TodosResponse, UpdateChiefYamlRequest,
     UpdateTodoRequest,
 };
 use anyhow::{Context, anyhow};
@@ -82,7 +82,7 @@ impl ApiService {
             .unwrap_or(self.default_agents_per_project)
             .max(1);
 
-        let configured_flow = context.chief_toml.chief.flow.trim();
+        let configured_flow = context.chief_yaml.chief.flow.trim();
         let flow_kind = payload
             .flow
             .as_deref()
@@ -324,7 +324,7 @@ impl ApiService {
             .filter(|todo| todo.status != TodoStatus::Done && todo.status != TodoStatus::InProgress)
             .count();
 
-        let configured_flow = context.chief_toml.chief.flow.trim();
+        let configured_flow = context.chief_yaml.chief.flow.trim();
         let configured_flow_name = configured_flow
             .parse::<FlowKind>()
             .map(|kind| kind.as_str().to_owned())
@@ -420,7 +420,7 @@ impl ApiService {
         Ok(FileDiffResponse { file, diff })
     }
 
-    pub async fn get_chief_toml(&self, project: &str) -> Result<ChiefTomlResponse, ApiError> {
+    pub async fn get_chief_yaml(&self, project: &str) -> Result<ChiefYamlResponse, ApiError> {
         let context = self.project_context(project).await?;
         let content = fs::read_to_string(&context.config_path).with_context(|| {
             format!(
@@ -428,13 +428,13 @@ impl ApiService {
                 context.config_path.display()
             )
         })?;
-        Ok(ChiefTomlResponse { content })
+        Ok(ChiefYamlResponse { content })
     }
 
-    pub async fn update_chief_toml(
+    pub async fn update_chief_yaml(
         &self,
         project: &str,
-        payload: UpdateChiefTomlRequest,
+        payload: UpdateChiefYamlRequest,
     ) -> Result<MessageResponse, ApiError> {
         let context = self.project_context(project).await?;
         fs::write(&context.config_path, payload.content).with_context(|| {
@@ -445,7 +445,7 @@ impl ApiService {
         })?;
 
         Ok(MessageResponse {
-            message: "chief.toml updated".to_owned(),
+            message: "chief.yaml updated".to_owned(),
         })
     }
 
@@ -641,7 +641,7 @@ impl ApiService {
         }
 
         let suite = context
-            .chief_toml
+            .chief_yaml
             .suites
             .iter()
             .find(|suite| suite.name == suite_name)
@@ -679,7 +679,7 @@ impl ApiService {
         let context = self.project_context(project).await?;
         context
             .store
-            .reset_db_from_todos_json()
+            .reset_db_from_todos_file()
             .map_err(ApiError::internal)?;
         Ok(MessageResponse {
             message: format!("reset chief.db for project {project}"),

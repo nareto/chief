@@ -4,7 +4,7 @@ use crate::api::events_ws;
 use crate::api::terminal_ws;
 use crate::api::types::{
     AddTodoRequest, EventsQuery, FileDiffQuery, LogQuery, RequirementsRequest,
-    RunSuiteCheckRequest, StartProjectRequest, TrimProjectDbRequest, UpdateChiefTomlRequest,
+    RunSuiteCheckRequest, StartProjectRequest, TrimProjectDbRequest, UpdateChiefYamlRequest,
     UpdateTodoRequest,
 };
 use crate::app::AppState;
@@ -157,22 +157,22 @@ pub async fn get_file_diff(
     Ok(Json(state.service.get_file_diff(&project, query).await?))
 }
 
-pub async fn get_chief_toml(
+pub async fn get_chief_yaml(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<crate::api::types::ChiefTomlResponse>, ApiError> {
-    Ok(Json(state.service.get_chief_toml(&project).await?))
+) -> Result<Json<crate::api::types::ChiefYamlResponse>, ApiError> {
+    Ok(Json(state.service.get_chief_yaml(&project).await?))
 }
 
-pub async fn update_chief_toml(
+pub async fn update_chief_yaml(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(payload): Json<UpdateChiefTomlRequest>,
+    Json(payload): Json<UpdateChiefYamlRequest>,
 ) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
     auth::require_sensitive_access(&state, &headers)?;
     Ok(Json(
-        state.service.update_chief_toml(&project, payload).await?,
+        state.service.update_chief_yaml(&project, payload).await?,
     ))
 }
 
