@@ -52,6 +52,8 @@ struct TailEventsArgs {
     limit: usize,
 }
 
+const INIT_GITIGNORE_ENTRIES: [&str; 3] = ["chief.db", "chief.example.yaml", "todos.example.yaml"];
+
 fn main() {
     if let Err(err) = run_with_db_reset_prompt() {
         eprintln!("error: {err:#}");
@@ -153,6 +155,8 @@ fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
     } else {
         skipped += 1;
     }
+
+    ensure_gitignore_entries(&project_dir.join(".gitignore"), &INIT_GITIGNORE_ENTRIES)?;
 
     println!(
         "initialized chief files in {} (created {created}, skipped {skipped})",
@@ -302,6 +306,45 @@ fn write_file_if_missing(path: &Path, content: &str) -> Result<bool> {
     Ok(true)
 }
 
+fn ensure_gitignore_entries(path: &Path, entries: &[&str]) -> Result<bool> {
+    let mut content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+
+    let mut missing = Vec::new();
+    for entry in entries {
+        if !gitignore_contains_entry(&content, entry) {
+            missing.push(*entry);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(false);
+    }
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    for entry in missing {
+        content.push_str(entry);
+        content.push('\n');
+    }
+
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+fn gitignore_contains_entry(content: &str, entry: &str) -> bool {
+    content.lines().map(str::trim).any(|line| {
+        line == entry
+            || line.strip_prefix('/').is_some_and(|value| value == entry)
+            || line.strip_prefix("./").is_some_and(|value| value == entry)
+    })
+}
+
 #[cfg(unix)]
 fn create_file_symlink_if_missing(target: &Path, link: &Path) -> Result<bool> {
     match std::os::unix::fs::symlink(target, link) {
@@ -342,4 +385,83 @@ fn confirm_db_reset(db_path: &Path) -> Result<bool> {
     io::stdin().read_line(&mut input)?;
     let answer = input.trim().to_ascii_lowercase();
     Ok(answer == "y" || answer == "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "chief-{prefix}-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            fs::create_dir_all(&path).expect("temp dir should be created");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn ensure_gitignore_entries_creates_file_when_missing() {
+        let temp = TempDir::new("gitignore-create");
+        let gitignore_path = temp.path.join(".gitignore");
+
+        let changed =
+            ensure_gitignore_entries(&gitignore_path, &INIT_GITIGNORE_ENTRIES).expect("ok");
+
+        assert!(changed);
+        assert_eq!(
+            fs::read_to_string(gitignore_path).expect("gitignore should exist"),
+            "chief.db\nchief.example.yaml\ntodos.example.yaml\n"
+        );
+    }
+
+    #[test]
+    fn ensure_gitignore_entries_appends_only_missing_entries() {
+        let temp = TempDir::new("gitignore-append");
+        let gitignore_path = temp.path.join(".gitignore");
+        fs::write(&gitignore_path, "target/\nchief.db").expect("seed gitignore should be written");
+
+        let changed =
+            ensure_gitignore_entries(&gitignore_path, &INIT_GITIGNORE_ENTRIES).expect("ok");
+
+        assert!(changed);
+        assert_eq!(
+            fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
+            "target/\nchief.db\nchief.example.yaml\ntodos.example.yaml\n"
+        );
+    }
+
+    #[test]
+    fn ensure_gitignore_entries_is_idempotent() {
+        let temp = TempDir::new("gitignore-idempotent");
+        let gitignore_path = temp.path.join(".gitignore");
+        fs::write(
+            &gitignore_path,
+            "/chief.db\n./chief.example.yaml\ntodos.example.yaml\n",
+        )
+        .expect("seed gitignore should be written");
+
+        let changed =
+            ensure_gitignore_entries(&gitignore_path, &INIT_GITIGNORE_ENTRIES).expect("ok");
+
+        assert!(!changed);
+        assert_eq!(
+            fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
+            "/chief.db\n./chief.example.yaml\ntodos.example.yaml\n"
+        );
+    }
 }
