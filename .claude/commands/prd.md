@@ -17,7 +17,7 @@ Using the architecture and tech stack described in the PRD, set up the project s
 
 If the project is not empty, verify which of the above are missing and implement those.
 
-When done, update `chief.toml` providing all the correct paths, commands and env variables that will make the scaffolded tests execute. Follow the schema and examples in @chief.toml.example
+When done, update `chief.toml` providing all the correct paths, commands and env variables that will make the scaffolded tests execute. Follow the schema and examples in @chief.example.toml
 
 # 2. todos.json
 

@@ -279,7 +279,7 @@ lint_command = "cargo clippy"
 post_green_command = "cargo test"
 ```
 
-See `chief.toml.example` for more patterns.
+See `chief.example.toml` for more patterns.
 Backend runtime settings are configured on the `chief_backend` command line (see `just backend`).
 
 ## Current status
