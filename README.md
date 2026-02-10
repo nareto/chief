@@ -117,6 +117,20 @@ Run one project directly:
 cargo run --bin chief -- --project-dir /path/to/project
 ```
 
+From inside a target project directory (with `chief` on `PATH`), initialize symlinked example files and minimal local configs:
+
+```bash
+chief init
+```
+
+This assumes the chief repo is in `../chief`, otherwise specify it:
+
+```bash
+chief init --chief-root /path/to/chief
+```
+
+`init` is idempotent: existing files/symlinks are left unchanged and only missing ones are created.
+
 Common options:
 
 ```bash
@@ -137,7 +151,13 @@ cargo run --bin chief -- \
 Tail events:
 
 ```bash
-cargo run --bin chief -- --project-dir /path/to/project --tail-events 50
+cargo run --bin chief -- --project-dir /path/to/project tail-events --limit 50
+```
+
+Clean completed todos:
+
+```bash
+cargo run --bin chief -- --project-dir /path/to/project clean-done
 ```
 
 ## Backend usage

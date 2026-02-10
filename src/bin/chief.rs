@@ -1,12 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chief::flow::FlowKind;
 use chief::orchestrator::OrchestratorError;
 use chief::service::{ChiefEngine, ProjectContext};
 use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
-use clap::Parser;
-use std::fs;
+use clap::{Args, Parser, Subcommand};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
@@ -20,14 +20,36 @@ struct Cli {
     model: Option<String>,
     #[arg(long)]
     max_retries: Option<usize>,
-    #[arg(long)]
-    clean_done: bool,
-    #[arg(long, default_value_t = 0)]
-    tail_events: usize,
     #[arg(long = "requirements")]
     requirements: Vec<String>,
     #[arg(long = "requirements-file")]
     requirements_file: Vec<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Initialize Chief config files in a new project directory.
+    Init(InitArgs),
+    /// Remove completed todos that have a commit hash.
+    CleanDone,
+    /// Print recent project events.
+    TailEvents(TailEventsArgs),
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Path to the Chief repo root that contains *.example.yaml files.
+    #[arg(long, default_value = "../chief")]
+    chief_root: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct TailEventsArgs {
+    /// Maximum number of most-recent events to print.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    limit: usize,
 }
 
 fn main() {
@@ -62,56 +84,94 @@ fn run_with_db_reset_prompt() -> Result<()> {
     }
 }
 
+fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
+    match command {
+        Commands::Init(args) => run_init(cli, args),
+        Commands::CleanDone => run_clean_done(cli),
+        Commands::TailEvents(args) => run_tail_events(cli, args),
+    }
+}
+
+fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
+    let project_dir = &cli.project_dir;
+    if !project_dir.exists() {
+        bail!(
+            "project directory does not exist: {}",
+            project_dir.display()
+        );
+    }
+    if !project_dir.is_dir() {
+        bail!("project path is not a directory: {}", project_dir.display());
+    }
+
+    let chief_root_for_checks = if args.chief_root.is_absolute() {
+        args.chief_root.clone()
+    } else {
+        project_dir.join(&args.chief_root)
+    };
+    let chief_example_source = chief_root_for_checks.join("chief.example.yaml");
+    let todos_example_source = chief_root_for_checks.join("todos.example.yaml");
+    if !chief_example_source.is_file() {
+        bail!("example file not found: {}", chief_example_source.display());
+    }
+    if !todos_example_source.is_file() {
+        bail!("example file not found: {}", todos_example_source.display());
+    }
+
+    let chief_example_link = project_dir.join("chief.example.yaml");
+    let todos_example_link = project_dir.join("todos.example.yaml");
+    let chief_yaml_path = project_dir.join("chief.yaml");
+    let todos_yaml_path = project_dir.join("todos.yaml");
+
+    let mut created = 0usize;
+    let mut skipped = 0usize;
+
+    if create_file_symlink_if_missing(
+        &args.chief_root.join("chief.example.yaml"),
+        &chief_example_link,
+    )? {
+        created += 1;
+    } else {
+        skipped += 1;
+    }
+    if create_file_symlink_if_missing(
+        &args.chief_root.join("todos.example.yaml"),
+        &todos_example_link,
+    )? {
+        created += 1;
+    } else {
+        skipped += 1;
+    }
+
+    if write_file_if_missing(&chief_yaml_path, "chief: {}\n")? {
+        created += 1;
+    } else {
+        skipped += 1;
+    }
+    if write_file_if_missing(&todos_yaml_path, "todos: []\n")? {
+        created += 1;
+    } else {
+        skipped += 1;
+    }
+
+    println!(
+        "initialized chief files in {} (created {created}, skipped {skipped})",
+        project_dir.display()
+    );
+    Ok(())
+}
+
 fn run(cli: &Cli) -> Result<()> {
+    if let Some(command) = &cli.command {
+        return run_command(cli, command);
+    }
+
     let context = ProjectContext::load(&cli.project_dir)?;
     let configured_flow = context.chief_yaml.chief.flow.trim();
     let flow_input = cli.flow.as_deref().unwrap_or(configured_flow);
     let flow_kind: FlowKind = flow_input
         .parse()
         .with_context(|| format!("invalid flow '{}'", flow_input))?;
-
-    if cli.clean_done {
-        let removed = context.store.clean_completed_todos_with_commit()?;
-        println!("cleaned completed todos ({removed} removed)");
-        return Ok(());
-    }
-
-    if cli.tail_events > 0 {
-        let events = context.store.query_events(EventQuery {
-            limit: cli.tail_events,
-            ..EventQuery::default()
-        })?;
-        if events.is_empty() {
-            println!("No events recorded.");
-            return Ok(());
-        }
-        for event in events.into_iter().rev() {
-            println!(
-                "[{}] {} {} {} - {}",
-                event.timestamp.to_rfc3339(),
-                event.level,
-                event.phase.map(|phase| phase.as_str()).unwrap_or("-"),
-                event.event_type.as_str(),
-                event.msg
-            );
-            if let Some(output) = event.payload.get("output").and_then(|value| value.as_str()) {
-                let tail = output
-                    .lines()
-                    .rev()
-                    .take(context.chief_yaml.chief.agent_log_max_output_lines)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !tail.trim().is_empty() {
-                    println!("{tail}");
-                }
-            }
-            println!();
-        }
-        return Ok(());
-    }
 
     let requirements_text = load_requirements_text(&cli.requirements, &cli.requirements_file)?;
     if !requirements_text.trim().is_empty() {
@@ -163,6 +223,51 @@ fn run(cli: &Cli) -> Result<()> {
     }
 }
 
+fn run_clean_done(cli: &Cli) -> Result<()> {
+    let context = ProjectContext::load(&cli.project_dir)?;
+    let removed = context.store.clean_completed_todos_with_commit()?;
+    println!("cleaned completed todos ({removed} removed)");
+    Ok(())
+}
+
+fn run_tail_events(cli: &Cli, args: &TailEventsArgs) -> Result<()> {
+    let context = ProjectContext::load(&cli.project_dir)?;
+    let events = context.store.query_events(EventQuery {
+        limit: args.limit,
+        ..EventQuery::default()
+    })?;
+    if events.is_empty() {
+        println!("No events recorded.");
+        return Ok(());
+    }
+    for event in events.into_iter().rev() {
+        println!(
+            "[{}] {} {} {} - {}",
+            event.timestamp.to_rfc3339(),
+            event.level,
+            event.phase.map(|phase| phase.as_str()).unwrap_or("-"),
+            event.event_type.as_str(),
+            event.msg
+        );
+        if let Some(output) = event.payload.get("output").and_then(|value| value.as_str()) {
+            let tail = output
+                .lines()
+                .rev()
+                .take(context.chief_yaml.chief.agent_log_max_output_lines)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !tail.trim().is_empty() {
+                println!("{tail}");
+            }
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String> {
     let mut chunks = Vec::new();
     for item in inline {
@@ -184,7 +289,50 @@ fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String
     Ok(chunks.join("\n\n"))
 }
 
-fn confirm_db_reset(db_path: &std::path::Path) -> Result<bool> {
+fn write_file_if_missing(path: &Path, content: &str) -> Result<bool> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to create {}", path.display()));
+        }
+    };
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn create_file_symlink_if_missing(target: &Path, link: &Path) -> Result<bool> {
+    match std::os::unix::fs::symlink(target, link) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                link.display(),
+                target.display()
+            )
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn create_file_symlink_if_missing(target: &Path, link: &Path) -> Result<bool> {
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                link.display(),
+                target.display()
+            )
+        }),
+    }
+}
+
+fn confirm_db_reset(db_path: &Path) -> Result<bool> {
     eprint!(
         "Delete {} and rebuild from todos.yaml? [y/N]: ",
         db_path.display()
