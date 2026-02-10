@@ -1,4 +1,5 @@
 [chief]
+flow = "single_prompt" # set to "tdd" to use the legacy red/green/post-green workflow
 agent = "codex"
 # model = "gpt-5"
 # model_reasoning_effort = "high"

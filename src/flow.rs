@@ -8,8 +8,9 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -71,6 +72,13 @@ impl FromStr for FlowKind {
 pub struct TodoOutcome {
     pub todo_id: String,
     pub commit_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentRunWithGitChanges {
+    output: AgentOutput,
+    touched_files: Vec<String>,
+    had_git_changes: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -381,6 +389,55 @@ impl<'a> FlowExecution<'a> {
         )?;
 
         Ok(out)
+    }
+
+    fn run_agent_with_git_changes(
+        &self,
+        phase: Phase,
+        prompt: String,
+        disallowed_paths: Vec<String>,
+    ) -> Result<AgentRunWithGitChanges> {
+        let before = self.working_tree_snapshot()?;
+        let output = self.run_agent(phase, prompt, disallowed_paths)?;
+        let after = self.working_tree_snapshot()?;
+        let touched_files = changed_paths_between_snapshots(&before, &after);
+        let had_git_changes = !touched_files.is_empty();
+
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::Diff,
+            "Iteration git change detection",
+            payload_from_json(json!({
+                "touched_files": touched_files.clone(),
+                "had_git_changes": had_git_changes,
+            })),
+        )?;
+
+        Ok(AgentRunWithGitChanges {
+            output,
+            touched_files,
+            had_git_changes,
+        })
+    }
+
+    fn working_tree_snapshot(&self) -> Result<BTreeMap<String, String>> {
+        let files = self.git.changed_files(&self.project_dir)?;
+        let mut snapshot = BTreeMap::new();
+        for file in files {
+            let path = self.project_dir.join(&file);
+            let signature = if path.is_file() {
+                let content = fs::read(&path)
+                    .with_context(|| format!("failed reading changed file {}", path.display()))?;
+                format!("file:{:x}", md5::compute(content))
+            } else if path.is_dir() {
+                "dir".to_owned()
+            } else {
+                "missing".to_owned()
+            };
+            snapshot.insert(file, signature);
+        }
+        Ok(snapshot)
     }
 
     fn ensure_not_cancelled(&self) -> Result<()> {
@@ -728,12 +785,14 @@ impl TodoFlow for TddFlow {
 
 #[derive(Debug, Clone)]
 pub struct SinglePromptFlow {
-    max_loops: usize,
+    loop_policy: ConvergenceLoopPolicy,
 }
 
 impl Default for SinglePromptFlow {
     fn default() -> Self {
-        Self { max_loops: 6 }
+        Self {
+            loop_policy: ConvergenceLoopPolicy::default(),
+        }
     }
 }
 
@@ -743,59 +802,234 @@ impl TodoFlow for SinglePromptFlow {
     }
 
     fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
-        let suites = execution.selected_suites();
-        for iteration in 0..self.max_loops {
-            let previous_steps_log = execution.previous_steps_log(
-                Phase::Green,
-                &[
-                    EventType::TestRun,
-                    EventType::AgentResponse,
-                    EventType::Diff,
-                    EventType::Lint,
-                ],
-                8,
+        let candidate_suites = if execution.todo.test_suites.is_empty() {
+            execution.all_suites.to_vec()
+        } else {
+            execution.selected_suites()
+        };
+
+        let mut strategy = SinglePromptPhaseStrategy::new(candidate_suites);
+        self.loop_policy.run(&mut strategy, execution)?;
+        strategy.run_post_green_for_involved_suites(execution)?;
+
+        execution.log_event(
+            "info",
+            Some(Phase::Green),
+            EventType::PhaseChange,
+            "SINGLE_PROMPT loop done; preparing commit",
+            BTreeMap::new(),
+        )?;
+
+        let commit_hash = execution
+            .git
+            .commit_and_tag(
+                &execution.project_dir,
+                &format!("chief(single_prompt): {}", execution.todo.todo),
+            )
+            .context("failed to commit todo")?;
+
+        execution.log_event(
+            "info",
+            Some(Phase::Exit),
+            EventType::GitOp,
+            format!("Committed todo {}", execution.todo.id),
+            payload_from_json(json!({ "commit_hash": commit_hash })),
+        )?;
+
+        Ok(TodoOutcome {
+            todo_id: execution.todo.id.clone(),
+            commit_hash: Some(commit_hash),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SinglePromptPhaseStrategy {
+    candidate_suites: Vec<TestSuiteConfig>,
+    involved_suite_names: BTreeSet<String>,
+    last_agent_run: Option<AgentRunWithGitChanges>,
+    attempts: usize,
+}
+
+impl SinglePromptPhaseStrategy {
+    fn new(candidate_suites: Vec<TestSuiteConfig>) -> Self {
+        Self {
+            candidate_suites,
+            involved_suite_names: BTreeSet::new(),
+            last_agent_run: None,
+            attempts: 0,
+        }
+    }
+
+    fn involved_suites(&self) -> Vec<TestSuiteConfig> {
+        if self.involved_suite_names.is_empty() {
+            return Vec::new();
+        }
+        self.candidate_suites
+            .iter()
+            .filter(|suite| self.involved_suite_names.contains(&suite.name))
+            .cloned()
+            .collect()
+    }
+
+    fn run_post_green_for_involved_suites(&self, execution: &FlowExecution<'_>) -> Result<()> {
+        let involved_suites = self.involved_suites();
+        if involved_suites.is_empty() {
+            execution.log_event(
+                "info",
+                Some(Phase::PostGreen),
+                EventType::PhaseChange,
+                "single_prompt: no involved suites; skipping post-green commands",
+                BTreeMap::new(),
             )?;
+            return Ok(());
+        }
 
-            let prompt = execution.prompts.render_json(
-                "green.md",
-                &json!({
-                    "todo": execution.todo,
-                    "suites": suites,
-                    "previous_steps_log": previous_steps_log,
-                    "single_prompt_mode": true,
-                }),
+        let mut post_green_ok = true;
+        for suite in &involved_suites {
+            if let Some(out) = execution.run_post_green_suite(suite)? {
+                execution.log_event(
+                    if out.exit_code == 0 {
+                        "info"
+                    } else {
+                        "warning"
+                    },
+                    Some(Phase::PostGreen),
+                    EventType::PostGreenOutput,
+                    format!("Post-green command result ({})", suite.name),
+                    payload_from_json(json!({
+                        "suite": suite.name,
+                        "command": out.command,
+                        "exit_code": out.exit_code,
+                        "output": out.merged_output,
+                    })),
+                )?;
+                if out.exit_code != 0 {
+                    post_green_ok = false;
+                }
+            }
+        }
+
+        if post_green_ok {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "single_prompt post-green checks failed for involved suites"
+            ))
+        }
+    }
+}
+
+impl PhaseStrategy for SinglePromptPhaseStrategy {
+    fn phase(&self) -> Phase {
+        Phase::Green
+    }
+
+    fn attempt_fix(&mut self, execution: &mut FlowExecution<'_>) -> Result<AgentOutput> {
+        let previous_steps_log = execution.previous_steps_log(
+            Phase::Green,
+            &[
+                EventType::TestRun,
+                EventType::PhaseFailure,
+                EventType::PostGreenOutput,
+                EventType::AgentResponse,
+                EventType::Diff,
+                EventType::Lint,
+            ],
+            12,
+        )?;
+
+        let prompt = execution.prompts.render_json(
+            "singleprompt.md",
+            &json!({
+                "todo": execution.todo,
+                "suites": self.candidate_suites,
+                "previous_steps_log": previous_steps_log,
+                "iteration": self.attempts + 1,
+            }),
+        )?;
+
+        let run = execution.run_agent_with_git_changes(Phase::Green, prompt, Vec::new())?;
+        let output = run.output.clone();
+        self.last_agent_run = Some(run);
+        self.attempts += 1;
+        Ok(output)
+    }
+
+    fn check_goal(
+        &mut self,
+        execution: &mut FlowExecution<'_>,
+        _iteration_idx: isize,
+        output: &AgentOutput,
+    ) -> Result<LoopDecision> {
+        let run = self
+            .last_agent_run
+            .take()
+            .unwrap_or_else(|| AgentRunWithGitChanges {
+                output: output.clone(),
+                touched_files: Vec::new(),
+                had_git_changes: true,
+            });
+
+        let touched_suites = suites_touched_by_files(&self.candidate_suites, &run.touched_files);
+        for suite in &touched_suites {
+            self.involved_suite_names.insert(suite.name.clone());
+        }
+
+        let suites_for_checks = if !touched_suites.is_empty() {
+            touched_suites
+        } else {
+            self.involved_suites()
+        };
+
+        if suites_for_checks.is_empty() {
+            execution.log_event(
+                "info",
+                Some(Phase::Green),
+                EventType::PhaseChange,
+                "single_prompt: no touched/involved suites; skipping lint+test commands",
+                BTreeMap::new(),
             )?;
-
-            let out = execution.run_agent(Phase::Green, prompt, Vec::new())?;
-            if out.exit_code != 0 {
-                continue;
+        } else {
+            let all_pass = run_test_and_lint(execution, &suites_for_checks, Phase::Green)?;
+            if !all_pass {
+                return Ok(LoopDecision::Retry);
             }
+        }
 
-            let all_pass = run_test_and_lint(execution, &suites, Phase::Green)?;
-            if all_pass {
-                let commit_hash = execution
-                    .git
-                    .commit_and_tag(
-                        &execution.project_dir,
-                        &format!("chief(single_prompt): {}", execution.todo.todo),
-                    )
-                    .context("failed to commit todo")?;
-                return Ok(TodoOutcome {
-                    todo_id: execution.todo.id.clone(),
-                    commit_hash: Some(commit_hash),
-                });
-            }
-
+        if run.output.exit_code != 0 {
             execution.log_event(
                 "warning",
                 Some(Phase::Green),
                 EventType::PhaseFailure,
-                format!("single_prompt iteration {} did not pass", iteration + 1),
-                BTreeMap::new(),
+                "single_prompt agent step failed",
+                payload_from_json(json!({
+                    "exit_code": run.output.exit_code,
+                    "command": run.output.command,
+                })),
             )?;
+            return Ok(LoopDecision::Retry);
         }
 
-        Err(anyhow!("single_prompt flow exhausted retries"))
+        if run.had_git_changes {
+            execution.log_event(
+                "warning",
+                Some(Phase::Green),
+                EventType::PhaseFailure,
+                "single_prompt iteration changed files; waiting for two consecutive no-change iterations",
+                payload_from_json(json!({ "touched_files": run.touched_files })),
+            )?;
+            return Ok(LoopDecision::Retry);
+        }
+
+        execution.log_event(
+            "info",
+            Some(Phase::Green),
+            EventType::PhaseChange,
+            "single_prompt iteration had no git file changes",
+            BTreeMap::new(),
+        )?;
+        Ok(LoopDecision::Stable)
     }
 }
 
@@ -1081,6 +1315,71 @@ fn run_lint_checks(
     }
 
     Ok(all_ok)
+}
+
+fn changed_paths_between_snapshots(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut touched = BTreeSet::new();
+
+    for (path, before_signature) in before {
+        let changed = match after.get(path) {
+            Some(after_signature) => after_signature != before_signature,
+            None => true,
+        };
+        if changed {
+            touched.insert(path.clone());
+        }
+    }
+
+    for path in after.keys() {
+        if !before.contains_key(path) {
+            touched.insert(path.clone());
+        }
+    }
+
+    touched.into_iter().collect()
+}
+
+fn suites_touched_by_files(
+    suites: &[TestSuiteConfig],
+    touched_files: &[String],
+) -> Vec<TestSuiteConfig> {
+    if touched_files.is_empty() {
+        return Vec::new();
+    }
+
+    let normalized_files = touched_files
+        .iter()
+        .map(|path| normalize_repo_relative_path(path))
+        .collect::<Vec<_>>();
+
+    suites
+        .iter()
+        .filter(|suite| {
+            let root = normalize_repo_relative_path(&suite.test_root);
+            if root.is_empty() {
+                return true;
+            }
+            normalized_files.iter().any(|file| {
+                file == &root
+                    || file
+                        .strip_prefix(&root)
+                        .map(|suffix| suffix.starts_with('/'))
+                        .unwrap_or(false)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn normalize_repo_relative_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_owned()
 }
 
 fn wait_for_command_with_cancel(

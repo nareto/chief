@@ -76,15 +76,17 @@ impl ApiService {
         project: String,
         payload: StartProjectRequest,
     ) -> Result<MessageResponse, ApiError> {
+        let context = self.project_context(&project).await?;
         let agents = payload
             .agents
             .unwrap_or(self.default_agents_per_project)
             .max(1);
 
+        let configured_flow = context.chief_toml.chief.flow.trim();
         let flow_kind = payload
             .flow
             .as_deref()
-            .unwrap_or(FlowKind::Tdd.as_str())
+            .unwrap_or(configured_flow)
             .parse::<FlowKind>()
             .map_err(|err| ApiError::unprocessable(err.to_string()))?;
 
@@ -322,6 +324,18 @@ impl ApiService {
             .filter(|todo| todo.status != TodoStatus::Done && todo.status != TodoStatus::InProgress)
             .count();
 
+        let configured_flow = context.chief_toml.chief.flow.trim();
+        let configured_flow_name = configured_flow
+            .parse::<FlowKind>()
+            .map(|kind| kind.as_str().to_owned())
+            .unwrap_or_else(|_| {
+                if configured_flow.is_empty() {
+                    FlowKind::SinglePrompt.as_str().to_owned()
+                } else {
+                    configured_flow.to_owned()
+                }
+            });
+
         Ok(StateResponse {
             project: project.to_owned(),
             running: runtime.as_ref().map(|view| view.running).unwrap_or(false),
@@ -340,7 +354,7 @@ impl ApiService {
             flow_name: runtime
                 .as_ref()
                 .map(|view| view.flow_name.clone())
-                .unwrap_or_else(|| FlowKind::Tdd.as_str().to_owned()),
+                .unwrap_or_else(|| configured_flow_name.clone()),
             last_error: runtime.as_ref().and_then(|view| view.last_error.clone()),
             phase: current_phase,
             phase_iteration,

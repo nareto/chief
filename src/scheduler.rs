@@ -61,7 +61,7 @@ impl ProjectRuntime {
             active_workers: 0,
             running: false,
             stop_requested: false,
-            flow_kind: FlowKind::Tdd,
+            flow_kind: FlowKind::SinglePrompt,
             model_override: None,
             last_error: None,
             selection_lock: Arc::new(Mutex::new(())),
@@ -102,6 +102,17 @@ impl Scheduler {
             .into_iter()
             .map(|project| {
                 let runtime = states.get(&project.name);
+                let configured_flow = project.chief_toml.chief.flow.trim();
+                let configured_flow_name = configured_flow
+                    .parse::<FlowKind>()
+                    .map(|kind| kind.as_str().to_owned())
+                    .unwrap_or_else(|_| {
+                        if configured_flow.is_empty() {
+                            FlowKind::SinglePrompt.as_str().to_owned()
+                        } else {
+                            configured_flow.to_owned()
+                        }
+                    });
                 ProjectRuntimeView {
                     name: project.name.clone(),
                     project_dir: project.project_dir.display().to_string(),
@@ -110,7 +121,7 @@ impl Scheduler {
                     running: runtime.map(|v| v.running).unwrap_or(false),
                     flow_name: runtime
                         .map(|v| v.flow_kind.as_str().to_owned())
-                        .unwrap_or_else(|| FlowKind::Tdd.as_str().to_owned()),
+                        .unwrap_or(configured_flow_name),
                     model_override: runtime.and_then(|v| v.model_override.clone()),
                     stop_requested: runtime.map(|v| v.stop_requested).unwrap_or(false),
                     last_error: runtime.and_then(|v| v.last_error.clone()),

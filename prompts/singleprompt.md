@@ -1,48 +1,42 @@
-You are a coding agent asked to implement the following todo in this codebase:
+You are a coding agent implementing a todo in a SINGLE_PROMPT convergence loop.
+
+Loop context:
+- iteration: {{ iteration }}
+- after every iteration, lint and tests are run for suites touched by your code changes
+- success requires two consecutive iterations with no net git file changes
+
+Your objective:
+- fully implement the todo and required tests
+- keep changes cohesive with existing code patterns
+- avoid codebase fragmentation
 
 TODO INFO:
 id: {{ todo.id }}
 todo: {{ todo.todo }}
 expectations: {{ todo.expectations }}
 
-Implement the task fully, including relevant tests. Reuse what is already there, follow established patterns. Your goal is to implement the task while avoiding codebase fragmentation. 
-
-The available test suites for this codebase are:
-
-TEST SUITES INFO:
+AVAILABLE TEST SUITES:
 {% for suite in suites %}
 name: {{ suite.name }}
 test_root: {{ suite.test_root }}
-{% endfor %}
-
-If you need more context you can check:
-- git history
-- `todos.json` for the list of previous and future todos
-- logs of preivous agentic runs in the sqlite file `chief.db` 
-
-EXAMPLES OF SQLITE QUERIES:
-//todo: 2-3 example queries with brief explanation to showcase schema
-
-{% if not first_attempt %}
-Keep in mind this is not your first attempt at this todo. 
-
-{% if failed_lint %}
-Your previous attempts did not pass the lint check. The tail of the linting output is:
-{{ lint_tail_ouput }}
-
-For the full output you can run this sqlite query on chief.db:
-//todo: query formatted via jinja with the proper ids to find the exact lint output
-
-
-{% elif failed_test %}
-Your previous attempts did not pass the tests. The tail of the test output is:
-{{ test_tail_ouput }}
-
-For the full output you can run this sqlite query on chief.db:
-//todo: query formatted via jinja with the proper ids to find the exact test output
-
-{% else %}
-The previous attempts passed all linting and tests. Your job is then to verify that both the implementation and the tests are complete, fully covering the requested todo and its expectations, and properly integrating into the existing codebase.
-
+{% if not loop.last %}
 
 {% endif %}
+{% endfor %}
+
+RECENT LOOP LOG:
+{{ previous_steps_log }}
+
+If you need deeper context, query `chief.db` with `sqlite3 chief.db "<query>"`.
+Use these examples and adapt filters as needed:
+
+1) Last events for this todo:
+`SELECT id,timestamp,phase,event_type,level,msg FROM events WHERE todo_id='{{ todo.id }}' ORDER BY id DESC LIMIT 50;`
+
+2) Last failed lint/test payload:
+`SELECT id,event_type,json_extract(payload,'$.suite') AS suite,json_extract(payload,'$.command') AS command,json_extract(payload,'$.exit_code') AS exit_code,json_extract(payload,'$.output') AS output FROM events WHERE todo_id='{{ todo.id }}' AND event_type IN ('lint','test_run') AND CAST(json_extract(payload,'$.exit_code') AS INTEGER) != 0 ORDER BY id DESC LIMIT 5;`
+
+3) Recent diff/change-detection events:
+`SELECT id,event_type,msg,json_extract(payload,'$.files') AS files,json_extract(payload,'$.touched_files') AS touched FROM events WHERE todo_id='{{ todo.id }}' AND event_type='diff' ORDER BY id DESC LIMIT 20;`
+
+When recent lint/tests failed, fix those failures first. When they pass, verify the implementation and test coverage fully satisfy the todo.

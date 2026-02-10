@@ -78,7 +78,7 @@ impl GitOps for ShellGitOps {
     }
 
     fn changed_files(&self, cwd: &Path) -> Result<Vec<String>> {
-        let output = self.run_capture(cwd, &["status", "--porcelain"])?;
+        let output = self.run_capture(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
         let files = output
             .lines()
             .filter_map(|line| line.split_whitespace().last().map(str::to_owned))

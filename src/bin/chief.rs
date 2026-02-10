@@ -14,8 +14,8 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
-    #[arg(long, default_value = "tdd")]
-    flow: String,
+    #[arg(long)]
+    flow: Option<String>,
     #[arg(long)]
     model: Option<String>,
     #[arg(long)]
@@ -63,11 +63,12 @@ fn run_with_db_reset_prompt() -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    let flow_kind: FlowKind = cli
-        .flow
-        .parse()
-        .with_context(|| format!("invalid --flow '{}'", cli.flow))?;
     let context = ProjectContext::load(&cli.project_dir)?;
+    let configured_flow = context.chief_toml.chief.flow.trim();
+    let flow_input = cli.flow.as_deref().unwrap_or(configured_flow);
+    let flow_kind: FlowKind = flow_input
+        .parse()
+        .with_context(|| format!("invalid flow '{}'", flow_input))?;
 
     if cli.clean_done {
         let removed = context.store.clean_completed_todos_with_commit()?;

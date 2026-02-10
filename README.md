@@ -76,8 +76,8 @@ Core library modules:
 
 Included flows:
 
-- `tdd` (default): RED -> GREEN -> POST_GREEN.
-- `single_prompt`: one implementation-focused loop (for experimentation).
+- `single_prompt` (default): convergence loop with per-iteration checks.
+- `tdd`: legacy RED -> GREEN -> POST_GREEN flow.
 
 Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
 
@@ -263,6 +263,7 @@ Services:
 
 ```toml
 [chief]
+flow = "single_prompt"
 agent = "codex"
 model = "gpt-5"
 max_retries = 10

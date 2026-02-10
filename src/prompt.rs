@@ -16,13 +16,14 @@ pub struct FsPromptStore {
     root: PathBuf,
 }
 
-const REQUIRED_PROMPT_FILES: [&str; 6] = [
+const REQUIRED_PROMPT_FILES: [&str; 7] = [
     "red.md",
     "green.md",
     "post_green.md",
     "lint_fix.md",
     "requirements.md",
     "todo_select.md",
+    "singleprompt.md",
 ];
 
 impl FsPromptStore {

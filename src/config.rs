@@ -46,6 +46,8 @@ impl ChiefToml {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChiefConfig {
+    #[serde(default = "default_flow")]
+    pub flow: String,
     #[serde(default = "default_agent")]
     pub agent: String,
     #[serde(default)]
@@ -69,6 +71,7 @@ pub struct ChiefConfig {
 impl Default for ChiefConfig {
     fn default() -> Self {
         Self {
+            flow: default_flow(),
             agent: default_agent(),
             model: None,
             model_reasoning_effort: None,
@@ -80,6 +83,10 @@ impl Default for ChiefConfig {
             use_agent_log_truncation_for_stdout_logs: false,
         }
     }
+}
+
+fn default_flow() -> String {
+    "single_prompt".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
