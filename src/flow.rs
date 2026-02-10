@@ -85,8 +85,15 @@ struct AgentRunWithGitChanges {
 struct SinglePromptFailureContext {
     failed_lint: bool,
     failed_test: bool,
-    lint_tail_output: String,
-    test_tail_output: String,
+    touched_files_since_last_retry_reset: Vec<String>,
+    lint_failures: Vec<SinglePromptFailureItem>,
+    test_failures: Vec<SinglePromptFailureItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct SinglePromptFailureItem {
+    command: String,
+    output_tail: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,6 +194,10 @@ pub struct FlowExecution<'a> {
 }
 
 impl<'a> FlowExecution<'a> {
+    const RETRY_CLEANUP_DISCARDED_MSG_PREFIX: &'static str =
+        "Retry cleanup: discarded local git changes before loop";
+    const ITERATION_GIT_CHANGE_DETECTION_MSG: &'static str = "Iteration git change detection";
+
     pub fn selected_suites(&self) -> Vec<TestSuiteConfig> {
         if self.todo.test_suites.is_empty() {
             return Vec::new();
@@ -289,57 +300,130 @@ impl<'a> FlowExecution<'a> {
     }
 
     fn latest_single_prompt_failure_context(&self) -> Result<SinglePromptFailureContext> {
-        let events = self.store.query_events(EventQuery {
-            limit: 200,
-            event_type: None,
-            phase: Some(Phase::SinglePrompt),
-            level: None,
-            contains_text: None,
-        })?;
+        let events = self.todo_events_since_last_retry_reset(1_000)?;
 
-        let mut lint_failure: Option<EventRecord> = None;
-        let mut test_failure: Option<EventRecord> = None;
+        let mut lint_failures = Vec::new();
+        let mut test_failures = Vec::new();
+        let max_output_lines = self.chief_config.agent_log_max_output_lines;
 
         for event in events {
-            if event.run_id != self.run_id {
+            if event.phase != Some(Phase::SinglePrompt) {
                 continue;
             }
-            if event.todo_id.as_deref() != Some(&self.todo.id) {
-                continue;
+
+            // Keep failure context focused on the latest completed iteration only.
+            if event.event_type == EventType::AgentPrompt {
+                break;
             }
+
             if event_exit_code(&event).unwrap_or(0) == 0 {
                 continue;
             }
 
-            match event.event_type {
-                EventType::Lint if lint_failure.is_none() => lint_failure = Some(event),
-                EventType::TestRun if test_failure.is_none() => test_failure = Some(event),
-                _ => {}
-            }
+            let command = event
+                .payload
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_default();
+            let output_tail = event
+                .payload
+                .get("output")
+                .and_then(Value::as_str)
+                .map(|output| tail_output_lines(output, max_output_lines))
+                .unwrap_or_default();
 
-            if lint_failure.is_some() && test_failure.is_some() {
-                break;
+            match event.event_type {
+                EventType::Lint => lint_failures.push(SinglePromptFailureItem {
+                    command,
+                    output_tail,
+                }),
+                EventType::TestRun => test_failures.push(SinglePromptFailureItem {
+                    command,
+                    output_tail,
+                }),
+                _ => {}
             }
         }
 
-        let max_output_lines = self.chief_config.agent_log_max_output_lines;
-        let lint_tail_output = lint_failure
-            .as_ref()
-            .and_then(|event| event.payload.get("output").and_then(Value::as_str))
-            .map(|output| tail_output_lines(output, max_output_lines))
-            .unwrap_or_default();
-        let test_tail_output = test_failure
-            .as_ref()
-            .and_then(|event| event.payload.get("output").and_then(Value::as_str))
-            .map(|output| tail_output_lines(output, max_output_lines))
-            .unwrap_or_default();
+        // query_events returns newest first; prompt context is easier to read oldest->newest.
+        lint_failures.reverse();
+        test_failures.reverse();
+        let touched_files_since_last_retry_reset = self.touched_files_since_last_retry_reset()?;
 
         Ok(SinglePromptFailureContext {
-            failed_lint: lint_failure.is_some(),
-            failed_test: test_failure.is_some(),
-            lint_tail_output,
-            test_tail_output,
+            failed_lint: !lint_failures.is_empty(),
+            failed_test: !test_failures.is_empty(),
+            touched_files_since_last_retry_reset,
+            lint_failures,
+            test_failures,
         })
+    }
+
+    fn has_previous_single_prompt_attempt_since_last_retry_reset(&self) -> Result<bool> {
+        let events = self.todo_events_since_last_retry_reset(1_000)?;
+        Ok(events.into_iter().any(|event| {
+            event.phase == Some(Phase::SinglePrompt) && event.event_type == EventType::AgentPrompt
+        }))
+    }
+
+    fn todo_events_since_last_retry_reset(&self, limit: usize) -> Result<Vec<EventRecord>> {
+        let events = self.store.query_events(EventQuery {
+            limit,
+            event_type: None,
+            phase: None,
+            level: None,
+            contains_text: None,
+        })?;
+
+        let mut filtered = Vec::new();
+        for event in events {
+            if event.todo_id.as_deref() != Some(&self.todo.id) {
+                continue;
+            }
+
+            if event.event_type == EventType::GitOp
+                && event
+                    .msg
+                    .starts_with(Self::RETRY_CLEANUP_DISCARDED_MSG_PREFIX)
+            {
+                break;
+            }
+
+            filtered.push(event);
+        }
+
+        Ok(filtered)
+    }
+
+    fn touched_files_since_last_retry_reset(&self) -> Result<Vec<String>> {
+        let events = self.todo_events_since_last_retry_reset(1_000)?;
+
+        let mut files = BTreeSet::new();
+        for event in events {
+            if event.event_type != EventType::Diff
+                || event.msg != Self::ITERATION_GIT_CHANGE_DETECTION_MSG
+            {
+                continue;
+            }
+
+            let Some(entries) = event.payload.get("touched_files").and_then(Value::as_array) else {
+                continue;
+            };
+
+            for entry in entries {
+                let Some(path) = entry.as_str().map(str::trim) else {
+                    continue;
+                };
+                if !path.is_empty() {
+                    files.insert(path.to_owned());
+                }
+            }
+        }
+
+        Ok(files.into_iter().collect())
     }
 
     pub fn run_suite_command(
@@ -1006,6 +1090,8 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
 
     fn attempt_fix(&mut self, execution: &mut FlowExecution<'_>) -> Result<AgentOutput> {
         let failure_context = execution.latest_single_prompt_failure_context()?;
+        let has_previous_attempts = self.attempts > 0
+            || execution.has_previous_single_prompt_attempt_since_last_retry_reset()?;
 
         let prompt = execution.prompts.render_json(
             "singleprompt.md",
@@ -1014,11 +1100,12 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
                 "suites": self.candidate_suites,
                 "iteration": self.attempts + 1,
                 "run_id": execution.run_id,
-                "first_attempt": self.attempts == 0,
+                "first_attempt": !has_previous_attempts,
                 "failed_lint": failure_context.failed_lint,
                 "failed_test": failure_context.failed_test,
-                "lint_tail_output": failure_context.lint_tail_output,
-                "test_tail_output": failure_context.test_tail_output,
+                "touched_files_since_last_retry_reset": failure_context.touched_files_since_last_retry_reset,
+                "lint_failures": failure_context.lint_failures,
+                "test_failures": failure_context.test_failures,
             }),
         )?;
 
@@ -1946,6 +2033,558 @@ mod tests {
         assert!(
             !log.contains("line-a"),
             "old output lines beyond tail limit should be omitted, got: {log}"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_failure_context_includes_failed_commands_and_output_tails() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "capture failed command context".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let mut chief_config = ChiefConfig::default();
+        chief_config.agent_log_max_output_lines = 2;
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        let mut lint_payload = BTreeMap::new();
+        lint_payload.insert(
+            "command".to_owned(),
+            Value::String(".venv/bin/python -m ruff check .".to_owned()),
+        );
+        lint_payload.insert(
+            "output".to_owned(),
+            Value::String("lint-line-1\nlint-line-2\nlint-line-3".to_owned()),
+        );
+        lint_payload.insert("exit_code".to_owned(), Value::from(1));
+
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::Lint,
+                "lint failed (backend)",
+                lint_payload,
+            )
+            .expect("lint event should log");
+
+        let mut test_payload = BTreeMap::new();
+        test_payload.insert(
+            "command".to_owned(),
+            Value::String("source .venv/bin/activate && pytest tests/".to_owned()),
+        );
+        test_payload.insert(
+            "output".to_owned(),
+            Value::String("test-line-1\ntest-line-2\ntest-line-3".to_owned()),
+        );
+        test_payload.insert("exit_code".to_owned(), Value::from(1));
+
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::TestRun,
+                "test failed (backend)",
+                test_payload,
+            )
+            .expect("test event should log");
+
+        let context = execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+
+        assert!(context.failed_lint, "lint failure should be detected");
+        assert!(context.failed_test, "test failure should be detected");
+        assert_eq!(context.lint_failures.len(), 1);
+        assert_eq!(context.test_failures.len(), 1);
+        assert_eq!(
+            context.lint_failures[0].command,
+            ".venv/bin/python -m ruff check ."
+        );
+        assert_eq!(
+            context.test_failures[0].command,
+            "source .venv/bin/activate && pytest tests/"
+        );
+        assert_eq!(
+            context.lint_failures[0].output_tail,
+            "lint-line-2\nlint-line-3"
+        );
+        assert_eq!(
+            context.test_failures[0].output_tail,
+            "test-line-2\ntest-line-3"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_failure_context_includes_all_latest_iteration_failures_in_order() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "capture all failed commands".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let mut chief_config = ChiefConfig::default();
+        chief_config.agent_log_max_output_lines = 2;
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        // Older iteration failures should be ignored once we hit the latest iteration boundary.
+        execution
+            .log_event(
+                "info",
+                Some(Phase::SinglePrompt),
+                EventType::AgentPrompt,
+                "Agent prompt (single_prompt)",
+                BTreeMap::new(),
+            )
+            .expect("older iteration prompt should log");
+        let mut old_lint_payload = BTreeMap::new();
+        old_lint_payload.insert(
+            "command".to_owned(),
+            Value::String("old-lint-command".to_owned()),
+        );
+        old_lint_payload.insert(
+            "output".to_owned(),
+            Value::String("old-lint-line-1\nold-lint-line-2".to_owned()),
+        );
+        old_lint_payload.insert("exit_code".to_owned(), Value::from(1));
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::Lint,
+                "old lint failed",
+                old_lint_payload,
+            )
+            .expect("older iteration lint event should log");
+
+        // Latest iteration prompt boundary.
+        execution
+            .log_event(
+                "info",
+                Some(Phase::SinglePrompt),
+                EventType::AgentPrompt,
+                "Agent prompt (single_prompt)",
+                BTreeMap::new(),
+            )
+            .expect("latest iteration prompt should log");
+
+        let mut lint_a_payload = BTreeMap::new();
+        lint_a_payload.insert(
+            "command".to_owned(),
+            Value::String("lint-command-a".to_owned()),
+        );
+        lint_a_payload.insert(
+            "output".to_owned(),
+            Value::String("lint-a-line-1\nlint-a-line-2\nlint-a-line-3".to_owned()),
+        );
+        lint_a_payload.insert("exit_code".to_owned(), Value::from(1));
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::Lint,
+                "lint A failed",
+                lint_a_payload,
+            )
+            .expect("lint A should log");
+
+        let mut lint_b_payload = BTreeMap::new();
+        lint_b_payload.insert(
+            "command".to_owned(),
+            Value::String("lint-command-b".to_owned()),
+        );
+        lint_b_payload.insert(
+            "output".to_owned(),
+            Value::String("lint-b-line-1\nlint-b-line-2\nlint-b-line-3".to_owned()),
+        );
+        lint_b_payload.insert("exit_code".to_owned(), Value::from(1));
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::Lint,
+                "lint B failed",
+                lint_b_payload,
+            )
+            .expect("lint B should log");
+
+        let mut test_a_payload = BTreeMap::new();
+        test_a_payload.insert(
+            "command".to_owned(),
+            Value::String("test-command-a".to_owned()),
+        );
+        test_a_payload.insert(
+            "output".to_owned(),
+            Value::String("test-a-line-1\ntest-a-line-2\ntest-a-line-3".to_owned()),
+        );
+        test_a_payload.insert("exit_code".to_owned(), Value::from(1));
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::TestRun,
+                "test A failed",
+                test_a_payload,
+            )
+            .expect("test A should log");
+
+        let mut test_b_payload = BTreeMap::new();
+        test_b_payload.insert(
+            "command".to_owned(),
+            Value::String("test-command-b".to_owned()),
+        );
+        test_b_payload.insert(
+            "output".to_owned(),
+            Value::String("test-b-line-1\ntest-b-line-2\ntest-b-line-3".to_owned()),
+        );
+        test_b_payload.insert("exit_code".to_owned(), Value::from(1));
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::TestRun,
+                "test B failed",
+                test_b_payload,
+            )
+            .expect("test B should log");
+
+        let context = execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+
+        assert!(context.failed_lint);
+        assert!(context.failed_test);
+        assert_eq!(
+            context
+                .lint_failures
+                .iter()
+                .map(|item| item.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lint-command-a", "lint-command-b"]
+        );
+        assert_eq!(
+            context
+                .test_failures
+                .iter()
+                .map(|item| item.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-command-a", "test-command-b"]
+        );
+        assert_eq!(
+            context.lint_failures[0].output_tail,
+            "lint-a-line-2\nlint-a-line-3"
+        );
+        assert_eq!(
+            context.test_failures[1].output_tail,
+            "test-b-line-2\ntest-b-line-3"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn touched_files_since_last_retry_reset_uses_all_runs_and_stops_at_latest_reset() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "collect touched files".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-current".to_owned(),
+            job_id: "job-current".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        let diff_payload = |paths: &[&str]| {
+            let mut payload = BTreeMap::new();
+            payload.insert(
+                "touched_files".to_owned(),
+                Value::Array(
+                    paths
+                        .iter()
+                        .map(|path| Value::String((*path).to_owned()))
+                        .collect(),
+                ),
+            );
+            payload.insert("had_git_changes".to_owned(), Value::Bool(true));
+            payload
+        };
+
+        let old_payload = diff_payload(&["backend/tests/old_should_be_ignored.py"]);
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-older".to_owned(),
+                job_id: Some("job-older".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "info".to_owned(),
+                phase: Some(Phase::SinglePrompt),
+                msg: "Iteration git change detection".to_owned(),
+                event_type: EventType::Diff,
+                payload: old_payload,
+            })
+            .expect("old diff event should log");
+
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-older".to_owned(),
+                job_id: Some("job-older".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "warning".to_owned(),
+                phase: Some(Phase::Red),
+                msg: "Retry cleanup: discarded local git changes before loop 2/10".to_owned(),
+                event_type: EventType::GitOp,
+                payload: {
+                    let mut payload = BTreeMap::new();
+                    payload.insert(
+                        "files".to_owned(),
+                        Value::Array(vec![Value::String(
+                            "backend/tests/old_should_be_ignored.py".to_owned(),
+                        )]),
+                    );
+                    payload
+                },
+            })
+            .expect("reset marker event should log");
+
+        let newer_payload = diff_payload(&["backend/app/main.py", "frontend/src/app/page.tsx"]);
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-resumed".to_owned(),
+                job_id: Some("job-resumed".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "info".to_owned(),
+                phase: Some(Phase::SinglePrompt),
+                msg: "Iteration git change detection".to_owned(),
+                event_type: EventType::Diff,
+                payload: newer_payload,
+            })
+            .expect("newer diff event should log");
+
+        let latest_payload = diff_payload(&["backend/app/main.py", "backend/tests/test_api.py"]);
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-current".to_owned(),
+                job_id: Some("job-current".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "info".to_owned(),
+                phase: Some(Phase::SinglePrompt),
+                msg: "Iteration git change detection".to_owned(),
+                event_type: EventType::Diff,
+                payload: latest_payload,
+            })
+            .expect("latest diff event should log");
+
+        let other_todo_payload = diff_payload(&["backend/ignored_from_other_todo.py"]);
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-current".to_owned(),
+                job_id: Some("job-current".to_owned()),
+                todo_id: Some("todo-other".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "info".to_owned(),
+                phase: Some(Phase::SinglePrompt),
+                msg: "Iteration git change detection".to_owned(),
+                event_type: EventType::Diff,
+                payload: other_todo_payload,
+            })
+            .expect("other-todo event should log");
+
+        let files = execution
+            .touched_files_since_last_retry_reset()
+            .expect("touched file collection should succeed");
+
+        assert_eq!(
+            files,
+            vec![
+                "backend/app/main.py".to_owned(),
+                "backend/tests/test_api.py".to_owned(),
+                "frontend/src/app/page.tsx".to_owned(),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn previous_attempt_detection_spans_runs_and_resets_on_retry_cleanup() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "detect previous attempt".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-current".to_owned(),
+            job_id: "job-current".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        assert!(
+            !execution
+                .has_previous_single_prompt_attempt_since_last_retry_reset()
+                .expect("query should succeed"),
+            "without history this should be treated as first attempt"
+        );
+
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-old".to_owned(),
+                job_id: Some("job-old".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "info".to_owned(),
+                phase: Some(Phase::SinglePrompt),
+                msg: "Agent prompt (single_prompt)".to_owned(),
+                event_type: EventType::AgentPrompt,
+                payload: BTreeMap::new(),
+            })
+            .expect("old prompt event should log");
+
+        assert!(
+            execution
+                .has_previous_single_prompt_attempt_since_last_retry_reset()
+                .expect("query should succeed"),
+            "a previous run attempt should be detected"
+        );
+
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-current".to_owned(),
+                job_id: Some("job-current".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "warning".to_owned(),
+                phase: Some(Phase::Red),
+                msg: "Retry cleanup: discarded local git changes before loop 2/10".to_owned(),
+                event_type: EventType::GitOp,
+                payload: BTreeMap::new(),
+            })
+            .expect("reset marker event should log");
+
+        assert!(
+            !execution
+                .has_previous_single_prompt_attempt_since_last_retry_reset()
+                .expect("query should succeed"),
+            "after retry cleanup reset, prior attempts should be ignored"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
