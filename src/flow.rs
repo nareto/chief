@@ -1249,7 +1249,7 @@ impl TodoFlow for SinglePromptFlow {
     }
 
     fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
-        let candidate_suites = execution.all_suites.to_vec();
+        let candidate_suites = execution.selected_suites();
 
         let mut strategy = SinglePromptPhaseStrategy::new(candidate_suites);
         self.loop_policy.run(&mut strategy, execution)?;
@@ -1413,23 +1413,17 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
                 had_git_changes: true,
             });
 
-        let touched_suites = suites_touched_by_files(&self.candidate_suites, &run.touched_files);
-        for suite in &touched_suites {
+        let suites_for_checks = self.candidate_suites.clone();
+        for suite in &suites_for_checks {
             self.involved_suite_names.insert(suite.name.clone());
         }
-
-        let suites_for_checks = if !touched_suites.is_empty() {
-            touched_suites
-        } else {
-            self.involved_suites()
-        };
 
         if suites_for_checks.is_empty() {
             execution.log_event(
                 "info",
                 Some(Phase::SinglePrompt),
                 EventType::PhaseChange,
-                "single_prompt: no touched/involved suites; skipping lint+test commands",
+                "single_prompt: no todo-associated suites; skipping lint+test commands",
                 BTreeMap::new(),
             )?;
         } else {
@@ -1789,46 +1783,6 @@ fn changed_paths_between_snapshots(
     touched.into_iter().collect()
 }
 
-fn suites_touched_by_files(
-    suites: &[TestSuiteConfig],
-    touched_files: &[String],
-) -> Vec<TestSuiteConfig> {
-    if touched_files.is_empty() {
-        return Vec::new();
-    }
-
-    let normalized_files = touched_files
-        .iter()
-        .map(|path| normalize_repo_relative_path(path))
-        .collect::<Vec<_>>();
-
-    suites
-        .iter()
-        .filter(|suite| {
-            let root = normalize_repo_relative_path(&suite.test_root);
-            if root.is_empty() {
-                return true;
-            }
-            normalized_files.iter().any(|file| {
-                file == &root
-                    || file
-                        .strip_prefix(&root)
-                        .map(|suffix| suffix.starts_with('/'))
-                        .unwrap_or(false)
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-fn normalize_repo_relative_path(path: &str) -> String {
-    path.trim()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_matches('/')
-        .to_owned()
-}
-
 fn wait_for_command_with_cancel(
     child: &mut std::process::Child,
     cancel_signal: &Arc<AtomicBool>,
@@ -1911,11 +1865,9 @@ fn run_test_and_lint(
     suites: &[TestSuiteConfig],
     phase: Phase,
 ) -> Result<bool> {
-    if !run_lint_checks(execution, suites, phase)? {
-        return Ok(false);
-    }
+    let lint_ok = run_lint_checks(execution, suites, phase)?;
 
-    let mut all_ok = true;
+    let mut tests_ok = true;
     for suite in suites {
         let out = execution.run_test_suite(suite, phase)?;
         execution.log_event(
@@ -1944,11 +1896,11 @@ fn run_test_and_lint(
         )?;
 
         if out.exit_code != 0 {
-            all_ok = false;
+            tests_ok = false;
         }
     }
 
-    Ok(all_ok)
+    Ok(lint_ok && tests_ok)
 }
 
 fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
@@ -3314,14 +3266,14 @@ mod tests {
     }
 
     #[test]
-    fn single_prompt_uses_all_suites_in_prompt_even_when_todo_sets_subset() {
+    fn single_prompt_uses_todo_suites_in_prompt_when_todo_sets_subset() {
         let project_dir = temp_project_dir();
         let store = ProjectStore::new(&project_dir);
         store.init().expect("store init should succeed");
 
         let todo = Todo {
             id: "todo-1".to_owned(),
-            todo: "run single prompt with all suites".to_owned(),
+            todo: "run single prompt with todo suites".to_owned(),
             expectations: String::new(),
             priority: 1,
             test_suites: vec!["backend".to_owned()],
@@ -3335,7 +3287,10 @@ mod tests {
             root: project_dir.clone(),
         };
         let chief_config = ChiefConfig::default();
-        let suites = vec![suite_named("backend"), suite_named("frontend")];
+        let suites = vec![
+            suite_named_with_test_command("backend", "exit 0"),
+            suite_named_with_test_command("frontend", "exit 0"),
+        ];
 
         let mut execution = FlowExecution {
             run_id: "run-1".to_owned(),
@@ -3366,8 +3321,72 @@ mod tests {
         );
         assert_eq!(
             rendered[0],
-            vec!["backend".to_owned(), "frontend".to_owned()],
-            "single_prompt prompt should include all configured suites, not todo subset"
+            vec!["backend".to_owned()],
+            "single_prompt prompt should include todo-configured suites only"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn run_test_and_lint_runs_tests_even_when_lint_fails() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "run tests for all suites even when lint fails".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let first_marker = project_dir.join("first-suite-test-ran.txt");
+        let second_marker = project_dir.join("second-suite-test-ran.txt");
+        let mut first =
+            suite_named_with_test_command("first", "printf first > first-suite-test-ran.txt");
+        first.lint_command = Some("exit 1".to_owned());
+        let mut second =
+            suite_named_with_test_command("second", "printf second > second-suite-test-ran.txt");
+        second.lint_command = Some("exit 0".to_owned());
+
+        let all_ok = super::run_test_and_lint(&execution, &[first, second], Phase::SinglePrompt)
+            .expect("test+lint run should complete");
+
+        assert!(!all_ok, "lint failure should keep retry outcome");
+        assert!(
+            first_marker.exists(),
+            "tests should still run for suites whose lint step failed"
+        );
+        assert!(
+            second_marker.exists(),
+            "tests should run for all selected suites after lint checks"
         );
 
         let _ = fs::remove_dir_all(&project_dir);

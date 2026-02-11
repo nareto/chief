@@ -76,7 +76,7 @@ Core library modules:
 
 Included flows:
 
-- `single_prompt` (default): convergence loop with per-iteration checks; always runs all configured suites.
+- `single_prompt` (default): convergence loop with per-iteration checks over the todo's configured suites.
 - `tdd`: legacy RED -> GREEN -> POST_GREEN flow.
 
 Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
