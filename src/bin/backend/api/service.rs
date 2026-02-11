@@ -79,6 +79,11 @@ impl ApiService {
         payload: StartProjectRequest,
     ) -> Result<MessageResponse, ApiError> {
         let context = self.project_context(&project).await?;
+        if !context.config_path.is_file() {
+            return Err(ApiError::chief_yaml_missing(
+                context.config_path.display().to_string(),
+            ));
+        }
         let agents = payload
             .agents
             .unwrap_or(self.default_agents_per_project)
@@ -1164,12 +1169,14 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
 mod tests {
     use super::ApiService;
     use crate::api::error::ApiError;
+    use crate::api::types::StartProjectRequest;
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use chief::scheduler::Scheduler;
     use chief::service::ProjectRegistry;
     use chief::storage::ProjectStore;
+    use rusqlite::Connection;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1274,6 +1281,86 @@ mod tests {
         assert!(
             message.contains("invalid YAML in"),
             "expected invalid YAML error, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_project_rejects_missing_chief_yaml_without_creating_run_or_job_records() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: pending-1
+    todo: Example pending todo
+    expectations: Example expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+        let expected_config_path = project_dir.join("chief.yaml").display().to_string();
+        assert!(
+            !project_dir.join("chief.yaml").exists(),
+            "fixture should intentionally omit chief.yaml"
+        );
+
+        let err = service
+            .start_project(
+                project.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                },
+            )
+            .await
+            .expect_err("start_project should reject when chief.yaml is missing");
+
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "missing chief.yaml should return HTTP 409"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(
+            payload.get("code").and_then(serde_json::Value::as_str),
+            Some("chief_yaml_missing"),
+            "error code should identify missing chief.yaml"
+        );
+        let details = payload
+            .get("details")
+            .expect("error payload should include details");
+        assert_eq!(
+            details
+                .get("config_path")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_config_path.as_str()),
+            "error details should include the missing config path"
+        );
+        let hint = details
+            .get("hint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            hint.contains("chief init"),
+            "error details should include a remediation hint: {hint}"
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let jobs = store.list_jobs(50).expect("jobs should be readable");
+        assert!(
+            jobs.is_empty(),
+            "rejected start_project should not create job records"
+        );
+        let conn = Connection::open(&store.db_path).expect("chief.db should be readable");
+        let run_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
+            .expect("runs table should be queryable");
+        assert_eq!(
+            run_count, 0,
+            "rejected start_project should not create run records"
         );
     }
 

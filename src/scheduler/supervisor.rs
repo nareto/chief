@@ -363,8 +363,10 @@ mod tests {
         );
 
         fs::write(path.join("README.md"), "seed\n").expect("failed to write seed file");
+        fs::write(path.join("chief.yaml"), "chief: {}\n")
+            .expect("failed to write chief.yaml fixture");
         let add = Command::new("git")
-            .args(["add", "README.md"])
+            .args(["add", "README.md", "chief.yaml"])
             .current_dir(path)
             .output()
             .expect("failed to git add seed file");

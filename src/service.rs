@@ -78,6 +78,16 @@ impl ProjectContext {
         Ok(())
     }
 
+    pub fn ensure_chief_yaml_exists_for_run(&self) -> Result<()> {
+        if self.config_path.is_file() {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "missing required chief config at {}. create chief.yaml (run `chief init` or copy chief.example.yaml)",
+            self.config_path.display()
+        ))
+    }
+
     pub fn build_agent(&self, model_override: Option<String>) -> Arc<dyn CodingAgent> {
         if self.chief_yaml.chief.agent.eq_ignore_ascii_case("claude") {
             Arc::new(ClaudeAgent::from_config(
@@ -317,6 +327,7 @@ impl ChiefEngine {
     }
 
     pub fn start_run(&self) -> Result<String> {
+        self.project.ensure_chief_yaml_exists_for_run()?;
         let run_id = Uuid::new_v4().to_string();
         self.project.store.start_run(&run_id)?;
         Ok(run_id)
@@ -1058,7 +1069,7 @@ fn is_unrecoverable_sqlite_error(err: &rusqlite::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProjectRegistry, is_transient_lock_contention_error,
+        ChiefEngine, ProjectContext, ProjectRegistry, is_transient_lock_contention_error,
         retry_transient_lock_contention_with_delay,
     };
     use crate::orchestrator::OrchestratorError;
@@ -1100,6 +1111,39 @@ mod tests {
             output.status.success(),
             "git init failed: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn chief_engine_start_run_requires_chief_yaml() {
+        let root = TempDir::new("missing-chief-yaml");
+        let project_dir = root.path.join("project");
+        init_git_repo(&project_dir);
+        let context = ProjectContext::load(&project_dir).expect("project context should load");
+        assert!(
+            !context.config_path.exists(),
+            "fixture should intentionally omit chief.yaml"
+        );
+        assert!(
+            !context.store.db_path.exists(),
+            "chief.db should not exist before start_run"
+        );
+
+        let err = ChiefEngine::new(context.clone())
+            .start_run()
+            .expect_err("start_run should fail without chief.yaml");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("missing required chief config"),
+            "error should explain missing config: {rendered}"
+        );
+        assert!(
+            rendered.contains("chief.yaml"),
+            "error should reference chief.yaml path: {rendered}"
+        );
+        assert!(
+            !context.store.db_path.exists(),
+            "rejected start_run should not create chief.db"
         );
     }
 

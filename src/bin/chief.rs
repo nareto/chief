@@ -165,7 +165,22 @@ fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
+fn ensure_chief_yaml_exists(project_dir: &Path) -> Result<()> {
+    let config_path = project_dir.join("chief.yaml");
+    if config_path.is_file() {
+        return Ok(());
+    }
+    bail!(
+        "missing required chief config at {}. create chief.yaml (run `chief init` or copy chief.example.yaml)",
+        config_path.display()
+    )
+}
+
 fn run(cli: &Cli) -> Result<()> {
+    if !matches!(cli.command, Some(Commands::Init(_))) {
+        ensure_chief_yaml_exists(&cli.project_dir)?;
+    }
+
     if let Some(command) = &cli.command {
         return run_command(cli, command);
     }
@@ -412,6 +427,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
+        let temp = TempDir::new("run-missing-chief-yaml");
+        let cli = Cli {
+            project_dir: temp.path.clone(),
+            flow: None,
+            model: None,
+            max_retries: None,
+            requirements: Vec::new(),
+            requirements_file: Vec::new(),
+            command: None,
+        };
+
+        let err = run(&cli).expect_err("run should reject projects missing chief.yaml");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("missing required chief config"),
+            "error should clearly explain missing chief.yaml: {rendered}"
+        );
+        assert!(
+            rendered.contains("chief.yaml"),
+            "error should include chief.yaml path: {rendered}"
+        );
+        assert!(
+            !temp.path.join("chief.db").exists(),
+            "rejected run should not execute todo processing or create chief.db"
+        );
     }
 
     #[test]

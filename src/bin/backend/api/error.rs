@@ -59,6 +59,18 @@ impl ApiError {
         }
     }
 
+    pub fn chief_yaml_missing(config_path: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: "chief.yaml is required before starting a run for this project".to_owned(),
+            code: Some("chief_yaml_missing".to_owned()),
+            details: Some(serde_json::json!({
+                "config_path": config_path.into(),
+                "hint": "create chief.yaml (run `chief init` or copy chief.example.yaml)",
+            })),
+        }
+    }
+
     pub fn internal(error: anyhow::Error) -> Self {
         if let Some(reset) = db_reset_required_from_anyhow(&error) {
             return Self {
