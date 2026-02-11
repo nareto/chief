@@ -116,7 +116,8 @@ impl ApiService {
     }
 
     pub async fn get_todos(&self, project: &str) -> Result<TodosResponse, ApiError> {
-        let context = self.project_context(project).await?;
+        let mut context = self.project_context(project).await?;
+        context.refresh().map_err(ApiError::internal)?;
         let todos = context.store.list_todos().map_err(ApiError::internal)?;
         Ok(TodosResponse { todos })
     }
@@ -294,7 +295,8 @@ impl ApiService {
     }
 
     pub async fn get_state(&self, project: &str) -> Result<StateResponse, ApiError> {
-        let context = self.project_context(project).await?;
+        let mut context = self.project_context(project).await?;
+        context.refresh().map_err(ApiError::internal)?;
         let views = self.scheduler.list_project_views().await;
         let runtime = views.into_iter().find(|view| view.name == project);
 
@@ -1087,5 +1089,260 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
             "unsupported phase '{}'",
             other
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiService;
+    use crate::api::error::ApiError;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use chief::scheduler::Scheduler;
+    use chief::service::ProjectRegistry;
+    use chief::storage::ProjectStore;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use uuid::Uuid;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("chief-api-service-{label}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).expect("failed to create temporary directory");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-c")
+            .arg("safe.directory=*")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run git {}: {err}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed: stdout={} stderr={}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn init_git_repo(project_dir: &Path) {
+        run_git(project_dir, &["init"]);
+        run_git(
+            project_dir,
+            &[
+                "config",
+                "user.email",
+                "chief-api-service-tests@example.com",
+            ],
+        );
+        run_git(
+            project_dir,
+            &["config", "user.name", "Chief API Service Tests"],
+        );
+    }
+
+    fn write_todos(project_dir: &Path, todos_yaml: &str) {
+        fs::write(project_dir.join("todos.yaml"), format!("{todos_yaml}\n"))
+            .expect("failed to write todos.yaml");
+    }
+
+    fn setup_service(initial_todos_yaml: &str) -> (TempDir, ApiService, String, PathBuf) {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(&project_dir, initial_todos_yaml);
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+        (workspace, service, project_name, project_dir)
+    }
+
+    async fn assert_invalid_yaml_api_error(err: ApiError) {
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        let message = payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.contains("invalid YAML in"),
+            "expected invalid YAML error, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_todos_refreshes_from_todos_yaml_without_db_reset() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: todo-in-db
+    todo: Existing todo
+    expectations: Existing expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: todo-in-db
+    todo: Existing todo
+    expectations: Existing expectations
+    priority: 1
+    test_suites: []
+    status: pending
+  - id: manual-new
+    todo: Manually added todo
+    expectations: Appears without reset_db
+    priority: 8
+    test_suites: []
+    status: pending"#,
+        );
+
+        let response = service
+            .get_todos(&project)
+            .await
+            .expect("get_todos should succeed after manual todos.yaml edit");
+
+        assert!(
+            response.todos.iter().any(|todo| todo.id == "manual-new"),
+            "new todo from todos.yaml should be visible via get_todos"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_and_todos_reflect_manual_todo_edits() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: todo-alpha
+    todo: Original todo text
+    expectations: Original expectations
+    priority: 1
+    test_suites: []
+    status: pending
+  - id: todo-beta
+    todo: Already done
+    expectations: Keep done
+    priority: 2
+    test_suites: []
+    status: done"#,
+        );
+
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: todo-alpha
+    todo: Edited todo text from file
+    expectations: Edited expectations from file
+    priority: 9
+    test_suites: []
+    status: done
+  - id: todo-beta
+    todo: Already done
+    expectations: Keep done
+    priority: 2
+    test_suites: []
+    status: done"#,
+        );
+
+        let todos = service
+            .get_todos(&project)
+            .await
+            .expect("get_todos should reflect manual todo edits");
+        let edited = todos
+            .todos
+            .iter()
+            .find(|todo| todo.id == "todo-alpha")
+            .expect("edited todo should exist");
+        assert_eq!(edited.todo, "Edited todo text from file");
+        assert_eq!(edited.expectations, "Edited expectations from file");
+        assert_eq!(edited.priority, 9);
+
+        let state = service
+            .get_state(&project)
+            .await
+            .expect("get_state should refresh todos before progress calculation");
+        assert_eq!(
+            state.todos.total, 2,
+            "total todos should reflect file edits"
+        );
+        assert_eq!(
+            state.todos.completed, 2,
+            "completed count should reflect edited todo status"
+        );
+        assert_eq!(
+            state.todos.available, 0,
+            "available count should reflect edited todo status"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_endpoints_return_api_errors_for_invalid_todos_yaml() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: valid-todo
+    todo: Valid baseline
+    expectations: Baseline expectations
+    priority: 3
+    test_suites: []
+    status: pending"#,
+        );
+
+        fs::write(
+            project_dir.join("todos.yaml"),
+            "todos:\n  - id: broken\n    todo: [missing quote\n",
+        )
+        .expect("failed to write invalid todos.yaml");
+
+        let todos_error = service
+            .get_todos(&project)
+            .await
+            .expect_err("get_todos should fail for invalid todos.yaml");
+        assert_invalid_yaml_api_error(todos_error).await;
+
+        let state_error = service
+            .get_state(&project)
+            .await
+            .expect_err("get_state should fail for invalid todos.yaml");
+        assert_invalid_yaml_api_error(state_error).await;
     }
 }
