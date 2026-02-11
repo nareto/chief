@@ -15,6 +15,7 @@ use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -370,6 +371,7 @@ impl ChiefEngine {
             all_suites: &self.project.chief_yaml.suites,
             todo,
             cancel_signal,
+            prepared_suites: RefCell::new(std::collections::BTreeSet::new()),
         };
 
         flow.run_todo(&mut execution)

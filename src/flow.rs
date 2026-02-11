@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::fs;
@@ -85,15 +86,25 @@ struct AgentRunWithGitChanges {
 struct SinglePromptFailureContext {
     failed_lint: bool,
     failed_test: bool,
+    failed_other: bool,
     touched_files_since_last_retry_reset: Vec<String>,
     lint_failures: Vec<SinglePromptFailureItem>,
     test_failures: Vec<SinglePromptFailureItem>,
+    other_failures: Vec<SinglePromptFailureItem>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 struct SinglePromptFailureItem {
+    event_id: i64,
+    event_type: String,
+    message: String,
     command: String,
     output_tail: String,
+    sqlite_query: String,
+}
+
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,6 +245,7 @@ pub struct FlowExecution<'a> {
     pub all_suites: &'a [TestSuiteConfig],
     pub todo: Todo,
     pub cancel_signal: Arc<AtomicBool>,
+    pub(crate) prepared_suites: RefCell<BTreeSet<String>>,
 }
 
 impl<'a> FlowExecution<'a> {
@@ -347,6 +359,7 @@ impl<'a> FlowExecution<'a> {
 
         let mut lint_failures = Vec::new();
         let mut test_failures = Vec::new();
+        let mut other_failures = Vec::new();
         let max_output_lines = self.chief_config.agent_log_max_output_lines;
 
         for event in events {
@@ -359,49 +372,50 @@ impl<'a> FlowExecution<'a> {
                 break;
             }
 
-            if event_exit_code(&event).unwrap_or(0) == 0 {
+            let has_nonzero_exit = event_exit_code(&event).unwrap_or(0) != 0;
+            let is_warning_or_error = event.level == "warning" || event.level == "error";
+
+            match event.event_type {
+                EventType::Lint if has_nonzero_exit => lint_failures.push(
+                    single_prompt_failure_item_from_event(&event, max_output_lines),
+                ),
+                EventType::TestRun if has_nonzero_exit => test_failures.push(
+                    single_prompt_failure_item_from_event(&event, max_output_lines),
+                ),
+                _ => {}
+            }
+
+            if matches!(event.event_type, EventType::Lint | EventType::TestRun) {
                 continue;
             }
 
-            let command = event
-                .payload
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|command| !command.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_default();
-            let output_tail = event
-                .payload
-                .get("output")
-                .and_then(Value::as_str)
-                .map(|output| tail_output_lines(output, max_output_lines))
-                .unwrap_or_default();
-
-            match event.event_type {
-                EventType::Lint => lint_failures.push(SinglePromptFailureItem {
-                    command,
-                    output_tail,
-                }),
-                EventType::TestRun => test_failures.push(SinglePromptFailureItem {
-                    command,
-                    output_tail,
-                }),
-                _ => {}
+            if has_nonzero_exit
+                || matches!(
+                    event.event_type,
+                    EventType::PhaseFailure | EventType::Error | EventType::AgentResponse
+                ) && is_warning_or_error
+            {
+                other_failures.push(single_prompt_failure_item_from_event(
+                    &event,
+                    max_output_lines,
+                ));
             }
         }
 
         // query_events returns newest first; prompt context is easier to read oldest->newest.
         lint_failures.reverse();
         test_failures.reverse();
+        other_failures.reverse();
         let touched_files_since_last_retry_reset = self.touched_files_since_last_retry_reset()?;
 
         Ok(SinglePromptFailureContext {
             failed_lint: !lint_failures.is_empty(),
             failed_test: !test_failures.is_empty(),
+            failed_other: !other_failures.is_empty(),
             touched_files_since_last_retry_reset,
             lint_failures,
             test_failures,
+            other_failures,
         })
     }
 
@@ -487,6 +501,7 @@ impl<'a> FlowExecution<'a> {
     }
 
     pub fn run_test_suite(&self, suite: &TestSuiteConfig, phase: Phase) -> Result<AgentOutput> {
+        self.ensure_suite_prepared(suite, phase)?;
         let cmd = suite_command_for_kind(suite, SuiteCommandKind::Test, None)
             .unwrap_or_else(|| suite.test_command.clone());
         let cwd = suite_command_cwd(&self.project_dir, suite);
@@ -507,6 +522,7 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<Option<AgentOutput>> {
+        self.ensure_suite_prepared(suite, phase)?;
         let Some(cmd) = suite_command_for_kind(suite, SuiteCommandKind::Lint, None) else {
             return Ok(None);
         };
@@ -529,6 +545,7 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<Option<AgentOutput>> {
+        self.ensure_suite_prepared(suite, phase)?;
         let Some(command) = suite_command_for_kind(suite, SuiteCommandKind::PostGreen, None) else {
             return Ok(None);
         };
@@ -685,6 +702,79 @@ impl<'a> FlowExecution<'a> {
             .max(1)
     }
 
+    fn ensure_suite_prepared(&self, suite: &TestSuiteConfig, phase: Phase) -> Result<()> {
+        if self.prepared_suites.borrow().contains(&suite.name) {
+            return Ok(());
+        }
+
+        self.run_suite_prepare_command(suite, phase, "test_init", suite.test_init.as_deref())?;
+        self.run_suite_prepare_command(suite, phase, "test_setup", suite.test_setup.as_deref())?;
+        self.prepared_suites.borrow_mut().insert(suite.name.clone());
+        Ok(())
+    }
+
+    fn run_suite_prepare_command(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+        kind: &str,
+        command: Option<&str>,
+    ) -> Result<()> {
+        let Some(command) = command.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(());
+        };
+        let cwd = suite_command_cwd(&self.project_dir, suite);
+        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::PhaseChange,
+            format!("Running {kind} command ({})", suite.name),
+            payload_from_json(json!({
+                "suite": suite.name,
+                "kind": kind,
+                "command": command,
+                "cwd": cwd.display().to_string(),
+                "timeout_seconds": timeout_seconds,
+            })),
+        )?;
+        let out = self.run_suite_command(command, &cwd, &suite.env, timeout_seconds)?;
+        self.log_event(
+            if out.exit_code == 0 {
+                "info"
+            } else {
+                "warning"
+            },
+            Some(phase),
+            EventType::Msg,
+            format!(
+                "{kind} command {} ({})",
+                if out.exit_code == 0 {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                suite.name
+            ),
+            payload_from_json(json!({
+                "suite": suite.name,
+                "kind": kind,
+                "command": out.command,
+                "exit_code": out.exit_code,
+                "output": out.merged_output,
+            })),
+        )?;
+        if out.exit_code != 0 {
+            return Err(anyhow!(
+                "{} command failed for suite {} (exit code {})",
+                kind,
+                suite.name,
+                out.exit_code
+            ));
+        }
+        Ok(())
+    }
+
     fn log_suite_command_started(
         &self,
         phase: Phase,
@@ -729,6 +819,42 @@ fn tail_output_lines(output: &str, max_lines: usize) -> String {
         .rev()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn single_prompt_failure_item_from_event(
+    event: &EventRecord,
+    max_output_lines: usize,
+) -> SinglePromptFailureItem {
+    let command = event
+        .payload
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let raw_output = event
+        .payload
+        .get("output")
+        .and_then(Value::as_str)
+        .or_else(|| event.payload.get("stderr").and_then(Value::as_str))
+        .or_else(|| event.payload.get("stdout").and_then(Value::as_str))
+        .unwrap_or("");
+    let output_tail = tail_output_lines(raw_output, max_output_lines);
+    let event_id = event.id.unwrap_or_default();
+    let run_id = escape_sql_literal(&event.run_id);
+    let todo_id = escape_sql_literal(event.todo_id.as_deref().unwrap_or_default());
+    let sqlite_query = format!(
+        "SELECT id,timestamp,phase,msg,payload FROM events WHERE run_id='{run_id}' AND todo_id='{todo_id}' AND id={event_id} LIMIT 1;"
+    );
+    SinglePromptFailureItem {
+        event_id,
+        event_type: event.event_type.as_str().to_owned(),
+        message: event.msg.clone(),
+        command,
+        output_tail,
+        sqlite_query,
+    }
 }
 
 pub trait PhaseStrategy {
@@ -1219,9 +1345,11 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
                 "first_attempt": !has_previous_attempts,
                 "failed_lint": failure_context.failed_lint,
                 "failed_test": failure_context.failed_test,
+                "failed_other": failure_context.failed_other,
                 "touched_files_since_last_retry_reset": failure_context.touched_files_since_last_retry_reset,
                 "lint_failures": failure_context.lint_failures,
                 "test_failures": failure_context.test_failures,
+                "other_failures": failure_context.other_failures,
             }),
         )?;
 
@@ -1744,6 +1872,7 @@ fn run_test_and_lint(
         return Ok(false);
     }
 
+    let mut all_ok = true;
     for suite in suites {
         let out = execution.run_test_suite(suite, phase)?;
         execution.log_event(
@@ -1772,11 +1901,11 @@ fn run_test_and_lint(
         )?;
 
         if out.exit_code != 0 {
-            return Ok(false);
+            all_ok = false;
         }
     }
 
-    Ok(true)
+    Ok(all_ok)
 }
 
 fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
@@ -1797,7 +1926,8 @@ mod tests {
     use crate::storage::ProjectStore;
     use anyhow::{Result, anyhow};
     use serde_json::Value;
-    use std::collections::BTreeMap;
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
@@ -2020,14 +2150,14 @@ mod tests {
     }
 
     #[test]
-    fn run_test_and_lint_stops_after_first_failed_test() {
+    fn run_test_and_lint_runs_all_suites_and_returns_false_when_any_test_fails() {
         let project_dir = temp_project_dir();
         let store = ProjectStore::new(&project_dir);
         store.init().expect("store init should succeed");
 
         let todo = Todo {
             id: "todo-1".to_owned(),
-            todo: "stop test loop on first failure".to_owned(),
+            todo: "run all suites even when one fails".to_owned(),
             expectations: String::new(),
             priority: 1,
             test_suites: Vec::new(),
@@ -2056,6 +2186,7 @@ mod tests {
             all_suites: &[],
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         let suites = vec![
@@ -2066,10 +2197,72 @@ mod tests {
         let all_ok = super::run_test_and_lint(&execution, &suites, Phase::SinglePrompt)
             .expect("test+lint run should complete");
 
-        assert!(!all_ok, "first failure should return retry outcome");
+        assert!(!all_ok, "any suite failure should return retry outcome");
         assert!(
-            !marker_file.exists(),
-            "second suite command should not execute after first failure"
+            marker_file.exists(),
+            "all suites should run even when an earlier suite fails"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn suite_preparation_commands_run_once_per_suite_per_execution() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "suite setup should run once".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let marker_file = project_dir.join("suite-setup.log");
+        let mut suite = suite_named_with_test_command("backend", "cat suite-setup.log >/dev/null");
+        suite.test_init = Some("printf init >> suite-setup.log".to_owned());
+        suite.test_setup = Some("printf setup >> suite-setup.log".to_owned());
+
+        let first_run = super::run_test_and_lint(&execution, &[suite.clone()], Phase::SinglePrompt)
+            .expect("first test+lint run should complete");
+        let second_run = super::run_test_and_lint(&execution, &[suite], Phase::SinglePrompt)
+            .expect("second test+lint run should complete");
+
+        assert!(first_run, "first suite run should pass");
+        assert!(second_run, "second suite run should pass");
+
+        let marker = fs::read_to_string(&marker_file)
+            .expect("suite preparation marker should be created exactly once");
+        assert_eq!(
+            marker, "initsetup",
+            "test_init and test_setup should execute only once for a suite in a worker execution"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
@@ -2111,6 +2304,7 @@ mod tests {
             all_suites: &[],
             todo: todo.clone(),
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         execution
@@ -2225,6 +2419,7 @@ mod tests {
             all_suites: &[],
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         let mut payload = BTreeMap::new();
@@ -2303,6 +2498,7 @@ mod tests {
             all_suites: &[],
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         let mut lint_payload = BTreeMap::new();
@@ -2347,14 +2543,38 @@ mod tests {
             )
             .expect("test event should log");
 
+        let mut other_payload = BTreeMap::new();
+        other_payload.insert(
+            "command".to_owned(),
+            Value::String(
+                "codex exec --json --dangerously-bypass-approvals-and-sandbox -".to_owned(),
+            ),
+        );
+        other_payload.insert(
+            "output".to_owned(),
+            Value::String("agent-line-1\nagent-line-2\nagent-line-3".to_owned()),
+        );
+        other_payload.insert("exit_code".to_owned(), Value::from(1));
+        execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::AgentResponse,
+                "agent response failed",
+                other_payload,
+            )
+            .expect("other failure event should log");
+
         let context = execution
             .latest_single_prompt_failure_context()
             .expect("single prompt failure context should resolve");
 
         assert!(context.failed_lint, "lint failure should be detected");
         assert!(context.failed_test, "test failure should be detected");
+        assert!(context.failed_other, "other failure should be detected");
         assert_eq!(context.lint_failures.len(), 1);
         assert_eq!(context.test_failures.len(), 1);
+        assert_eq!(context.other_failures.len(), 1);
         assert_eq!(
             context.lint_failures[0].command,
             ".venv/bin/python -m ruff check ."
@@ -2370,6 +2590,22 @@ mod tests {
         assert_eq!(
             context.test_failures[0].output_tail,
             "test-line-2\ntest-line-3"
+        );
+        assert_eq!(context.other_failures[0].event_type, "agent_response");
+        assert_eq!(context.other_failures[0].message, "agent response failed");
+        assert_eq!(
+            context.other_failures[0].output_tail,
+            "agent-line-2\nagent-line-3"
+        );
+        assert!(
+            context.lint_failures[0].event_id > 0,
+            "lint failure should include persisted event id"
+        );
+        assert!(
+            context.lint_failures[0]
+                .sqlite_query
+                .contains("FROM events WHERE run_id='run-1' AND todo_id='todo-1' AND id="),
+            "lint failure should include an event-specific sqlite query"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
@@ -2412,6 +2648,7 @@ mod tests {
             all_suites: &[],
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         // Older iteration failures should be ignored once we hit the latest iteration boundary.
@@ -2541,6 +2778,7 @@ mod tests {
 
         assert!(context.failed_lint);
         assert!(context.failed_test);
+        assert!(!context.failed_other);
         assert_eq!(
             context
                 .lint_failures
@@ -2605,6 +2843,7 @@ mod tests {
             all_suites: &[],
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         let diff_payload = |paths: &[&str]| {
@@ -2762,6 +3001,7 @@ mod tests {
             all_suites: &[],
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         assert!(
@@ -2855,6 +3095,7 @@ mod tests {
             all_suites: &suites,
             todo,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
         let flow = build_flow(FlowKind::SinglePrompt);

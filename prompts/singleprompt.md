@@ -34,48 +34,47 @@ The files touched by your previous iterations are:
 
 
 {% if failed_lint %}
-Your previous work did not pass lint. 
+Your previous work did not pass lint. Use sqlite command on chief.db to get the full output.
 {% for failure in lint_failures %}
-Command:
-{% if failure.command %}
-`{{ failure.command }}`
-{% else %}
-(The command that failed was not captured.)
-{% endif %}
-Output (tail only):
+COMMAND: {% if failure.command %}`{{ failure.command }}`{% else %}(The command that failed was not captured.){% endif %}
+OUTPUT TAIL:
 {{ failure.output_tail }}
+SQLITE QUERY: `{{ failure.sqlite_query }}`
 {% if not loop.last %}
 {% endif %}
 {% endfor %}
-
-If you need the full outputs, run the queries below with `sqlite3 chief.db "<query>"`.
-
-This query returns the most recent failed lint event for this todo in this run by event time (with `id` as tie-breaker), including full payload and command/output details.
-`SELECT id,timestamp,phase,msg,payload FROM events WHERE run_id='{{ run_id }}' AND todo_id='{{ todo.id }}' AND event_type='lint' AND CAST(json_extract(payload,'$.exit_code') AS INTEGER) != 0 ORDER BY timestamp DESC, id DESC LIMIT 1;`
 {% endif %}
 
 {% if failed_test %}
-Your previous work did not pass tests.
+Your previous work did not pass tests. Use sqlite command on chief.db to get the full output.
 {% for failure in test_failures %}
-Command:
-{% if failure.command %}
-`{{ failure.command }}`
-{% else %}
-(The command that failed was not captured.)
-{% endif %}
-Output (tail only):
+COMMAND: {% if failure.command %}`{{ failure.command }}`{% else %}(The command that failed was not captured.){% endif %}
+OUTPUT TAIL:
 {{ failure.output_tail }}
+SQLITE QUERY: `{{ failure.sqlite_query }}`
 {% if not loop.last %}
 
 {% endif %}
 {% endfor %}
-
-If you need the full outputs, run the queries below with `sqlite3 chief.db "<query>"`.
-
-This query returns the most recent failed test event for this todo in this run by event time (with `id` as tie-breaker), including full payload and command/output details.
-`SELECT id,timestamp,phase,msg,payload FROM events WHERE run_id='{{ run_id }}' AND todo_id='{{ todo.id }}' AND event_type='test_run' AND CAST(json_extract(payload,'$.exit_code') AS INTEGER) != 0 ORDER BY timestamp DESC, id DESC LIMIT 1;`
 {% endif %}
-{% if not failed_lint and not failed_test %}
+
+{% if failed_other %}
+Your previous work had the following failures. Use sqlite command on chief.db to get the full output. 
+{% for failure in other_failures %}
+EVENT TYPE: `{{ failure.event_type }}`
+MESSAGE: {{ failure.message }}
+COMMAND: {% if failure.command %}`{{ failure.command }}`{% else %}(The command that failed was not captured.){% endif %}
+OUTPUT TAIL:
+{{ failure.output_tail }}
+SQLITE QUERY: `{{ failure.sqlite_query }}`
+{% if not loop.last %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if not failed_lint and not failed_test and not failed_other %}
+
+
+---
 After some checks, we just learned that the work done in previous iterations passed all linting and tests. In this case, your task changes slightly: check that the files touched by previous iterations do indeed satisfy the todo. 
 
 If you find the implementation and the tests to be both complete, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
