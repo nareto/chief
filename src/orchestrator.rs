@@ -122,6 +122,7 @@ where
 mod tests {
     use super::{OrchestratorError, retry_with_policy, retry_with_policy_and_hook_and_delay};
     use anyhow::anyhow;
+    use std::io;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -201,5 +202,46 @@ mod tests {
 
         assert!(matches!(err, OrchestratorError::Retryable(_)));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn lock_io_retry_policy_runs_three_ten_second_backoffs_before_terminal_retryable() {
+        let attempts = AtomicUsize::new(0);
+        let mut retry_callbacks = Vec::new();
+        let mut sleep_calls = Vec::new();
+
+        let err = retry_with_policy_and_hook_and_delay(
+            4,
+            |_attempt, _max| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(OrchestratorError::retryable(anyhow!(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "index.lock busy",
+                ))))
+            },
+            |_attempt, _max, err| {
+                let transient_io = err.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<io::Error>()
+                        .map(|io_err| io_err.kind() == io::ErrorKind::WouldBlock)
+                        .unwrap_or(false)
+                });
+                if transient_io {
+                    Some(Duration::from_secs(10))
+                } else {
+                    None
+                }
+            },
+            |attempt, max, _err, delay| {
+                retry_callbacks.push((attempt, max, delay.as_secs()));
+            },
+            |delay| sleep_calls.push(delay.as_secs()),
+        )
+        .expect_err("lock/io contention should exhaust retries");
+
+        assert!(matches!(err, OrchestratorError::Retryable(_)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(retry_callbacks, vec![(1, 4, 10), (2, 4, 10), (3, 4, 10)]);
+        assert_eq!(sleep_calls, vec![10, 10, 10]);
     }
 }

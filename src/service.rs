@@ -1237,6 +1237,53 @@ mod tests {
     }
 
     #[test]
+    fn transient_io_retry_path_retries_three_times_with_ten_second_delays() {
+        let mut operation_calls = 0usize;
+        let mut retry_callbacks = Vec::new();
+        let mut sleeps = Vec::new();
+        let err = retry_transient_lock_contention_with_delay::<(), _, _, _>(
+            anyhow!(io::Error::new(io::ErrorKind::WouldBlock, "index.lock busy")),
+            || {
+                operation_calls += 1;
+                Err(OrchestratorError::retryable(anyhow!(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "git index lock timed out",
+                ))))
+            },
+            |attempt, total, _err, delay| {
+                retry_callbacks.push((attempt, total, delay.as_secs()));
+            },
+            |delay| sleeps.push(delay.as_secs()),
+        )
+        .expect_err("transient io retries should eventually fail");
+
+        assert!(matches!(err, OrchestratorError::Unrecoverable(_)));
+        let rendered = err.as_error().to_string();
+        assert!(
+            rendered.contains("retry budget exhausted"),
+            "terminal io retry failure should mention exhausted retry budget: {rendered}"
+        );
+        assert!(
+            rendered.to_ascii_lowercase().contains("timed out"),
+            "terminal io retry failure should preserve final io details: {rendered}"
+        );
+        assert_eq!(
+            operation_calls, 3,
+            "exactly three retry executions expected"
+        );
+        assert_eq!(
+            retry_callbacks,
+            vec![(1, 3, 10), (2, 3, 10), (3, 3, 10)],
+            "retry callbacks should report attempt counters and 10-second delays"
+        );
+        assert_eq!(
+            sleeps,
+            vec![10, 10, 10],
+            "sleep should be invoked between retries"
+        );
+    }
+
+    #[test]
     fn transient_lock_retry_path_can_succeed_after_retries() {
         let mut operation_calls = 0usize;
         let mut sleeps = Vec::new();

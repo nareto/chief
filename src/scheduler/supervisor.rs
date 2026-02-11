@@ -545,5 +545,9 @@ mod tests {
             runtime_error.contains(".git/index.lock"),
             "runtime last_error should preserve lock path details: {runtime_error}"
         );
+        assert!(
+            runtime_error.contains("retry budget exhausted"),
+            "runtime last_error should preserve retry exhaustion detail: {runtime_error}"
+        );
     }
 }
