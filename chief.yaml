@@ -1,0 +1,37 @@
+chief:
+  flow: single_prompt
+  agent: codex
+  agent_extra_args: []
+  max_retries: 10
+  agent_timeout_seconds: 2700
+  suite_command_timeout_seconds: 1800
+  agent_log_max_output_lines: 10
+  agent_log_max_output_chars: 1500
+  use_agent_log_truncation_for_stdout_logs: false
+
+suites:
+  - name: backend
+    language: Rust
+    framework: cargo test
+    test_root: .
+    test_command: cargo test
+    target_type: project
+    default_target: .
+    file_patterns: []
+    lint_command: cargo clippy
+    post_green_command: cargo test
+    env: {}
+    strip_root_from_target: true
+
+  - name: frontend
+    language: TypeScript
+    framework: Vitest
+    test_root: frontend
+    test_command: npm run test
+    target_type: project
+    default_target: .
+    file_patterns: ["*.test.ts", "*.test.tsx"]
+    post_green_command: npm run build
+    env:
+      NODE_ENV: test
+    strip_root_from_target: true
