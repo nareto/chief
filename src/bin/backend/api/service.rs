@@ -1403,8 +1403,8 @@ mod tests {
             .reset_db_from_todos_file()
             .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
 
-        let registry =
-            ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
         let scheduler = Scheduler::new(registry, 4);
         let service = ApiService::new(scheduler, 1);
 

@@ -103,6 +103,13 @@ struct SinglePromptFailureItem {
     sqlite_query: String,
 }
 
+const SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE: &str =
+    "single_prompt iteration changed files; waiting for two consecutive no-change iterations";
+const SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY: &str = "single_prompt_retry_reason";
+const SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES: &str = "convergence_changed_files";
+const SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY: &str =
+    "single_prompt_retry_has_associated_test_suites";
+
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
@@ -361,6 +368,7 @@ impl<'a> FlowExecution<'a> {
         let mut test_failures = Vec::new();
         let mut other_failures = Vec::new();
         let max_output_lines = self.chief_config.agent_log_max_output_lines;
+        let todo_has_associated_test_suites = !self.todo.test_suites.is_empty();
 
         for event in events {
             if event.phase != Some(Phase::SinglePrompt) {
@@ -387,6 +395,17 @@ impl<'a> FlowExecution<'a> {
 
             if matches!(event.event_type, EventType::Lint | EventType::TestRun) {
                 continue;
+            }
+
+            if is_single_prompt_convergence_changed_files_retry_event(&event) {
+                let has_associated_test_suites = event
+                    .payload
+                    .get(SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(todo_has_associated_test_suites);
+                if !has_associated_test_suites {
+                    continue;
+                }
             }
 
             if has_nonzero_exit
@@ -807,6 +826,25 @@ fn event_exit_code(event: &EventRecord) -> Option<i64> {
         Value::String(text) => text.trim().parse::<i64>().ok(),
         _ => None,
     }
+}
+
+fn is_single_prompt_convergence_changed_files_retry_event(event: &EventRecord) -> bool {
+    if event.event_type != EventType::PhaseFailure {
+        return false;
+    }
+
+    if matches!(
+        event
+            .payload
+            .get(SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY)
+            .and_then(Value::as_str),
+        Some(reason) if reason == SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES
+    ) {
+        return true;
+    }
+
+    // Backward-compatible fallback for old events logged before retry metadata existed.
+    event.msg == SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE
 }
 
 fn tail_output_lines(output: &str, max_lines: usize) -> String {
@@ -1416,12 +1454,17 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
         }
 
         if run.had_git_changes {
+            let has_associated_test_suites = !execution.todo.test_suites.is_empty();
             execution.log_event(
                 "warning",
                 Some(Phase::SinglePrompt),
                 EventType::PhaseFailure,
-                "single_prompt iteration changed files; waiting for two consecutive no-change iterations",
-                payload_from_json(json!({ "touched_files": run.touched_files })),
+                SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+                payload_from_json(json!({
+                    "touched_files": run.touched_files,
+                    (SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY): SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
+                    (SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY): has_associated_test_suites,
+                })),
             )?;
             return Ok(LoopDecision::Retry);
         }
@@ -1917,10 +1960,17 @@ fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowExecution, FlowKind, TestSuiteConfig, build_flow};
+    use super::{
+        AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy,
+        SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+        SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
+        SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
+        SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY, SinglePromptPhaseStrategy, TestSuiteConfig,
+        build_flow,
+    };
     use crate::agent::{AgentRequest, CodingAgent};
     use crate::config::ChiefConfig;
-    use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
+    use crate::domain::{AgentOutput, EventType, LoopDecision, Phase, Todo, TodoStatus};
     use crate::git::GitOps;
     use crate::prompt::PromptStore;
     use crate::storage::ProjectStore;
@@ -2802,6 +2852,203 @@ mod tests {
         assert_eq!(
             context.test_failures[1].output_tail,
             "test-b-line-2\ntest-b-line-3"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_changed_files_retry_without_associated_suites_is_not_failure_context() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "changed files should not be failure context without associated suites"
+                .to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let mut execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let mut strategy = SinglePromptPhaseStrategy::new(Vec::new());
+        strategy.last_agent_run = Some(AgentRunWithGitChanges {
+            output: AgentOutput::success("agent-step", ""),
+            touched_files: vec!["src/flow.rs".to_owned()],
+            had_git_changes: true,
+        });
+
+        let decision = strategy
+            .check_goal(&mut execution, 0, &AgentOutput::success("unused", ""))
+            .expect("single_prompt check_goal should succeed");
+        assert!(
+            matches!(decision, LoopDecision::Retry),
+            "changed files must continue to trigger retry"
+        );
+
+        let context = execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+        assert!(
+            !context.failed_other,
+            "changed-files convergence retry should not count as failed_other when todo has no associated suites"
+        );
+        assert!(
+            context.other_failures.is_empty(),
+            "changed-files convergence retry should be excluded from other_failures when todo has no associated suites"
+        );
+
+        let events = execution
+            .todo_events_since_last_retry_reset(100)
+            .expect("event query should succeed");
+        let changed_files_event = events
+            .into_iter()
+            .find(|event| event.msg == SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE)
+            .expect("changed-files phase failure event should be logged");
+        assert_eq!(changed_files_event.event_type, EventType::PhaseFailure);
+        assert_eq!(
+            changed_files_event
+                .payload
+                .get(SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY)
+                .and_then(Value::as_str),
+            Some(SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES),
+            "changed-files retry event should include a structured retry reason"
+        );
+        assert_eq!(
+            changed_files_event
+                .payload
+                .get(SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY)
+                .and_then(Value::as_bool),
+            Some(false),
+            "changed-files retry event should include associated-suite presence"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_changed_files_retry_with_associated_suites_remains_failure_context() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "changed files should remain failure context with associated suites".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: vec!["backend".to_owned()],
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let mut execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let mut strategy = SinglePromptPhaseStrategy::new(Vec::new());
+        strategy.last_agent_run = Some(AgentRunWithGitChanges {
+            output: AgentOutput::success("agent-step", ""),
+            touched_files: vec!["src/flow.rs".to_owned()],
+            had_git_changes: true,
+        });
+
+        let decision = strategy
+            .check_goal(&mut execution, 0, &AgentOutput::success("unused", ""))
+            .expect("single_prompt check_goal should succeed");
+        assert!(
+            matches!(decision, LoopDecision::Retry),
+            "changed files must continue to trigger retry"
+        );
+
+        let context = execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+        assert!(
+            context.failed_other,
+            "changed-files convergence retry should remain failed_other when todo has associated suites"
+        );
+        assert_eq!(
+            context.other_failures.len(),
+            1,
+            "changed-files convergence retry should be included in other_failures when todo has associated suites"
+        );
+        assert_eq!(
+            context.other_failures[0].event_type,
+            EventType::PhaseFailure.as_str()
+        );
+        assert_eq!(
+            context.other_failures[0].message,
+            SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE
+        );
+
+        let events = execution
+            .todo_events_since_last_retry_reset(100)
+            .expect("event query should succeed");
+        let changed_files_event = events
+            .into_iter()
+            .find(|event| event.msg == SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE)
+            .expect("changed-files phase failure event should be logged");
+        assert_eq!(
+            changed_files_event
+                .payload
+                .get(SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY)
+                .and_then(Value::as_str),
+            Some(SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES),
+            "changed-files retry event should include a structured retry reason"
+        );
+        assert_eq!(
+            changed_files_event
+                .payload
+                .get(SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY)
+                .and_then(Value::as_bool),
+            Some(true),
+            "changed-files retry event should include associated-suite presence"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
