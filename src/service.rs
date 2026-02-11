@@ -7,7 +7,10 @@ use crate::domain::{
 };
 use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
 use crate::git::{GitOps, ShellGitOps};
-use crate::orchestrator::{OrchestratorError, OrchestratorResult, retry_with_policy_and_hook};
+use crate::orchestrator::{
+    OrchestratorError, OrchestratorResult, retry_with_policy_and_hook,
+    retry_with_policy_and_hook_and_delay,
+};
 use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
 use anyhow::{Context, Result, anyhow};
@@ -19,8 +22,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
+
+const TRANSIENT_LOCK_RETRY_ATTEMPTS: usize = 3;
+const TRANSIENT_LOCK_MAX_ATTEMPTS: usize = TRANSIENT_LOCK_RETRY_ATTEMPTS + 1;
+const TRANSIENT_LOCK_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct ProjectContext {
@@ -398,7 +406,7 @@ impl ChiefEngine {
         F: FnMut(usize, usize, &anyhow::Error),
     {
         let todo_id = todo.id.clone();
-        retry_with_policy_and_hook(
+        retry_with_policy_and_hook_and_delay(
             max_retries,
             |attempt, total| {
                 if cancel_signal.load(Ordering::SeqCst) {
@@ -468,7 +476,7 @@ impl ChiefEngine {
                     }
                 }
 
-                self.run_single_todo_once(
+                let outcome = self.run_single_todo_once(
                     run_id,
                     job_id,
                     worker_index,
@@ -477,9 +485,71 @@ impl ChiefEngine {
                     work_dir.clone(),
                     model_override.clone(),
                     cancel_signal.clone(),
+                );
+
+                let Err(OrchestratorError::Retryable(initial_error)) = outcome else {
+                    return outcome;
+                };
+                if !is_transient_lock_contention_error(&initial_error) {
+                    return Err(OrchestratorError::retryable(initial_error));
+                }
+
+                retry_transient_lock_contention_with_delay(
+                    initial_error,
+                    || {
+                        self.run_single_todo_once(
+                            run_id,
+                            job_id,
+                            worker_index,
+                            todo.clone(),
+                            flow_kind,
+                            work_dir.clone(),
+                            model_override.clone(),
+                            cancel_signal.clone(),
+                        )
+                    },
+                    |retry_attempt, retry_total, err, delay| {
+                        let mut payload = BTreeMap::new();
+                        payload.insert(
+                            "attempt".to_owned(),
+                            serde_json::Value::from(retry_attempt as i64),
+                        );
+                        payload.insert(
+                            "total".to_owned(),
+                            serde_json::Value::from(retry_total as i64),
+                        );
+                        payload.insert(
+                            "delay_seconds".to_owned(),
+                            serde_json::Value::from(delay.as_secs() as i64),
+                        );
+                        payload.insert(
+                            "error".to_owned(),
+                            serde_json::Value::String(err.to_string()),
+                        );
+                        self.log_runtime_event(
+                            run_id,
+                            Some(job_id),
+                            Some(&todo_id),
+                            "warning",
+                            Some(Phase::Red),
+                            EventType::PhaseChange,
+                            format!(
+                                "Transient lock/contention retry {retry_attempt}/{retry_total} scheduled in {}s",
+                                delay.as_secs()
+                            ),
+                            payload,
+                        );
+                    },
+                    std::thread::sleep,
                 )
             },
-            |attempt, total, err| {
+            |_attempt, _total, err| {
+                if is_transient_lock_contention_error(err) {
+                    return None;
+                }
+                Some(Duration::ZERO)
+            },
+            |attempt, total, err, _delay| {
                 let mut payload = BTreeMap::new();
                 payload.insert(
                     "attempt".to_owned(),
@@ -506,6 +576,7 @@ impl ChiefEngine {
                 );
                 on_retry(attempt, total, err);
             },
+            |_delay| {},
         )
     }
 
@@ -866,6 +937,72 @@ fn payload_from_json(value: serde_json::Value) -> BTreeMap<String, serde_json::V
     }
 }
 
+fn retry_transient_lock_contention_with_delay<T, F, H, S>(
+    initial_error: anyhow::Error,
+    mut operation: F,
+    mut on_retry: H,
+    mut sleep: S,
+) -> OrchestratorResult<T>
+where
+    F: FnMut() -> OrchestratorResult<T>,
+    H: FnMut(usize, usize, &anyhow::Error, Duration),
+    S: FnMut(Duration),
+{
+    let mut first_error = Some(initial_error);
+    retry_with_policy_and_hook_and_delay(
+        TRANSIENT_LOCK_MAX_ATTEMPTS,
+        |_attempt, _total| {
+            if let Some(err) = first_error.take() {
+                Err(OrchestratorError::retryable(err))
+            } else {
+                operation()
+            }
+        },
+        |_attempt, _total, err| {
+            if is_transient_lock_contention_error(err) {
+                Some(TRANSIENT_LOCK_RETRY_DELAY)
+            } else {
+                None
+            }
+        },
+        |attempt, _total, err, delay| {
+            on_retry(attempt, TRANSIENT_LOCK_RETRY_ATTEMPTS, err, delay);
+        },
+        |delay| sleep(delay),
+    )
+}
+
+fn is_transient_lock_contention_error(err: &anyhow::Error) -> bool {
+    if has_transient_lock_contention_signature(&err.to_string()) {
+        return true;
+    }
+
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<io::Error>() {
+            if matches!(
+                io_err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            ) {
+                return true;
+            }
+        }
+
+        if has_transient_lock_contention_signature(&cause.to_string()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn has_transient_lock_contention_signature(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    let has_index_lock_path = text.contains(".git/index.lock") || text.contains(".git\\index.lock");
+    (text.contains("unable to create") && has_index_lock_path)
+        || text.contains("another git process seems to be running")
+        || text.contains("resource busy")
+}
+
 fn is_known_unrecoverable_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         if let Some(io_err) = cause.downcast_ref::<io::Error>() {
@@ -910,8 +1047,14 @@ fn is_unrecoverable_sqlite_error(err: &rusqlite::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectRegistry;
+    use super::{
+        ProjectRegistry, is_transient_lock_contention_error,
+        retry_transient_lock_contention_with_delay,
+    };
+    use crate::orchestrator::OrchestratorError;
+    use anyhow::anyhow;
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use uuid::Uuid;
@@ -1008,5 +1151,118 @@ mod tests {
             err.to_string().contains("duplicate project name"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn transient_lock_contention_signature_is_detected() {
+        let err = anyhow!(
+            "git commit failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
+        );
+        assert!(is_transient_lock_contention_error(&err));
+    }
+
+    #[test]
+    fn transient_lock_contention_io_error_kinds_are_detected() {
+        let would_block = anyhow!(io::Error::new(io::ErrorKind::WouldBlock, "would block"));
+        let timed_out = anyhow!(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+        let interrupted = anyhow!(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
+
+        assert!(is_transient_lock_contention_error(&would_block));
+        assert!(is_transient_lock_contention_error(&timed_out));
+        assert!(is_transient_lock_contention_error(&interrupted));
+    }
+
+    #[test]
+    fn transient_lock_retry_path_retries_three_times_with_ten_second_delays() {
+        let mut operation_calls = 0usize;
+        let mut retry_callbacks = Vec::new();
+        let mut sleeps = Vec::new();
+        let err = retry_transient_lock_contention_with_delay::<(), _, _, _>(
+            anyhow!(
+                "git command failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
+            ),
+            || {
+                operation_calls += 1;
+                Err(OrchestratorError::retryable(anyhow!(
+                    "git command failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
+                )))
+            },
+            |attempt, total, _err, delay| {
+                retry_callbacks.push((attempt, total, delay.as_secs()));
+            },
+            |delay| sleeps.push(delay.as_secs()),
+        )
+        .expect_err("transient lock retries should eventually fail");
+
+        assert!(matches!(err, OrchestratorError::Retryable(_)));
+        assert_eq!(
+            operation_calls, 3,
+            "exactly three retry executions expected"
+        );
+        assert_eq!(
+            retry_callbacks,
+            vec![(1, 3, 10), (2, 3, 10), (3, 3, 10)],
+            "retry callbacks should report attempt counters and 10-second delays"
+        );
+        assert_eq!(
+            sleeps,
+            vec![10, 10, 10],
+            "sleep should be invoked between retries"
+        );
+    }
+
+    #[test]
+    fn transient_lock_retry_path_can_succeed_after_retries() {
+        let mut operation_calls = 0usize;
+        let mut sleeps = Vec::new();
+        let outcome = retry_transient_lock_contention_with_delay(
+            anyhow!(
+                "git command failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
+            ),
+            || {
+                operation_calls += 1;
+                if operation_calls < 2 {
+                    Err(OrchestratorError::retryable(anyhow!(
+                        "git command failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
+                    )))
+                } else {
+                    Ok("ok")
+                }
+            },
+            |_attempt, _total, _err, _delay| {},
+            |delay| sleeps.push(delay.as_secs()),
+        )
+        .expect("transient lock retry should recover");
+
+        assert_eq!(outcome, "ok");
+        assert_eq!(operation_calls, 2);
+        assert_eq!(sleeps, vec![10, 10]);
+    }
+
+    #[test]
+    fn non_matching_runtime_failure_is_not_classified_as_transient_lock_contention() {
+        let err = anyhow!("git merge failed: conflict in working tree");
+        assert!(!is_transient_lock_contention_error(&err));
+
+        let mut operation_calls = 0usize;
+        let mut retry_callbacks = 0usize;
+        let mut sleeps = Vec::new();
+        let result = retry_transient_lock_contention_with_delay::<(), _, _, _>(
+            err,
+            || {
+                operation_calls += 1;
+                Ok(())
+            },
+            |_attempt, _total, _err, _delay| retry_callbacks += 1,
+            |delay| sleeps.push(delay.as_secs()),
+        );
+
+        assert!(matches!(result, Err(OrchestratorError::Retryable(_))));
+        assert_eq!(
+            operation_calls, 0,
+            "non-transient errors should not enter lock retry path"
+        );
+        assert_eq!(retry_callbacks, 0);
+        assert!(sleeps.is_empty());
     }
 }
