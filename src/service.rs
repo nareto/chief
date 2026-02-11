@@ -677,13 +677,63 @@ impl ChiefEngine {
                     "todos_path": todos_path.display().to_string(),
                 }),
             )?;
-            let response = agent.run(crate::agent::AgentRequest {
+            self.log_runtime_event(
+                &run_id,
+                None,
+                None,
+                "info",
+                None,
+                EventType::AgentPrompt,
+                "Agent prompt (requirements)",
+                payload_from_json(serde_json::json!({
+                    "prompt": &prompt,
+                })),
+            );
+            let response = match agent.run(crate::agent::AgentRequest {
                 prompt,
                 cwd: self.project.project_dir.clone(),
                 timeout_seconds: Some(self.project.chief_yaml.chief.agent_timeout_seconds),
                 disallowed_paths: Vec::new(),
                 cancel_signal: None,
-            })?;
+            }) {
+                Ok(response) => response,
+                Err(err) => {
+                    self.log_runtime_event(
+                        &run_id,
+                        None,
+                        None,
+                        "error",
+                        None,
+                        EventType::Error,
+                        "Agent execution failed during requirements processing",
+                        payload_from_json(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
+                    return Err(err);
+                }
+            };
+
+            self.log_runtime_event(
+                &run_id,
+                None,
+                None,
+                if response.exit_code == 0 {
+                    "info"
+                } else {
+                    "warning"
+                },
+                None,
+                EventType::AgentResponse,
+                "Agent response (requirements)",
+                payload_from_json(serde_json::json!({
+                    "exit_code": response.exit_code,
+                    "command": &response.command,
+                    "output": &response.merged_output,
+                    "stdout": &response.stdout,
+                    "stderr": &response.stderr,
+                })),
+            );
 
             if response.exit_code != 0 {
                 return Err(anyhow!(
@@ -801,6 +851,13 @@ impl ChiefEngine {
         ) {
             warn!("failed to record state-update error event: {log_err:#}");
         }
+    }
+}
+
+fn payload_from_json(value: serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map.into_iter().collect(),
+        _ => BTreeMap::new(),
     }
 }
 
