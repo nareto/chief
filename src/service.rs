@@ -949,7 +949,7 @@ where
     S: FnMut(Duration),
 {
     let mut first_error = Some(initial_error);
-    retry_with_policy_and_hook_and_delay(
+    let outcome = retry_with_policy_and_hook_and_delay(
         TRANSIENT_LOCK_MAX_ATTEMPTS,
         |_attempt, _total| {
             if let Some(err) = first_error.take() {
@@ -969,7 +969,17 @@ where
             on_retry(attempt, TRANSIENT_LOCK_RETRY_ATTEMPTS, err, delay);
         },
         |delay| sleep(delay),
-    )
+    );
+
+    match outcome {
+        Err(OrchestratorError::Retryable(err)) if is_transient_lock_contention_error(&err) => {
+            let detail = err.to_string();
+            Err(OrchestratorError::unrecoverable(anyhow!(
+                "transient lock/contention retry budget exhausted after {TRANSIENT_LOCK_RETRY_ATTEMPTS} retries: {detail}"
+            )))
+        }
+        other => other,
+    }
 }
 
 fn is_transient_lock_contention_error(err: &anyhow::Error) -> bool {
@@ -1194,7 +1204,22 @@ mod tests {
         )
         .expect_err("transient lock retries should eventually fail");
 
-        assert!(matches!(err, OrchestratorError::Retryable(_)));
+        assert!(matches!(err, OrchestratorError::Unrecoverable(_)));
+        let rendered = err.as_error().to_string();
+        assert!(
+            rendered.contains("retry budget exhausted"),
+            "terminal lock retry failure should mention exhausted retry budget: {rendered}"
+        );
+        assert!(
+            rendered.contains(".git/index.lock"),
+            "terminal lock retry failure should preserve index.lock details: {rendered}"
+        );
+        assert!(
+            rendered
+                .to_ascii_lowercase()
+                .contains("another git process seems to be running"),
+            "terminal lock retry failure should preserve conflict hint: {rendered}"
+        );
         assert_eq!(
             operation_calls, 3,
             "exactly three retry executions expected"
