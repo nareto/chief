@@ -7,6 +7,7 @@ pub trait GitOps: Send + Sync {
     fn changed_files(&self, cwd: &Path) -> Result<Vec<String>>;
     fn diff(&self, cwd: &Path, against_ref: Option<&str>) -> Result<String>;
     fn diff_summary_for_files(&self, cwd: &Path, files: &[String]) -> Result<String>;
+    fn commit_committer_timestamp_rfc3339(&self, cwd: &Path, commit_hash: &str) -> Result<String>;
     fn commit_and_tag(&self, cwd: &Path, message: &str) -> Result<String>;
     fn create_worktree(&self, branch: &str, worktree_path: &Path) -> Result<()>;
     fn merge_branch_into_main(&self, branch: &str, main_branch: &str) -> Result<()>;
@@ -113,6 +114,10 @@ impl GitOps for ShellGitOps {
             ));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    fn commit_committer_timestamp_rfc3339(&self, cwd: &Path, commit_hash: &str) -> Result<String> {
+        self.run_capture(cwd, &["show", "-s", "--format=%cI", commit_hash])
     }
 
     fn commit_and_tag(&self, cwd: &Path, message: &str) -> Result<String> {

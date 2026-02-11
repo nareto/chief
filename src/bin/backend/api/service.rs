@@ -22,6 +22,7 @@ use chief::service::ChiefEngine;
 use chief::storage::EventQuery;
 use futures_util::stream;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
@@ -366,6 +367,8 @@ impl ApiService {
             .iter()
             .filter(|todo| todo.status != TodoStatus::Done && todo.status != TodoStatus::InProgress)
             .count();
+        let last_done_todo_committed_at =
+            resolve_last_done_todo_committed_at(&context.git, &context.project_dir, &todos);
 
         let configured_flow = context.chief_yaml.chief.flow.trim();
         let configured_flow_name = configured_flow
@@ -404,6 +407,7 @@ impl ApiService {
             last_activity: recent_events
                 .first()
                 .map(|event| event.timestamp.to_rfc3339()),
+            last_done_todo_committed_at,
             chief_db_size_bytes,
             dirty_files,
             todos: TodoProgress {
@@ -1064,6 +1068,47 @@ fn run_git_capture(project_dir: &PathBuf, args: &[&str]) -> Result<String, ApiEr
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn resolve_last_done_todo_committed_at(
+    git: &impl GitOps,
+    project_dir: &std::path::Path,
+    todos: &[Todo],
+) -> Option<String> {
+    let mut seen_commits = HashSet::new();
+    let mut latest_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
+
+    for commit_hash in todos
+        .iter()
+        .filter(|todo| todo.status == TodoStatus::Done)
+        .filter_map(|todo| todo.done_at_commit.as_deref())
+        .map(str::trim)
+        .filter(|commit_hash| !commit_hash.is_empty())
+    {
+        if !seen_commits.insert(commit_hash.to_owned()) {
+            continue;
+        }
+
+        let timestamp = match git.commit_committer_timestamp_rfc3339(project_dir, commit_hash) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        let parsed = match chrono::DateTime::parse_from_rfc3339(&timestamp) {
+            Ok(value) => value.with_timezone(&chrono::Utc),
+            Err(_) => continue,
+        };
+
+        if latest_timestamp
+            .as_ref()
+            .map(|current| parsed > *current)
+            .unwrap_or(true)
+        {
+            latest_timestamp = Some(parsed);
+        }
+    }
+
+    latest_timestamp.map(|timestamp| timestamp.to_rfc3339())
+}
+
 fn parse_loop_iteration(msg: &str) -> Option<PhaseIteration> {
     let marker = "iteration ";
     let idx = msg.find(marker)?;
@@ -1168,19 +1213,23 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::ApiService;
+    use super::{ApiService, resolve_last_done_todo_committed_at};
     use crate::api::error::ApiError;
     use crate::api::types::StartProjectRequest;
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use chief::domain::{Todo, TodoStatus};
+    use chief::git::GitOps;
     use chief::scheduler::Scheduler;
     use chief::service::ProjectRegistry;
     use chief::storage::ProjectStore;
     use rusqlite::Connection;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     struct TempDir {
@@ -1202,12 +1251,16 @@ mod tests {
         }
     }
 
-    fn run_git(cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-c")
+    fn run_git_with_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
+        let mut cmd = Command::new("git");
+        cmd.arg("-c")
             .arg("safe.directory=*")
             .args(args)
-            .current_dir(cwd)
+            .current_dir(cwd);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let output = cmd
             .output()
             .unwrap_or_else(|err| panic!("failed to run git {}: {err}", args.join(" ")));
         assert!(
@@ -1218,6 +1271,125 @@ mod tests {
             String::from_utf8_lossy(&output.stderr),
         );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) -> String {
+        run_git_with_env(cwd, args, &[])
+    }
+
+    fn create_commit_with_date(
+        project_dir: &Path,
+        file_name: &str,
+        content: &str,
+        message: &str,
+        timestamp: &str,
+    ) -> String {
+        fs::write(project_dir.join(file_name), format!("{content}\n"))
+            .expect("failed to write commit fixture file");
+        run_git(project_dir, &["add", file_name]);
+        run_git_with_env(
+            project_dir,
+            &["commit", "-m", message],
+            &[
+                ("GIT_AUTHOR_DATE", timestamp),
+                ("GIT_COMMITTER_DATE", timestamp),
+            ],
+        );
+        run_git(project_dir, &["rev-parse", "HEAD"])
+    }
+
+    fn test_todo(id: &str, status: TodoStatus, done_at_commit: Option<&str>) -> Todo {
+        Todo {
+            id: id.to_owned(),
+            todo: format!("todo {id}"),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status,
+            done_at_commit: done_at_commit.map(str::to_owned),
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingGitOps {
+        root: PathBuf,
+        responses: HashMap<String, Option<String>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingGitOps {
+        fn new(responses: &[(&str, Option<&str>)]) -> Self {
+            Self {
+                root: PathBuf::from("."),
+                responses: responses
+                    .iter()
+                    .map(|(hash, value)| {
+                        (
+                            (*hash).to_owned(),
+                            value.as_ref().map(|timestamp| (*timestamp).to_owned()),
+                        )
+                    })
+                    .collect(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("calls mutex poisoned").clone()
+        }
+    }
+
+    impl GitOps for RecordingGitOps {
+        fn repo_root(&self) -> &Path {
+            &self.root
+        }
+
+        fn changed_files(&self, _cwd: &Path) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn diff(&self, _cwd: &Path, _against_ref: Option<&str>) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        fn diff_summary_for_files(&self, _cwd: &Path, _files: &[String]) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        fn commit_committer_timestamp_rfc3339(
+            &self,
+            _cwd: &Path,
+            commit_hash: &str,
+        ) -> anyhow::Result<String> {
+            self.calls
+                .lock()
+                .expect("calls mutex poisoned")
+                .push(commit_hash.to_owned());
+            match self.responses.get(commit_hash) {
+                Some(Some(value)) => Ok(value.clone()),
+                _ => Err(anyhow::anyhow!("commit not found")),
+            }
+        }
+
+        fn commit_and_tag(&self, _cwd: &Path, _message: &str) -> anyhow::Result<String> {
+            Ok("noop".to_owned())
+        }
+
+        fn create_worktree(&self, _branch: &str, _worktree_path: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn merge_branch_into_main(&self, _branch: &str, _main_branch: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn remove_worktree(&self, _worktree_path: &Path, _branch: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn current_branch(&self) -> anyhow::Result<String> {
+            Ok("main".to_owned())
+        }
     }
 
     fn init_git_repo(project_dir: &Path) {
@@ -1641,6 +1813,176 @@ mod tests {
         assert_eq!(
             state.todos.available, 1,
             "available count should reflect add/update/remove reconciliation"
+        );
+    }
+
+    #[test]
+    fn resolve_last_done_todo_committed_at_deduplicates_hashes() {
+        let git = RecordingGitOps::new(&[
+            ("commit-a", Some("2024-05-01T10:00:00+00:00")),
+            ("commit-b", Some("2024-06-01T10:00:00+00:00")),
+        ]);
+        let todos = vec![
+            test_todo("done-a", TodoStatus::Done, Some("commit-a")),
+            test_todo("done-a-duplicate", TodoStatus::Done, Some("commit-a")),
+            test_todo("pending", TodoStatus::Pending, Some("commit-b")),
+            test_todo("done-b", TodoStatus::Done, Some("commit-b")),
+        ];
+
+        let resolved = resolve_last_done_todo_committed_at(&git, Path::new("."), &todos);
+
+        assert_eq!(resolved.as_deref(), Some("2024-06-01T10:00:00+00:00"));
+        assert_eq!(
+            git.calls(),
+            vec!["commit-a".to_owned(), "commit-b".to_owned()],
+            "duplicate done_at_commit hashes should only be resolved once"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_returns_latest_resolved_done_todo_commit_timestamp() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: baseline
+    todo: Baseline todo
+    expectations: Baseline expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+
+        let older_commit = create_commit_with_date(
+            &project_dir,
+            "older.txt",
+            "older",
+            "chore: older commit",
+            "2024-01-02T03:04:05+00:00",
+        );
+        let newer_commit = create_commit_with_date(
+            &project_dir,
+            "newer.txt",
+            "newer",
+            "chore: newer commit",
+            "2024-03-04T05:06:07+00:00",
+        );
+        let newer_timestamp = run_git(
+            &project_dir,
+            &["show", "-s", "--format=%cI", newer_commit.as_str()],
+        );
+        let expected_latest_timestamp = chrono::DateTime::parse_from_rfc3339(&newer_timestamp)
+            .expect("newer commit timestamp should parse")
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339();
+
+        write_todos(
+            &project_dir,
+            &format!(
+                r#"todos:
+  - id: done-old
+    todo: done old
+    expectations: done old expectations
+    priority: 10
+    test_suites: []
+    status: done
+    done_at_commit: {older_commit}
+  - id: done-new
+    todo: done new
+    expectations: done new expectations
+    priority: 9
+    test_suites: []
+    status: done
+    done_at_commit: {newer_commit}
+  - id: done-new-duplicate
+    todo: done new duplicate
+    expectations: duplicate commit hash to verify dedupe path
+    priority: 8
+    test_suites: []
+    status: done
+    done_at_commit: {newer_commit}
+  - id: pending
+    todo: pending todo
+    expectations: pending expectations
+    priority: 7
+    test_suites: []
+    status: pending"#
+            ),
+        );
+
+        let state = service
+            .get_state(&project)
+            .await
+            .expect("get_state should resolve done todo commit timestamps");
+
+        assert_eq!(
+            state.last_done_todo_committed_at.as_deref(),
+            Some(expected_latest_timestamp.as_str()),
+            "state should report the most recent committer timestamp among done todos"
+        );
+        assert_eq!(state.todos.total, 4, "total should remain unchanged");
+        assert_eq!(
+            state.todos.completed, 3,
+            "completed should remain unchanged"
+        );
+        assert_eq!(
+            state.todos.available, 1,
+            "available should remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_ignores_unresolved_done_commit_hashes_and_returns_null_timestamp() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: baseline
+    todo: Baseline todo
+    expectations: Baseline expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: done-missing-1
+    todo: done with missing hash
+    expectations: unresolved hash should be ignored
+    priority: 5
+    test_suites: []
+    status: done
+    done_at_commit: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  - id: done-missing-2
+    todo: done with another missing hash
+    expectations: unresolved hash should be ignored
+    priority: 4
+    test_suites: []
+    status: done
+    done_at_commit: not-a-real-commit
+  - id: pending
+    todo: pending todo
+    expectations: keep counters unchanged
+    priority: 3
+    test_suites: []
+    status: pending"#,
+        );
+
+        let state = service
+            .get_state(&project)
+            .await
+            .expect("get_state should succeed even when done_at_commit hashes cannot be resolved");
+
+        assert!(
+            state.last_done_todo_committed_at.is_none(),
+            "unresolved done_at_commit hashes should result in null timestamp"
+        );
+        assert_eq!(state.todos.total, 3, "total should remain unchanged");
+        assert_eq!(
+            state.todos.completed, 2,
+            "completed should remain unchanged"
+        );
+        assert_eq!(
+            state.todos.available, 1,
+            "available should remain unchanged"
         );
     }
 

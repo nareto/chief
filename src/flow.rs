@@ -2152,6 +2152,14 @@ mod tests {
             Ok(String::new())
         }
 
+        fn commit_committer_timestamp_rfc3339(
+            &self,
+            _cwd: &Path,
+            _commit_hash: &str,
+        ) -> Result<String> {
+            Ok("1970-01-01T00:00:00+00:00".to_owned())
+        }
+
         fn commit_and_tag(&self, _cwd: &Path, _message: &str) -> Result<String> {
             Ok("noop-commit".to_owned())
         }

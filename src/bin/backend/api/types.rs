@@ -184,6 +184,7 @@ pub struct StateResponse {
     pub phase: String,
     pub phase_iteration: Option<PhaseIteration>,
     pub last_activity: Option<String>,
+    pub last_done_todo_committed_at: Option<String>,
     pub chief_db_size_bytes: Option<u64>,
     pub dirty_files: Vec<String>,
     pub todos: TodoProgress,
