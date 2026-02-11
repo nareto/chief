@@ -60,6 +60,8 @@ pub struct ChiefConfig {
     pub max_retries: usize,
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
+    #[serde(default = "default_suite_command_timeout_seconds")]
+    pub suite_command_timeout_seconds: u64,
     #[serde(default = "default_agent_log_max_output_lines")]
     pub agent_log_max_output_lines: usize,
     #[serde(default = "default_agent_log_max_output_chars")]
@@ -78,6 +80,7 @@ impl Default for ChiefConfig {
             agent_extra_args: Vec::new(),
             max_retries: default_max_retries(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
+            suite_command_timeout_seconds: default_suite_command_timeout_seconds(),
             agent_log_max_output_lines: default_agent_log_max_output_lines(),
             agent_log_max_output_chars: default_agent_log_max_output_chars(),
             use_agent_log_truncation_for_stdout_logs: false,
@@ -112,6 +115,8 @@ pub struct TestSuiteConfig {
     #[serde(default)]
     pub post_green_command: Option<String>,
     #[serde(default)]
+    pub command_timeout_seconds: Option<u64>,
+    #[serde(default)]
     pub lint_command: Option<String>,
     #[serde(default)]
     pub lint_fix_command: Option<String>,
@@ -140,6 +145,10 @@ fn default_max_retries() -> usize {
 
 fn default_agent_timeout_seconds() -> u64 {
     2_700
+}
+
+fn default_suite_command_timeout_seconds() -> u64 {
+    1_800
 }
 
 fn default_agent_log_max_output_lines() -> usize {

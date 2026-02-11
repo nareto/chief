@@ -288,6 +288,7 @@ chief:
   model: gpt-5
   max_retries: 10
   agent_timeout_seconds: 2700
+  suite_command_timeout_seconds: 1800
 
 suites:
   - name: backend

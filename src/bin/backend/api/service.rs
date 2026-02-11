@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{error, info};
 
@@ -46,6 +47,7 @@ struct SuiteCheckPlan {
     cwd: PathBuf,
     cwd_display: String,
     env: BTreeMap<String, String>,
+    timeout_seconds: u64,
 }
 
 impl ApiService {
@@ -494,6 +496,7 @@ impl ApiService {
             cwd,
             cwd_display,
             env,
+            timeout_seconds,
         } = self.prepare_suite_check_plan(project, &payload).await?;
         let kind_label = kind.as_str();
         info!(
@@ -507,7 +510,7 @@ impl ApiService {
         let cancel_signal = Arc::new(AtomicBool::new(false));
 
         let output = tokio::task::spawn_blocking(move || {
-            execute_suite_command(&command, &cwd, &env, &cancel_signal)
+            execute_suite_command(&command, &cwd, &env, &cancel_signal, Some(timeout_seconds))
         })
         .await
         .map_err(|err| {
@@ -593,6 +596,7 @@ impl ApiService {
                 cwd,
                 cwd_display,
                 env,
+                timeout_seconds,
             } = plan;
             let kind_label = kind.as_str().to_owned();
 
@@ -603,6 +607,7 @@ impl ApiService {
                 &cwd,
                 &cwd_display,
                 &env,
+                timeout_seconds,
                 &sender,
             ) {
                 Ok(result) => {
@@ -705,6 +710,10 @@ impl ApiService {
             cwd,
             cwd_display,
             env: suite.env,
+            timeout_seconds: suite
+                .command_timeout_seconds
+                .unwrap_or(context.chief_yaml.chief.suite_command_timeout_seconds)
+                .max(1),
         })
     }
 
@@ -789,6 +798,7 @@ fn execute_suite_command_streaming(
     cwd: &std::path::Path,
     cwd_display: &str,
     env: &BTreeMap<String, String>,
+    timeout_seconds: u64,
     stream_sender: &tokio_mpsc::Sender<Vec<u8>>,
 ) -> anyhow::Result<RunSuiteCheckResponse> {
     let mut process = Command::new("sh");
@@ -797,6 +807,7 @@ fn execute_suite_command_streaming(
     process.envs(env.iter());
     process.stdout(Stdio::piped());
     process.stderr(Stdio::piped());
+    configure_process_group(&mut process);
     let mut child = process
         .spawn()
         .with_context(|| format!("failed to run command: {command}"))?;
@@ -819,11 +830,24 @@ fn execute_suite_command_streaming(
     let mut stderr = String::new();
     let mut merged_output = String::new();
     let mut read_error: Option<String> = None;
+    let timeout = Duration::from_secs(timeout_seconds.max(1));
+    let started = Instant::now();
+    let mut timed_out = false;
 
     while !(stdout_done && stderr_done) {
-        let chunk = chunk_receiver
-            .recv()
-            .map_err(|_| anyhow!("suite command output stream disconnected"))?;
+        let chunk = match chunk_receiver.recv_timeout(Duration::from_millis(200)) {
+            Ok(chunk) => chunk,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if started.elapsed() >= timeout {
+                    timed_out = true;
+                    break;
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("suite command output stream disconnected"));
+            }
+        };
 
         match chunk {
             SuiteStreamChunk::Chunk { stream, text } => {
@@ -851,8 +875,8 @@ fn execute_suite_command_streaming(
         }
     }
 
-    if read_error.is_some() {
-        let _ = child.kill();
+    if read_error.is_some() || timed_out {
+        terminate_process_tree(&mut child);
     }
     let status = child.wait().context("failed waiting for suite command")?;
     join_suite_stream_reader(stdout_reader, "stdout")?;
@@ -861,16 +885,60 @@ fn execute_suite_command_streaming(
         return Err(anyhow!(message));
     }
 
+    if timed_out {
+        let timeout_message = format!(
+            "suite command timed out after {} second(s) and was terminated.",
+            timeout_seconds.max(1)
+        );
+        merged_output = if merged_output.trim().is_empty() {
+            timeout_message.clone()
+        } else {
+            format!("{timeout_message}\n{}", merged_output.trim())
+        };
+        if !stderr.contains(&timeout_message) {
+            if stderr.trim().is_empty() {
+                stderr = timeout_message;
+            } else {
+                stderr = format!("{stderr}\n{timeout_message}");
+            }
+        }
+    }
+
     Ok(RunSuiteCheckResponse {
         suite: suite_name.to_owned(),
         kind,
         command: command.to_owned(),
         cwd: cwd_display.to_owned(),
-        exit_code: status.code().unwrap_or(1),
+        exit_code: if timed_out {
+            124
+        } else {
+            status.code().unwrap_or(1)
+        },
         output: merged_output.trim().to_owned(),
         stdout,
         stderr,
     })
+}
+
+fn configure_process_group(process: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+}
+
+fn terminate_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            let pgid = nix::unistd::Pid::from_raw(pid);
+            let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 fn spawn_suite_stream_reader<T>(
