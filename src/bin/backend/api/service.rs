@@ -78,12 +78,13 @@ impl ApiService {
         project: String,
         payload: StartProjectRequest,
     ) -> Result<MessageResponse, ApiError> {
-        let context = self.project_context(&project).await?;
+        let mut context = self.project_context(&project).await?;
         if !context.config_path.is_file() {
             return Err(ApiError::chief_yaml_missing(
                 context.config_path.display().to_string(),
             ));
         }
+        context.refresh().map_err(ApiError::internal)?;
         let agents = payload
             .agents
             .unwrap_or(self.default_agents_per_project)
@@ -1240,6 +1241,11 @@ mod tests {
             .expect("failed to write todos.yaml");
     }
 
+    fn write_chief_yaml(project_dir: &Path, chief_yaml: &str) {
+        fs::write(project_dir.join("chief.yaml"), format!("{chief_yaml}\n"))
+            .expect("failed to write chief.yaml");
+    }
+
     fn setup_service(initial_todos_yaml: &str) -> (TempDir, ApiService, String, PathBuf) {
         let workspace = TempDir::new("workspace");
         let project_name = format!("project-{}", Uuid::new_v4());
@@ -1361,6 +1367,69 @@ mod tests {
         assert_eq!(
             run_count, 0,
             "rejected start_project should not create run records"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: done-1
+    todo: Completed todo
+    expectations: Already done
+    priority: 1
+    test_suites: []
+    status: done"#,
+        );
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: tdd"#,
+        );
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry =
+            ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let response = service
+            .start_project(
+                project_name.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                },
+            )
+            .await
+            .expect("start_project should succeed");
+
+        assert!(
+            response.message.contains("flow=single_prompt"),
+            "start_project should use refreshed chief.yaml flow, got message: {}",
+            response.message
         );
     }
 
