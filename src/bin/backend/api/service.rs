@@ -1250,6 +1250,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_todos_removes_items_deleted_from_todos_yaml() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: todo-keep
+    todo: Keep this todo
+    expectations: Keep this expectations
+    priority: 5
+    test_suites: []
+    status: pending
+  - id: todo-remove
+    todo: Remove this todo
+    expectations: Remove this expectations
+    priority: 2
+    test_suites: []
+    status: pending"#,
+        );
+
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: todo-keep
+    todo: Keep this todo
+    expectations: Keep this expectations
+    priority: 5
+    test_suites: []
+    status: pending"#,
+        );
+
+        let response = service
+            .get_todos(&project)
+            .await
+            .expect("get_todos should sync file removals");
+        assert_eq!(
+            response.todos.len(),
+            1,
+            "response should exactly match todos.yaml after manual removal"
+        );
+        assert_eq!(
+            response.todos[0].id, "todo-keep",
+            "remaining todo should still be visible"
+        );
+        assert!(
+            response.todos.iter().all(|todo| todo.id != "todo-remove"),
+            "removed todo should not be returned by get_todos"
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let sqlite_todos = store
+            .list_todos()
+            .expect("sqlite todos should be readable after sync");
+        assert!(
+            sqlite_todos.iter().all(|todo| todo.id != "todo-remove"),
+            "removed todo should also be deleted from sqlite after refresh sync"
+        );
+    }
+
+    #[tokio::test]
     async fn get_state_and_todos_reflect_manual_todo_edits() {
         let (_workspace, service, project, project_dir) = setup_service(
             r#"todos:
