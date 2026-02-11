@@ -175,6 +175,15 @@ pub async fn get_file_diff(
     Ok(Json(state.service.get_file_diff(&project, query).await?))
 }
 
+pub async fn reset_project_workspace(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(state.service.reset_project_workspace(&project).await?))
+}
+
 pub async fn get_chief_yaml(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,

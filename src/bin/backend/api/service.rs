@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use chief::domain::{EventType, JobStatus, Phase, Todo, TodoStatus};
+use chief::domain::{EventType, JobStatus, Phase, RunExitStatus, Todo, TodoStatus};
 use chief::flow::{
     FlowKind, SuiteCommandKind, execute_suite_command, suite_command_cwd, suite_command_for_kind,
 };
@@ -34,6 +34,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{error, info};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct ApiService {
@@ -50,6 +51,9 @@ struct SuiteCheckPlan {
     env: BTreeMap<String, String>,
     timeout_seconds: u64,
 }
+
+const RETRY_CLEANUP_DISCARDED_MSG_PREFIX: &str =
+    "Retry cleanup: discarded local git changes before loop";
 
 impl ApiService {
     pub fn new(scheduler: Scheduler, default_agents_per_project: usize) -> Self {
@@ -465,6 +469,124 @@ impl ApiService {
         };
 
         Ok(FileDiffResponse { file, diff })
+    }
+
+    pub async fn reset_project_workspace(
+        &self,
+        project: &str,
+    ) -> Result<MessageResponse, ApiError> {
+        let runtime = self
+            .scheduler
+            .list_project_views()
+            .await
+            .into_iter()
+            .find(|view| view.name == project)
+            .ok_or_else(|| ApiError::not_found(format!("project '{project}' not found")))?;
+        if runtime.running {
+            return Err(ApiError::unprocessable(
+                "project must be stopped before resetting workspace",
+            ));
+        }
+
+        let mut context = self.project_context(project).await?;
+        context.refresh().map_err(ApiError::internal)?;
+
+        let changed_files = context
+            .git
+            .changed_files(&context.project_dir)
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .filter(|path| !is_internal_workspace_state_file(path))
+            .collect::<Vec<_>>();
+        if !changed_files.is_empty() {
+            run_git_capture(&context.project_dir, &["reset", "--hard", "HEAD"])?;
+            run_git_capture(
+                &context.project_dir,
+                &["clean", "-fd", "-e", "chief.db", "-e", "chief.db-*"],
+            )?;
+        }
+
+        let marker_message = format!("{RETRY_CLEANUP_DISCARDED_MSG_PREFIX} manual/1");
+        let mut marker_payload = BTreeMap::new();
+        marker_payload.insert(
+            "files".to_owned(),
+            serde_json::Value::Array(
+                changed_files
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        let todo_ids = context
+            .store
+            .list_todos()
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .filter(|todo| todo.status != TodoStatus::Done)
+            .map(|todo| todo.id)
+            .collect::<Vec<_>>();
+        let run_id = format!("manual-workspace-reset-{}", Uuid::new_v4());
+        context
+            .store
+            .start_run(&run_id)
+            .map_err(ApiError::internal)?;
+
+        let log_result = if todo_ids.is_empty() {
+            context.log_project_event(
+                &run_id,
+                None,
+                None,
+                "warning",
+                Some(Phase::Red),
+                EventType::GitOp,
+                marker_message.clone(),
+                marker_payload.clone(),
+            )
+        } else {
+            for todo_id in &todo_ids {
+                context.log_project_event(
+                    &run_id,
+                    None,
+                    Some(todo_id.clone()),
+                    "warning",
+                    Some(Phase::Red),
+                    EventType::GitOp,
+                    marker_message.clone(),
+                    marker_payload.clone(),
+                )?;
+            }
+            Ok(())
+        }
+        .map_err(ApiError::internal);
+
+        let run_exit_status = if log_result.is_ok() {
+            RunExitStatus::Success
+        } else {
+            RunExitStatus::Failure
+        };
+        context
+            .store
+            .finish_run(&run_id, run_exit_status)
+            .map_err(ApiError::internal)?;
+        if let Err(err) = log_result {
+            return Err(err);
+        }
+
+        Ok(MessageResponse {
+            message: if changed_files.is_empty() {
+                format!(
+                    "workspace already clean; recorded reset marker for {} todo(s)",
+                    todo_ids.len()
+                )
+            } else {
+                format!(
+                    "discarded {} local git change(s); recorded reset marker for {} todo(s)",
+                    changed_files.len(),
+                    todo_ids.len()
+                )
+            },
+        })
     }
 
     pub async fn get_chief_yaml(&self, project: &str) -> Result<ChiefYamlResponse, ApiError> {
@@ -1068,6 +1190,10 @@ fn run_git_capture(project_dir: &PathBuf, args: &[&str]) -> Result<String, ApiEr
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn is_internal_workspace_state_file(path: &str) -> bool {
+    path == "chief.db" || path.starts_with("chief.db-")
+}
+
 fn resolve_last_done_todo_committed_at(
     git: &impl GitOps,
     project_dir: &std::path::Path,
@@ -1213,17 +1339,20 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiService, resolve_last_done_todo_committed_at};
+    use super::{
+        ApiService, RETRY_CLEANUP_DISCARDED_MSG_PREFIX, is_internal_workspace_state_file,
+        resolve_last_done_todo_committed_at,
+    };
     use crate::api::error::ApiError;
     use crate::api::types::StartProjectRequest;
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use chief::domain::{Todo, TodoStatus};
+    use chief::domain::{EventType, Todo, TodoStatus};
     use chief::git::GitOps;
     use chief::scheduler::Scheduler;
     use chief::service::ProjectRegistry;
-    use chief::storage::ProjectStore;
+    use chief::storage::{EventQuery, ProjectStore};
     use rusqlite::Connection;
     use std::collections::HashMap;
     use std::fs;
@@ -1983,6 +2112,174 @@ mod tests {
         assert_eq!(
             state.todos.available, 1,
             "available should remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_project_workspace_discards_changes_and_logs_reset_markers_for_non_done_todos() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: pending-1
+    todo: Pending todo
+    expectations: reset marker should be recorded
+    priority: 3
+    test_suites: []
+    status: pending
+  - id: attempted-1
+    todo: Attempted todo
+    expectations: reset marker should be recorded
+    priority: 2
+    test_suites: []
+    status: attempted
+  - id: done-1
+    todo: Done todo
+    expectations: done todos should be ignored
+    priority: 1
+    test_suites: []
+    status: done"#,
+        );
+
+        fs::write(project_dir.join("tracked.txt"), "baseline\n")
+            .expect("failed to create tracked file fixture");
+        run_git(&project_dir, &["add", "tracked.txt"]);
+        run_git(
+            &project_dir,
+            &["commit", "-m", "chore: add tracked fixture file"],
+        );
+
+        fs::write(project_dir.join("tracked.txt"), "dirty change\n")
+            .expect("failed to dirty tracked file");
+        fs::write(project_dir.join("scratch.tmp"), "dirty untracked change\n")
+            .expect("failed to create untracked dirty file");
+
+        let response = service
+            .reset_project_workspace(&project)
+            .await
+            .expect("reset_project_workspace should succeed");
+
+        assert!(
+            response.message.contains("discarded 2 local git change(s)"),
+            "response message should report discarded changes, got: {}",
+            response.message
+        );
+
+        let status_after = run_git(&project_dir, &["status", "--porcelain"]);
+        let remaining_user_changes = status_after
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .filter(|path| !is_internal_workspace_state_file(path))
+            .collect::<Vec<_>>();
+        assert!(
+            remaining_user_changes.is_empty(),
+            "workspace should be clean for user files after reset, got: {status_after}"
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let markers = store
+            .query_events(EventQuery {
+                limit: 200,
+                ..EventQuery::default()
+            })
+            .expect("events should be queryable")
+            .into_iter()
+            .filter(|event| {
+                event.event_type == EventType::GitOp
+                    && event.msg.starts_with(RETRY_CLEANUP_DISCARDED_MSG_PREFIX)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            markers.len(),
+            2,
+            "one marker should be recorded per non-done todo"
+        );
+
+        let mut marker_todo_ids = markers
+            .iter()
+            .filter_map(|event| event.todo_id.clone())
+            .collect::<Vec<_>>();
+        marker_todo_ids.sort();
+        assert_eq!(
+            marker_todo_ids,
+            vec!["attempted-1".to_owned(), "pending-1".to_owned()],
+            "marker events should target pending/attempted todos only"
+        );
+
+        for marker in &markers {
+            let files = marker
+                .payload
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .expect("marker should include files payload")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>();
+            assert!(
+                files.contains(&"tracked.txt"),
+                "marker payload should include tracked file path"
+            );
+            assert!(
+                files.contains(&"scratch.tmp"),
+                "marker payload should include untracked file path"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_project_workspace_logs_marker_even_when_worktree_is_already_clean() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: pending-1
+    todo: Pending todo
+    expectations: clean workspace should still create marker
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+
+        let response = service
+            .reset_project_workspace(&project)
+            .await
+            .expect("reset_project_workspace should succeed for clean worktree");
+        assert!(
+            response.message.contains("workspace already clean"),
+            "response should acknowledge already-clean workspace"
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let markers = store
+            .query_events(EventQuery {
+                limit: 100,
+                ..EventQuery::default()
+            })
+            .expect("events should be queryable")
+            .into_iter()
+            .filter(|event| {
+                event.event_type == EventType::GitOp
+                    && event.msg.starts_with(RETRY_CLEANUP_DISCARDED_MSG_PREFIX)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            markers.len(),
+            1,
+            "clean workspace reset should still create one marker for pending todo"
+        );
+        assert_eq!(
+            markers[0].todo_id.as_deref(),
+            Some("pending-1"),
+            "marker should be tied to the pending todo"
+        );
+        let files = markers[0]
+            .payload
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .expect("marker payload should include files")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            files.is_empty(),
+            "clean workspace marker should record an empty files list"
         );
     }
 

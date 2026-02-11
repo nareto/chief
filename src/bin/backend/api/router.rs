@@ -43,6 +43,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::get_file_diff),
         )
         .route(
+            "/api/projects/{project}/reset_workspace",
+            post(handlers::reset_project_workspace),
+        )
+        .route(
             "/api/projects/{project}/chief_yaml",
             get(handlers::get_chief_yaml).put(handlers::update_chief_yaml),
         )
