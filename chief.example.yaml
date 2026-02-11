@@ -6,6 +6,7 @@ chief:
   agent_extra_args: []
   max_retries: 10
   agent_timeout_seconds: 2700
+  suite_command_timeout_seconds: 1800
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
   use_agent_log_truncation_for_stdout_logs: false
@@ -25,6 +26,7 @@ suites:
     lint_command: cargo clippy
     # lint_fix_command: cargo fmt
     post_green_command: cargo test
+    # command_timeout_seconds: 1800 # optional per-suite override (seconds)
     env: {}
     strip_root_from_target: true
 
@@ -43,6 +45,7 @@ suites:
 #     lint_command: ruff check {target}
 #     lint_fix_command: ruff check --fix {target}
 #     post_green_command: pytest -q
+#     command_timeout_seconds: 1800 # optional per-suite override (seconds)
 #     env: {}
 #     strip_root_from_target: true
 
@@ -61,6 +64,7 @@ suites:
 #     lint_command: npm run lint
 #     lint_fix_command: npm run lint -- --fix
 #     post_green_command: npm run build
+#     command_timeout_seconds: 1800 # optional per-suite override (seconds)
 #     env:
 #       NODE_ENV: test
 #     strip_root_from_target: true

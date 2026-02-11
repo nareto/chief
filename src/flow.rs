@@ -18,7 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -142,6 +142,7 @@ pub fn execute_suite_command(
     cwd: &Path,
     env: &BTreeMap<String, String>,
     cancel_signal: &Arc<AtomicBool>,
+    timeout_seconds: Option<u64>,
 ) -> Result<AgentOutput> {
     let mut process = Command::new("sh");
     process.arg("-lc").arg(command);
@@ -149,19 +150,61 @@ pub fn execute_suite_command(
     process.envs(env.iter());
     process.stdout(Stdio::piped());
     process.stderr(Stdio::piped());
+    configure_process_group(&mut process);
     let mut child = process
         .spawn()
         .with_context(|| format!("failed to run command: {command}"))?;
-    let output = wait_for_command_with_cancel(&mut child, cancel_signal)?;
+    let (output, wait_state) =
+        wait_for_command_with_cancel(&mut child, cancel_signal, timeout_seconds)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let mut merged_output = format!("{stdout}\n{stderr}").trim().to_owned();
+    if wait_state == WaitState::TimedOut {
+        let timeout_seconds = timeout_seconds.unwrap_or_default();
+        if merged_output.is_empty() {
+            merged_output = format!(
+                "suite command timed out after {} second(s) and was terminated.",
+                timeout_seconds
+            );
+        } else {
+            merged_output = format!(
+                "suite command timed out after {} second(s) and was terminated.\n{}",
+                timeout_seconds, merged_output
+            );
+        }
+    }
     Ok(AgentOutput {
-        exit_code: output.status.code().unwrap_or(1),
+        exit_code: if wait_state == WaitState::TimedOut {
+            124
+        } else {
+            output.status.code().unwrap_or(1)
+        },
         command: command.to_owned(),
-        merged_output: format!("{stdout}\n{stderr}").trim().to_owned(),
+        merged_output,
         stdout,
         stderr,
     })
+}
+
+fn configure_process_group(process: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+}
+
+fn terminate_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            let pgid = nix::unistd::Pid::from_raw(pid);
+            let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 fn replace_target_placeholder(
@@ -431,33 +474,75 @@ impl<'a> FlowExecution<'a> {
         command: &str,
         cwd: &Path,
         env: &BTreeMap<String, String>,
+        timeout_seconds: u64,
     ) -> Result<AgentOutput> {
         self.ensure_not_cancelled()?;
-        execute_suite_command(command, cwd, env, &self.cancel_signal)
+        execute_suite_command(
+            command,
+            cwd,
+            env,
+            &self.cancel_signal,
+            Some(timeout_seconds.max(1)),
+        )
     }
 
-    pub fn run_test_suite(&self, suite: &TestSuiteConfig) -> Result<AgentOutput> {
+    pub fn run_test_suite(&self, suite: &TestSuiteConfig, phase: Phase) -> Result<AgentOutput> {
         let cmd = suite_command_for_kind(suite, SuiteCommandKind::Test, None)
             .unwrap_or_else(|| suite.test_command.clone());
         let cwd = suite_command_cwd(&self.project_dir, suite);
-        self.run_suite_command(&cmd, &cwd, &suite.env)
+        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        self.log_suite_command_started(
+            phase,
+            suite,
+            SuiteCommandKind::Test,
+            &cmd,
+            &cwd,
+            timeout_seconds,
+        )?;
+        self.run_suite_command(&cmd, &cwd, &suite.env, timeout_seconds)
     }
 
-    pub fn run_lint_suite(&self, suite: &TestSuiteConfig) -> Result<Option<AgentOutput>> {
+    pub fn run_lint_suite(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+    ) -> Result<Option<AgentOutput>> {
         let Some(cmd) = suite_command_for_kind(suite, SuiteCommandKind::Lint, None) else {
             return Ok(None);
         };
         let cwd = suite_command_cwd(&self.project_dir, suite);
-        let out = self.run_suite_command(&cmd, &cwd, &suite.env)?;
+        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        self.log_suite_command_started(
+            phase,
+            suite,
+            SuiteCommandKind::Lint,
+            &cmd,
+            &cwd,
+            timeout_seconds,
+        )?;
+        let out = self.run_suite_command(&cmd, &cwd, &suite.env, timeout_seconds)?;
         Ok(Some(out))
     }
 
-    pub fn run_post_green_suite(&self, suite: &TestSuiteConfig) -> Result<Option<AgentOutput>> {
+    pub fn run_post_green_suite(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+    ) -> Result<Option<AgentOutput>> {
         let Some(command) = suite_command_for_kind(suite, SuiteCommandKind::PostGreen, None) else {
             return Ok(None);
         };
         let cwd = suite_command_cwd(&self.project_dir, suite);
-        let out = self.run_suite_command(&command, &cwd, &suite.env)?;
+        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        self.log_suite_command_started(
+            phase,
+            suite,
+            SuiteCommandKind::PostGreen,
+            &command,
+            &cwd,
+            timeout_seconds,
+        )?;
+        let out = self.run_suite_command(&command, &cwd, &suite.env, timeout_seconds)?;
         Ok(Some(out))
     }
 
@@ -591,6 +676,37 @@ impl<'a> FlowExecution<'a> {
             return Err(anyhow!(AgentCancelledError));
         }
         Ok(())
+    }
+
+    fn suite_command_timeout_seconds(&self, suite: &TestSuiteConfig) -> u64 {
+        suite
+            .command_timeout_seconds
+            .unwrap_or(self.chief_config.suite_command_timeout_seconds)
+            .max(1)
+    }
+
+    fn log_suite_command_started(
+        &self,
+        phase: Phase,
+        suite: &TestSuiteConfig,
+        kind: SuiteCommandKind,
+        command: &str,
+        cwd: &Path,
+        timeout_seconds: u64,
+    ) -> Result<()> {
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::PhaseChange,
+            format!("Running {} command ({})", kind.as_str(), suite.name),
+            payload_from_json(json!({
+                "suite": suite.name,
+                "kind": kind.as_str(),
+                "command": command,
+                "cwd": cwd.display().to_string(),
+                "timeout_seconds": timeout_seconds,
+            })),
+        )
     }
 }
 
@@ -1050,7 +1166,7 @@ impl SinglePromptPhaseStrategy {
 
         let mut post_green_ok = true;
         for suite in &involved_suites {
-            if let Some(out) = execution.run_post_green_suite(suite)? {
+            if let Some(out) = execution.run_post_green_suite(suite, Phase::PostGreen)? {
                 execution.log_event(
                     if out.exit_code == 0 {
                         "info"
@@ -1401,7 +1517,7 @@ impl PhaseStrategy for PostGreenPhaseStrategy {
         let mut post_green_ok = true;
 
         for suite in &self.suites {
-            if let Some(out) = execution.run_post_green_suite(suite)? {
+            if let Some(out) = execution.run_post_green_suite(suite, Phase::PostGreen)? {
                 execution.log_event(
                     if out.exit_code == 0 {
                         "info"
@@ -1440,7 +1556,7 @@ fn run_lint_checks(
     let mut all_ok = true;
 
     for suite in suites {
-        let Some(out) = execution.run_lint_suite(suite)? else {
+        let Some(out) = execution.run_lint_suite(suite, phase)? else {
             continue;
         };
 
@@ -1545,20 +1661,31 @@ fn normalize_repo_relative_path(path: &str) -> String {
 fn wait_for_command_with_cancel(
     child: &mut std::process::Child,
     cancel_signal: &Arc<AtomicBool>,
-) -> Result<std::process::Output> {
+    timeout_seconds: Option<u64>,
+) -> Result<(std::process::Output, WaitState)> {
     let stdout_reader = spawn_pipe_reader(child.stdout.take());
     let stderr_reader = spawn_pipe_reader(child.stderr.take());
-    let mut cancelled = false;
+    let timeout = timeout_seconds
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs);
+    let started = Instant::now();
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
-            break status;
+            break (status, WaitState::Completed);
         }
 
         if cancel_signal.load(Ordering::SeqCst) {
-            cancelled = true;
-            let _ = child.kill();
-            break child.wait()?;
+            terminate_process_tree(child);
+            break (child.wait()?, WaitState::Cancelled);
+        }
+
+        if timeout
+            .map(|limit| started.elapsed() >= limit)
+            .unwrap_or(false)
+        {
+            terminate_process_tree(child);
+            break (child.wait()?, WaitState::TimedOut);
         }
 
         std::thread::sleep(Duration::from_millis(50));
@@ -1567,15 +1694,25 @@ fn wait_for_command_with_cancel(
     let stdout = join_pipe_reader(stdout_reader, "stdout")?;
     let stderr = join_pipe_reader(stderr_reader, "stderr")?;
 
-    if cancelled {
+    if status.1 == WaitState::Cancelled {
         return Err(anyhow!(AgentCancelledError));
     }
 
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
+    Ok((
+        std::process::Output {
+            status: status.0,
+            stdout,
+            stderr,
+        },
+        status.1,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitState {
+    Completed,
+    TimedOut,
+    Cancelled,
 }
 
 fn spawn_pipe_reader<T>(pipe: Option<T>) -> JoinHandle<Result<Vec<u8>>>
@@ -1603,10 +1740,12 @@ fn run_test_and_lint(
     suites: &[TestSuiteConfig],
     phase: Phase,
 ) -> Result<bool> {
-    let mut all_ok = run_lint_checks(execution, suites, phase)?;
+    if !run_lint_checks(execution, suites, phase)? {
+        return Ok(false);
+    }
 
     for suite in suites {
-        let out = execution.run_test_suite(suite)?;
+        let out = execution.run_test_suite(suite, phase)?;
         execution.log_event(
             if out.exit_code == 0 {
                 "info"
@@ -1633,11 +1772,11 @@ fn run_test_and_lint(
         )?;
 
         if out.exit_code != 0 {
-            all_ok = false;
+            return Ok(false);
         }
     }
 
-    Ok(all_ok)
+    Ok(true)
 }
 
 fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
@@ -1797,11 +1936,18 @@ mod tests {
             test_init: None,
             test_setup: None,
             post_green_command: None,
+            command_timeout_seconds: None,
             lint_command: None,
             lint_fix_command: None,
             env: BTreeMap::new(),
             strip_root_from_target: true,
         }
+    }
+
+    fn suite_named_with_test_command(name: &str, test_command: &str) -> TestSuiteConfig {
+        let mut suite = suite_named(name);
+        suite.test_command = test_command.to_owned();
+        suite
     }
 
     #[derive(Debug)]
@@ -1845,6 +1991,88 @@ mod tests {
         fn current_branch(&self) -> Result<String> {
             Ok("main".to_owned())
         }
+    }
+
+    #[test]
+    fn execute_suite_command_returns_timeout_exit_code() {
+        let project_dir = temp_project_dir();
+        fs::create_dir_all(&project_dir).expect("project dir should be created");
+        let cancel_signal = Arc::new(AtomicBool::new(false));
+
+        let out = super::execute_suite_command(
+            "sleep 2",
+            &project_dir,
+            &BTreeMap::new(),
+            &cancel_signal,
+            Some(1),
+        )
+        .expect("suite command should return timeout output");
+
+        assert_eq!(out.exit_code, 124);
+        assert!(
+            out.merged_output
+                .contains("suite command timed out after 1 second(s) and was terminated"),
+            "expected timeout message in merged output, got: {}",
+            out.merged_output
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn run_test_and_lint_stops_after_first_failed_test() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "stop test loop on first failure".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+        let marker_file = project_dir.join("second-suite-ran.txt");
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        };
+
+        let suites = vec![
+            suite_named_with_test_command("first", "exit 1"),
+            suite_named_with_test_command("second", "printf second > second-suite-ran.txt"),
+        ];
+
+        let all_ok = super::run_test_and_lint(&execution, &suites, Phase::SinglePrompt)
+            .expect("test+lint run should complete");
+
+        assert!(!all_ok, "first failure should return retry outcome");
+        assert!(
+            !marker_file.exists(),
+            "second suite command should not execute after first failure"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
     }
 
     #[test]
