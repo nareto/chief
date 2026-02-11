@@ -1307,7 +1307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_state_and_todos_reflect_manual_todo_edits() {
+    async fn get_todos_and_get_state_refresh_between_calls_after_manual_todo_edits() {
         let (_workspace, service, project, project_dir) = setup_service(
             r#"todos:
   - id: todo-alpha
@@ -1321,7 +1321,39 @@ mod tests {
     expectations: Keep done
     priority: 2
     test_suites: []
-    status: done"#,
+    status: done
+  - id: todo-remove
+    todo: To be removed by manual edit
+    expectations: Should disappear on next read
+    priority: 3
+    test_suites: []
+    status: pending"#,
+        );
+
+        let initial_todos = service
+            .get_todos(&project)
+            .await
+            .expect("first get_todos should succeed before manual edit");
+        assert!(
+            initial_todos
+                .todos
+                .iter()
+                .any(|todo| todo.id == "todo-remove"),
+            "first get_todos should reflect baseline todo set"
+        );
+
+        let initial_state = service
+            .get_state(&project)
+            .await
+            .expect("first get_state should succeed before manual edit");
+        assert_eq!(initial_state.todos.total, 3, "baseline total should match");
+        assert_eq!(
+            initial_state.todos.completed, 1,
+            "baseline completed count should match"
+        );
+        assert_eq!(
+            initial_state.todos.available, 2,
+            "baseline available count should match"
         );
 
         write_todos(
@@ -1333,6 +1365,13 @@ mod tests {
     priority: 9
     test_suites: []
     status: done
+    done_at_commit: manual-edit-commit
+  - id: todo-gamma
+    todo: Newly added todo from file
+    expectations: Added between API reads
+    priority: 6
+    test_suites: []
+    status: pending
   - id: todo-beta
     todo: Already done
     expectations: Keep done
@@ -1353,13 +1392,22 @@ mod tests {
         assert_eq!(edited.todo, "Edited todo text from file");
         assert_eq!(edited.expectations, "Edited expectations from file");
         assert_eq!(edited.priority, 9);
+        assert_eq!(edited.done_at_commit.as_deref(), Some("manual-edit-commit"));
+        assert!(
+            todos.todos.iter().any(|todo| todo.id == "todo-gamma"),
+            "second get_todos should include manually added todos"
+        );
+        assert!(
+            todos.todos.iter().all(|todo| todo.id != "todo-remove"),
+            "second get_todos should remove todos deleted from todos.yaml"
+        );
 
         let state = service
             .get_state(&project)
             .await
             .expect("get_state should refresh todos before progress calculation");
         assert_eq!(
-            state.todos.total, 2,
+            state.todos.total, 3,
             "total todos should reflect file edits"
         );
         assert_eq!(
@@ -1367,8 +1415,8 @@ mod tests {
             "completed count should reflect edited todo status"
         );
         assert_eq!(
-            state.todos.available, 0,
-            "available count should reflect edited todo status"
+            state.todos.available, 1,
+            "available count should reflect add/update/remove reconciliation"
         );
     }
 
@@ -1382,6 +1430,30 @@ mod tests {
     priority: 3
     test_suites: []
     status: pending"#,
+        );
+
+        let initial_todos = service
+            .get_todos(&project)
+            .await
+            .expect("first get_todos should succeed for valid yaml");
+        assert_eq!(
+            initial_todos.todos.len(),
+            1,
+            "baseline get_todos should return the seeded todo"
+        );
+
+        let initial_state = service
+            .get_state(&project)
+            .await
+            .expect("first get_state should succeed for valid yaml");
+        assert_eq!(initial_state.todos.total, 1, "baseline total should match");
+        assert_eq!(
+            initial_state.todos.available, 1,
+            "baseline available should match"
+        );
+        assert_eq!(
+            initial_state.todos.completed, 0,
+            "baseline completed should match"
         );
 
         fs::write(
@@ -1401,5 +1473,30 @@ mod tests {
             .await
             .expect_err("get_state should fail for invalid todos.yaml");
         assert_invalid_yaml_api_error(state_error).await;
+
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: recovered-todo
+    todo: Recovered after fixing yaml
+    expectations: Reads should recover after parse error
+    priority: 7
+    test_suites: []
+    status: pending"#,
+        );
+
+        let recovered_todos = service
+            .get_todos(&project)
+            .await
+            .expect("get_todos should recover after restoring valid yaml");
+        assert_eq!(
+            recovered_todos
+                .todos
+                .iter()
+                .map(|todo| todo.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recovered-todo"],
+            "post-recovery read should reflect latest synchronized file content"
+        );
     }
 }

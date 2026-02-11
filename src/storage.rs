@@ -1581,11 +1581,20 @@ mod tests {
             .reset_db_from_todos_file()
             .expect("reset_db_from_todos_file should seed sqlite");
 
-        let unchanged_before = store
-            .list_todos()
-            .expect("list_todos should succeed")
-            .into_iter()
+        let baseline_todos = store.list_todos().expect("list_todos should succeed");
+        assert!(
+            baseline_todos.iter().any(|todo| todo.id == "remove-me"),
+            "baseline sync should include todos present in todos.yaml",
+        );
+        assert!(
+            baseline_todos.iter().all(|todo| todo.id != "add-me"),
+            "baseline sync should not include todos not yet added to todos.yaml",
+        );
+
+        let unchanged_before = baseline_todos
+            .iter()
             .find(|todo| todo.id == "keep-unchanged")
+            .cloned()
             .expect("baseline unchanged todo should exist");
 
         write_todos(
@@ -1656,6 +1665,53 @@ mod tests {
         assert_eq!(
             unchanged_after, &unchanged_before,
             "todo not changed in todos.yaml should keep persisted values after reconciliation"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn sync_todos_from_file_returns_error_for_invalid_yaml_without_mutating_sqlite() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: baseline-todo
+    todo: Baseline todo
+    expectations: Baseline expectations
+    priority: 3
+    test_suites: []
+    status: pending"#,
+        );
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite");
+
+        let before = store.list_todos().expect("baseline todos should load");
+
+        fs::write(
+            project_dir.join("todos.yaml"),
+            "todos:\n  - id: broken\n    todo: [missing quote\n",
+        )
+        .expect("failed to write invalid todos.yaml");
+
+        let err = store
+            .sync_todos_from_file()
+            .expect_err("sync_todos_from_file should fail for invalid todos.yaml");
+        assert!(
+            err.to_string().contains("invalid YAML in"),
+            "expected invalid YAML error, got: {err}",
+        );
+
+        let after = store
+            .list_todos()
+            .expect("sqlite should remain readable after sync error");
+        assert_eq!(
+            after, before,
+            "failed sync should not mutate sqlite todo rows"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
