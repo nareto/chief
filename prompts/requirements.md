@@ -6,13 +6,11 @@ Your task will be:
 3. If required, update `chief.yaml`, following instructions in `chief.example.yaml`
 4. Break the new requirements down into single todos, roughly jira story/task level. Each todo must:
     - follow the schema shown in `todos.example.yaml`
-    - start with user impact/value
-    - be self-contained, without refering to the general context outlined here nor to other specific todos
-    - include technical details on the required implementation
-    - include whatever additional context will be needed by the developer picking it up
+    - have a clear description on what needs to be achieved
+    - be self-contained: include all the needed context, without refering to the general context outlined here nor to other specific todos
     - include, in the expectations field, examples of assertions regarding the todo that should hold (these will be used by the developer to write tests)
 5. Insert/update the todos in `{{ todos_path }}`.
-8. Set appropriate priorities for the new todos: 100 is DO NOW, 1 is do if there is nothing else to do.
+8. Set appropriate priorities for the new todos: 100 or above is DO NOW, 1 is do if there is nothing else to do.
 
 REQUIREMENTS:
 {{ requirements_text }}
