@@ -10,6 +10,7 @@ use std::error::Error as StdError;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct DbResetRequiredError {
@@ -112,6 +113,9 @@ impl ProjectStore {
             self.sync_todos_file_from_conn(&tx)?;
         }
         tx.commit()?;
+        if changed > 0 {
+            self.auto_commit_todos_yaml()?;
+        }
         Ok(changed)
     }
 
@@ -149,6 +153,7 @@ impl ProjectStore {
         for todo in todos {
             self.upsert_todo_row(&conn, &todo)?;
         }
+        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -197,6 +202,7 @@ impl ProjectStore {
         }
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -207,6 +213,7 @@ impl ProjectStore {
         self.upsert_todo_row(&tx, &normalized)?;
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(normalized)
     }
 
@@ -252,6 +259,7 @@ impl ProjectStore {
         self.upsert_todo_row(&tx, &next)?;
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(next)
     }
 
@@ -266,6 +274,7 @@ impl ProjectStore {
 
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -279,6 +288,7 @@ impl ProjectStore {
         )?;
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(deleted)
     }
 
@@ -335,6 +345,7 @@ impl ProjectStore {
 
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(Some(todo))
     }
 
@@ -553,6 +564,7 @@ impl ProjectStore {
         }
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
+        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -570,6 +582,113 @@ impl ProjectStore {
     fn sync_todos_file_from_conn(&self, conn: &Connection) -> Result<()> {
         let todos = self.list_todos_with_conn(conn)?;
         self.save_todo_file(&TodoFile { todos })
+    }
+
+    fn auto_commit_todos_yaml(&self) -> Result<()> {
+        // Unit tests use temp directories that are not git repos.
+        if !self.project_dir.join(".git").exists() {
+            return Ok(());
+        }
+
+        let relative_todos_path = self
+            .todos_path
+            .strip_prefix(&self.project_dir)
+            .unwrap_or_else(|_| Path::new("todos.yaml"))
+            .to_string_lossy()
+            .to_string();
+        let relative_todos = relative_todos_path.as_str();
+
+        let status_args = ["status", "--porcelain", "--", relative_todos];
+        let status_output = self.run_git_command(&status_args)?;
+        if !status_output.status.success() {
+            return Err(anyhow!(
+                "git status failed for {}: {}",
+                relative_todos,
+                String::from_utf8_lossy(&status_output.stderr).trim()
+            ));
+        }
+        if String::from_utf8_lossy(&status_output.stdout)
+            .trim()
+            .is_empty()
+        {
+            return Ok(());
+        }
+
+        let add_args = ["add", "--", relative_todos];
+        let add_output = self.run_git_command(&add_args)?;
+        if !add_output.status.success() {
+            return Err(anyhow!(
+                "git add failed for {}: {}",
+                relative_todos,
+                String::from_utf8_lossy(&add_output.stderr).trim()
+            ));
+        }
+
+        let staged_args = ["diff", "--cached", "--name-only", "--", relative_todos];
+        let staged_output = self.run_git_command(&staged_args)?;
+        if !staged_output.status.success() {
+            return Err(anyhow!(
+                "git diff --cached failed for {}: {}",
+                relative_todos,
+                String::from_utf8_lossy(&staged_output.stderr).trim()
+            ));
+        }
+        if String::from_utf8_lossy(&staged_output.stdout)
+            .trim()
+            .is_empty()
+        {
+            return Ok(());
+        }
+
+        let commit_message = format!("chore(todos): sync {relative_todos}");
+        let commit_args = [
+            "commit",
+            "-m",
+            commit_message.as_str(),
+            "--",
+            relative_todos,
+        ];
+        let commit_output = self.run_git_command(&commit_args)?;
+        if commit_output.status.success() {
+            return Ok(());
+        }
+
+        let remaining_output = self.run_git_command(&status_args)?;
+        if remaining_output.status.success()
+            && String::from_utf8_lossy(&remaining_output.stdout)
+                .trim()
+                .is_empty()
+        {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&commit_output.stderr)
+            .trim()
+            .to_owned();
+        let stdout = String::from_utf8_lossy(&commit_output.stdout)
+            .trim()
+            .to_owned();
+        Err(anyhow!(
+            "git commit failed for {}: {}{}{}",
+            relative_todos,
+            stderr,
+            if !stderr.is_empty() && !stdout.is_empty() {
+                " | "
+            } else {
+                ""
+            },
+            stdout,
+        ))
+    }
+
+    fn run_git_command(&self, args: &[&str]) -> Result<std::process::Output> {
+        Command::new("git")
+            .arg("-c")
+            .arg("safe.directory=*")
+            .args(args)
+            .current_dir(&self.project_dir)
+            .output()
+            .with_context(|| format!("failed to run git {}", args.join(" ")))
     }
 
     fn upsert_todo_row(&self, conn: &Connection, todo: &Todo) -> Result<()> {
@@ -900,11 +1019,41 @@ mod tests {
     use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use uuid::Uuid;
 
     fn temp_project_dir() -> PathBuf {
         std::env::temp_dir().join(format!("chief-storage-test-{}", Uuid::new_v4()))
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-c")
+            .arg("safe.directory=*")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run git {}: {err}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed: stdout={} stderr={}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn init_git_repo(project_dir: &Path) {
+        run_git(project_dir, &["init"]);
+        run_git(
+            project_dir,
+            &["config", "user.email", "chief-storage-tests@example.com"],
+        );
+        run_git(project_dir, &["config", "user.name", "Chief Storage Tests"]);
+        run_git(project_dir, &["add", "--all"]);
+        run_git(project_dir, &["commit", "-m", "chore: baseline"]);
     }
 
     #[test]
@@ -1278,6 +1427,93 @@ mod tests {
         assert!(
             size_after < size_before,
             "expected chief.db to shrink after trim (before={size_before}, after={size_after})"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn append_todo_auto_commits_todos_yaml_when_repo_available() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        init_git_repo(&project_dir);
+
+        let before = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
+            .parse::<usize>()
+            .expect("commit count should parse");
+
+        store
+            .append_todo(
+                Todo {
+                    id: String::new(),
+                    todo: "auto commit from append".to_owned(),
+                    expectations: "status persisted".to_owned(),
+                    priority: 5,
+                    test_suites: Vec::new(),
+                    status: TodoStatus::Pending,
+                    done_at_commit: None,
+                }
+                .normalize(),
+            )
+            .expect("append_todo should succeed");
+
+        let after = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
+            .parse::<usize>()
+            .expect("commit count should parse");
+        assert_eq!(after, before + 1, "append_todo should create one commit");
+
+        let subject = run_git(&project_dir, &["log", "-1", "--pretty=%s"]);
+        assert_eq!(subject, "chore(todos): sync todos.yaml");
+
+        let files = run_git(
+            &project_dir,
+            &["show", "--name-only", "--pretty=format:", "HEAD"],
+        );
+        let changed_files = files
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(changed_files, vec!["todos.yaml"]);
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn sync_todos_from_file_auto_commits_external_todos_yaml_edit() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        init_git_repo(&project_dir);
+
+        fs::write(
+            project_dir.join("todos.yaml"),
+            "todos:\n  - id: imported-todo\n    priority: 7\n    todo: imported from requirements\n    expectations: persisted after sync\n    test_suites: []\n    status: pending\n    done_at_commit: null\n",
+        )
+        .expect("manual todos.yaml edit should succeed");
+
+        let before = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
+            .parse::<usize>()
+            .expect("commit count should parse");
+
+        store
+            .sync_todos_from_file()
+            .expect("sync_todos_from_file should succeed");
+
+        let after = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
+            .parse::<usize>()
+            .expect("commit count should parse");
+        assert_eq!(
+            after,
+            before + 1,
+            "sync_todos_from_file should commit external todos.yaml updates"
+        );
+
+        let todos = store.list_todos().expect("list_todos should succeed");
+        assert!(
+            todos.iter().any(|todo| todo.id == "imported-todo"),
+            "synced todo should exist in sqlite"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
