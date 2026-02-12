@@ -369,31 +369,73 @@ impl<'a> FlowExecution<'a> {
         let mut other_failures = Vec::new();
         let max_output_lines = self.chief_config.agent_log_max_output_lines;
         let todo_has_associated_test_suites = !self.todo.test_suites.is_empty();
+        let configured_suite_names = self
+            .todo
+            .test_suites
+            .iter()
+            .map(|suite| suite.trim())
+            .filter(|suite| !suite.is_empty())
+            .collect::<HashSet<_>>();
+        let mut seen_latest_lint_suites = HashSet::new();
+        let mut seen_latest_test_suites = HashSet::new();
+        let mut include_other_failures = true;
 
         for event in events {
             if event.phase != Some(Phase::SinglePrompt) {
                 continue;
             }
 
-            // Keep failure context focused on the latest completed iteration only.
             if event.event_type == EventType::AgentPrompt {
-                break;
+                // Keep "other failures" focused on the latest completed iteration.
+                // Lint/test suite status is still collected across runs below.
+                include_other_failures = false;
+                continue;
             }
 
             let has_nonzero_exit = event_exit_code(&event).unwrap_or(0) != 0;
             let is_warning_or_error = event.level == "warning" || event.level == "error";
 
-            match event.event_type {
-                EventType::Lint if has_nonzero_exit => lint_failures.push(
-                    single_prompt_failure_item_from_event(&event, max_output_lines),
-                ),
-                EventType::TestRun if has_nonzero_exit => test_failures.push(
-                    single_prompt_failure_item_from_event(&event, max_output_lines),
-                ),
-                _ => {}
+            if matches!(event.event_type, EventType::Lint | EventType::TestRun) {
+                let structured_suite_name = suite_name_from_event(&event);
+                let suite_name = if let Some(name) = structured_suite_name {
+                    if !configured_suite_names.is_empty()
+                        && !configured_suite_names.contains(name.as_str())
+                    {
+                        continue;
+                    }
+                    name
+                } else {
+                    // Legacy fallback without suite metadata: keep only latest-iteration context.
+                    if !configured_suite_names.is_empty() || !include_other_failures {
+                        continue;
+                    }
+                    let Some(name) = suite_fallback_key_from_event(&event) else {
+                        continue;
+                    };
+                    name
+                };
+
+                let seen = if event.event_type == EventType::Lint {
+                    &mut seen_latest_lint_suites
+                } else {
+                    &mut seen_latest_test_suites
+                };
+                if !seen.insert(suite_name) {
+                    continue;
+                }
+
+                if has_nonzero_exit {
+                    let item = single_prompt_failure_item_from_event(&event, max_output_lines);
+                    if event.event_type == EventType::Lint {
+                        lint_failures.push(item);
+                    } else {
+                        test_failures.push(item);
+                    }
+                }
+                continue;
             }
 
-            if matches!(event.event_type, EventType::Lint | EventType::TestRun) {
+            if !include_other_failures {
                 continue;
             }
 
@@ -406,6 +448,10 @@ impl<'a> FlowExecution<'a> {
                 if !has_associated_test_suites {
                     continue;
                 }
+            }
+
+            if is_agent_timeout_response_event(&event) {
+                continue;
             }
 
             if has_nonzero_exit
@@ -826,6 +872,65 @@ fn event_exit_code(event: &EventRecord) -> Option<i64> {
         Value::String(text) => text.trim().parse::<i64>().ok(),
         _ => None,
     }
+}
+
+fn suite_name_from_event(event: &EventRecord) -> Option<String> {
+    if let Some(suite) = event
+        .payload
+        .get("suite")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+    {
+        return Some(suite);
+    }
+
+    if let Some(open) = event.msg.rfind('(') {
+        if event.msg.ends_with(')') && open + 1 < event.msg.len() - 1 {
+            let suite = event.msg[open + 1..event.msg.len() - 1].trim();
+            if !suite.is_empty() {
+                return Some(suite.to_owned());
+            }
+        }
+    }
+
+    None
+}
+
+fn suite_fallback_key_from_event(event: &EventRecord) -> Option<String> {
+    event
+        .payload
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let msg = event.msg.trim();
+            if msg.is_empty() {
+                None
+            } else {
+                Some(msg.to_owned())
+            }
+        })
+}
+
+fn is_agent_timeout_response_event(event: &EventRecord) -> bool {
+    if event.event_type == EventType::AgentResponse {
+        return event
+            .payload
+            .get("output")
+            .and_then(Value::as_str)
+            .map(|output| {
+                output.contains("agent timed out after ") && output.contains(" second(s)")
+            })
+            .unwrap_or(false);
+    }
+
+    event.event_type == EventType::PhaseFailure
+        && event.msg == "single_prompt agent step failed"
+        && event_exit_code(event) == Some(124)
 }
 
 fn is_single_prompt_convergence_changed_files_retry_event(event: &EventRecord) -> bool {
@@ -1970,6 +2075,31 @@ mod tests {
         std::env::temp_dir().join(format!("chief-flow-test-{}", Uuid::new_v4()))
     }
 
+    fn record_single_prompt_event(
+        store: &ProjectStore,
+        run_id: &str,
+        todo_id: &str,
+        level: &str,
+        event_type: EventType,
+        msg: &str,
+        payload: BTreeMap<String, Value>,
+    ) {
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: run_id.to_owned(),
+                job_id: Some(format!("job-{run_id}")),
+                todo_id: Some(todo_id.to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: level.to_owned(),
+                phase: Some(Phase::SinglePrompt),
+                msg: msg.to_owned(),
+                event_type,
+                payload,
+            })
+            .expect("event should log");
+    }
+
     #[derive(Debug)]
     struct NoopPromptStore;
 
@@ -2812,6 +2942,337 @@ mod tests {
         assert_eq!(
             context.test_failures[1].output_tail,
             "test-b-line-2\ntest-b-line-3"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_failure_context_uses_latest_suite_failures_across_runs() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "reuse latest failed suite output across runs".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: vec!["backend".to_owned(), "frontend".to_owned()],
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-current".to_owned(),
+            job_id: "job-current".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let suite_payload = |suite: &str, command: &str, exit_code: i64, output: &str| {
+            let mut payload = BTreeMap::new();
+            payload.insert("suite".to_owned(), Value::String(suite.to_owned()));
+            payload.insert("command".to_owned(), Value::String(command.to_owned()));
+            payload.insert("exit_code".to_owned(), Value::from(exit_code));
+            payload.insert("output".to_owned(), Value::String(output.to_owned()));
+            payload
+        };
+
+        // Older run: both suites fail.
+        record_single_prompt_event(
+            &store,
+            "run-older",
+            "todo-1",
+            "warning",
+            EventType::Lint,
+            "Lint failed (backend)",
+            suite_payload("backend", "lint-backend-old", 1, "lint backend old failed"),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-older",
+            "todo-1",
+            "warning",
+            EventType::Lint,
+            "Lint failed (frontend)",
+            suite_payload(
+                "frontend",
+                "lint-frontend-old",
+                1,
+                "lint frontend old failed",
+            ),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-older",
+            "todo-1",
+            "warning",
+            EventType::TestRun,
+            "Test run failed (backend)",
+            suite_payload("backend", "test-backend-old", 1, "test backend old failed"),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-older",
+            "todo-1",
+            "warning",
+            EventType::TestRun,
+            "Test run failed (frontend)",
+            suite_payload(
+                "frontend",
+                "test-frontend-old",
+                1,
+                "test frontend old failed",
+            ),
+        );
+
+        // Later run: backend now passes, frontend still fails.
+        record_single_prompt_event(
+            &store,
+            "run-resumed",
+            "todo-1",
+            "info",
+            EventType::Lint,
+            "Lint passed (backend)",
+            suite_payload(
+                "backend",
+                "lint-backend-resumed",
+                0,
+                "lint backend resumed passed",
+            ),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-resumed",
+            "todo-1",
+            "warning",
+            EventType::Lint,
+            "Lint failed (frontend)",
+            suite_payload(
+                "frontend",
+                "lint-frontend-resumed",
+                1,
+                "lint frontend resumed failed",
+            ),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-resumed",
+            "todo-1",
+            "info",
+            EventType::TestRun,
+            "Test run passed (backend)",
+            suite_payload(
+                "backend",
+                "test-backend-resumed",
+                0,
+                "test backend resumed passed",
+            ),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-resumed",
+            "todo-1",
+            "warning",
+            EventType::TestRun,
+            "Test run failed (frontend)",
+            suite_payload(
+                "frontend",
+                "test-frontend-resumed",
+                1,
+                "test frontend resumed failed",
+            ),
+        );
+
+        // Most recent run timed out before suite checks; timeout should not become failed_other.
+        record_single_prompt_event(
+            &store,
+            "run-current",
+            "todo-1",
+            "info",
+            EventType::AgentPrompt,
+            "Agent prompt (single_prompt)",
+            BTreeMap::new(),
+        );
+        let mut timeout_payload = BTreeMap::new();
+        timeout_payload.insert("exit_code".to_owned(), Value::from(124));
+        timeout_payload.insert(
+            "command".to_owned(),
+            Value::String("claude -p - --dangerously-skip-permissions --verbose".to_owned()),
+        );
+        timeout_payload.insert(
+            "output".to_owned(),
+            Value::String(
+                "agent timed out after 2700 second(s) and was terminated.\npartial output"
+                    .to_owned(),
+            ),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-current",
+            "todo-1",
+            "warning",
+            EventType::AgentResponse,
+            "Agent response (single_prompt)",
+            timeout_payload,
+        );
+        let mut timeout_phase_failure_payload = BTreeMap::new();
+        timeout_phase_failure_payload.insert("exit_code".to_owned(), Value::from(124));
+        timeout_phase_failure_payload.insert(
+            "command".to_owned(),
+            Value::String("claude -p - --dangerously-skip-permissions --verbose".to_owned()),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-current",
+            "todo-1",
+            "warning",
+            EventType::PhaseFailure,
+            "single_prompt agent step failed",
+            timeout_phase_failure_payload,
+        );
+
+        let context = execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+
+        assert!(
+            context.failed_lint,
+            "frontend latest lint failure should be present"
+        );
+        assert!(
+            context.failed_test,
+            "frontend latest test failure should be present"
+        );
+        assert!(
+            !context.failed_other,
+            "agent timeout response should not be included as failed_other"
+        );
+        assert_eq!(
+            context
+                .lint_failures
+                .iter()
+                .map(|item| item.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lint-frontend-resumed"],
+            "only suites whose latest lint run failed should be included"
+        );
+        assert_eq!(
+            context
+                .test_failures
+                .iter()
+                .map(|item| item.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-frontend-resumed"],
+            "only suites whose latest test run failed should be included"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_failure_context_stops_at_retry_cleanup_reset_for_suite_history() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "ignore suite failures before reset markers".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: vec!["frontend".to_owned()],
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-current".to_owned(),
+            job_id: "job-current".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let mut old_test_payload = BTreeMap::new();
+        old_test_payload.insert("suite".to_owned(), Value::String("frontend".to_owned()));
+        old_test_payload.insert(
+            "command".to_owned(),
+            Value::String("test-frontend-old".to_owned()),
+        );
+        old_test_payload.insert("exit_code".to_owned(), Value::from(1));
+        old_test_payload.insert(
+            "output".to_owned(),
+            Value::String("frontend test failed before reset".to_owned()),
+        );
+        record_single_prompt_event(
+            &store,
+            "run-old",
+            "todo-1",
+            "warning",
+            EventType::TestRun,
+            "Test run failed (frontend)",
+            old_test_payload,
+        );
+
+        store
+            .record_event(&crate::domain::EventRecord {
+                id: None,
+                run_id: "run-reset".to_owned(),
+                job_id: Some("job-reset".to_owned()),
+                todo_id: Some("todo-1".to_owned()),
+                timestamp: chrono::Utc::now(),
+                level: "warning".to_owned(),
+                phase: Some(Phase::Red),
+                msg: "Retry cleanup: discarded local git changes before loop manual/1".to_owned(),
+                event_type: EventType::GitOp,
+                payload: BTreeMap::new(),
+            })
+            .expect("reset marker event should log");
+
+        let context = execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+
+        assert!(
+            !context.failed_test,
+            "suite failures before latest retry cleanup marker should be ignored"
+        );
+        assert!(
+            context.test_failures.is_empty(),
+            "suite failure details before reset marker should not be included"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
