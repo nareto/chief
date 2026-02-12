@@ -43,12 +43,14 @@ impl CodexAgent {
 
 #[derive(Debug, Clone)]
 pub struct ClaudeAgent {
+    model: Option<String>,
     extra_args: Vec<String>,
 }
 
 impl ClaudeAgent {
-    pub fn from_config(config: &ChiefConfig, _model_override: Option<String>) -> Self {
+    pub fn from_config(config: &ChiefConfig, model_override: Option<String>) -> Self {
         Self {
+            model: model_override.or_else(|| config.model.clone()),
             extra_args: config.agent_extra_args.clone(),
         }
     }
@@ -100,6 +102,10 @@ impl CommandBackedAgent for ClaudeAgent {
             "--verbose".to_owned(),
         ];
         cmd.extend(self.extra_args.iter().cloned());
+        if let Some(model) = &self.model {
+            cmd.push("--model".to_owned());
+            cmd.push(model.clone());
+        }
         cmd
     }
 
@@ -448,6 +454,7 @@ mod tests {
     #[test]
     fn claude_command_uses_full_permissions_mode() {
         let agent = ClaudeAgent {
+            model: None,
             extra_args: Vec::new(),
         };
 
@@ -461,6 +468,36 @@ mod tests {
         assert!(
             !command.iter().any(|arg| arg == "--disallowedTools"),
             "claude command should not include tool-level write restrictions in full-permissions mode: {command:?}"
+        );
+    }
+
+    #[test]
+    fn claude_command_includes_model_from_config() {
+        let mut config = ChiefConfig::default();
+        config.model = Some("opus".to_owned());
+        let agent = ClaudeAgent::from_config(&config, None);
+
+        let command = agent.build_command(&[]);
+        assert!(
+            command.windows(2).any(|window| window == ["--model", "opus"]),
+            "claude command should include configured model: {command:?}"
+        );
+    }
+
+    #[test]
+    fn claude_command_prefers_runtime_model_override() {
+        let mut config = ChiefConfig::default();
+        config.model = Some("opus".to_owned());
+        let agent = ClaudeAgent::from_config(&config, Some("sonnet".to_owned()));
+
+        let command = agent.build_command(&[]);
+        assert!(
+            command.windows(2).any(|window| window == ["--model", "sonnet"]),
+            "claude command should include runtime model override: {command:?}"
+        );
+        assert!(
+            !command.windows(2).any(|window| window == ["--model", "opus"]),
+            "claude command should not include config model when runtime override is present: {command:?}"
         );
     }
 
