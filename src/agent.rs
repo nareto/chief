@@ -160,11 +160,6 @@ fn run_command_backed_agent(
             request.timeout_seconds.unwrap_or_default(),
             merged_output
         );
-    } else if request.timeout_seconds == Some(0) {
-        merged_output = format!(
-            "timeout_seconds=0 is invalid, run still executed.\n{}",
-            merged_output
-        );
     }
 
     Ok(AgentOutput {

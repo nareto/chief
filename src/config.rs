@@ -140,7 +140,7 @@ fn default_agent() -> String {
 }
 
 fn default_max_retries() -> usize {
-    10
+    2
 }
 
 fn default_agent_timeout_seconds() -> u64 {
@@ -169,4 +169,36 @@ fn default_target_type() -> TargetType {
 
 fn default_strip_root_from_target() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_max_retries_is_2() {
+        let config = ChiefConfig::default();
+        assert_eq!(config.max_retries, 2);
+    }
+
+    #[test]
+    fn parse_max_retries_default() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.max_retries, 2);
+    }
+
+    #[test]
+    fn parse_agent_timeout_zero_means_no_timeout() {
+        let yaml = "chief:\n  agent_timeout_seconds: 0\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.agent_timeout_seconds, 0);
+    }
+
+    #[test]
+    fn parse_agent_timeout_nonzero_preserved() {
+        let yaml = "chief:\n  agent_timeout_seconds: 600\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.agent_timeout_seconds, 600);
+    }
 }
