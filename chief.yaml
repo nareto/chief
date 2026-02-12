@@ -1,6 +1,6 @@
 chief:
   flow: single_prompt
-  agent: codex
+  agent: claude
   agent_extra_args: []
   max_retries: 10
   agent_timeout_seconds: 2700
@@ -8,7 +8,7 @@ chief:
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
   use_agent_log_truncation_for_stdout_logs: false
-
+  model: opus
 suites:
   - name: backend
     language: Rust
@@ -16,22 +16,25 @@ suites:
     test_root: .
     test_command: cargo test
     target_type: project
-    default_target: .
     file_patterns: []
-    lint_command: cargo clippy
-    post_green_command: cargo test
+    disallow_write_globs: []
     env: {}
     strip_root_from_target: true
-
+    default_target: .
+    post_green_command: cargo test
+    lint_command: cargo clippy
   - name: frontend
     language: TypeScript
     framework: Vitest
     test_root: frontend
     test_command: npm run test
     target_type: project
-    default_target: .
-    file_patterns: ["*.test.ts", "*.test.tsx"]
-    post_green_command: npm run build
+    file_patterns:
+      - "*.test.ts"
+      - "*.test.tsx"
+    disallow_write_globs: []
     env:
       NODE_ENV: test
     strip_root_from_target: true
+    default_target: .
+    post_green_command: npm run build
