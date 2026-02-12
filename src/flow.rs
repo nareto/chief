@@ -1856,6 +1856,64 @@ fn run_lint_checks(
         )?;
 
         if out.exit_code != 0 {
+            if let Some(fix_cmd) = &suite.lint_fix_command {
+                let cwd = suite_command_cwd(&execution.project_dir, suite);
+                let timeout_seconds = execution.suite_command_timeout_seconds(suite);
+                let fix_out =
+                    execution.run_suite_command(fix_cmd, &cwd, &suite.env, timeout_seconds)?;
+
+                execution.log_event(
+                    if fix_out.exit_code == 0 { "info" } else { "warning" },
+                    Some(phase),
+                    EventType::LintFix,
+                    format!(
+                        "Lint fix {} ({})",
+                        if fix_out.exit_code == 0 {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        },
+                        suite.name
+                    ),
+                    payload_from_json(json!({
+                        "suite": suite.name,
+                        "command": fix_out.command,
+                        "exit_code": fix_out.exit_code,
+                        "output": fix_out.merged_output,
+                    })),
+                )?;
+
+                if fix_out.exit_code == 0 {
+                    // Re-run lint after successful fix.
+                    if let Some(recheck) = execution.run_lint_suite(suite, phase)? {
+                        execution.log_event(
+                            if recheck.exit_code == 0 { "info" } else { "warning" },
+                            Some(phase),
+                            EventType::Lint,
+                            format!(
+                                "Lint re-check {} ({})",
+                                if recheck.exit_code == 0 {
+                                    "passed"
+                                } else {
+                                    "still failing"
+                                },
+                                suite.name
+                            ),
+                            payload_from_json(json!({
+                                "suite": suite.name,
+                                "command": recheck.command,
+                                "exit_code": recheck.exit_code,
+                                "output": recheck.merged_output,
+                            })),
+                        )?;
+
+                        if recheck.exit_code == 0 {
+                            continue; // Fixed — count as pass.
+                        }
+                    }
+                }
+            }
+
             all_ok = false;
         }
     }
@@ -3849,6 +3907,118 @@ mod tests {
             second_marker.exists(),
             "tests should run for all selected suites after lint checks"
         );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn lint_fix_command_recovers_lint_failure() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "lint fix should recover".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        // The lint command fails on first run but the fix command creates a marker
+        // that makes the lint command succeed on re-run.
+        let marker = project_dir.join("lint-fixed.txt");
+        let lint_cmd = format!(
+            "test -f '{}' && exit 0 || exit 1",
+            marker.display()
+        );
+        let fix_cmd = format!("printf fixed > '{}'", marker.display());
+
+        let mut suite = suite_named("fixable");
+        suite.lint_command = Some(lint_cmd);
+        suite.lint_fix_command = Some(fix_cmd);
+
+        let all_ok = super::run_lint_checks(&execution, &[suite], Phase::SinglePrompt)
+            .expect("lint checks should complete");
+
+        assert!(all_ok, "lint should pass after successful fix + re-check");
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn lint_fix_command_still_fails_when_recheck_fails() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "lint fix cannot recover".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        // Fix command succeeds but lint still fails on re-check.
+        let mut suite = suite_named("unfixable");
+        suite.lint_command = Some("exit 1".to_owned());
+        suite.lint_fix_command = Some("exit 0".to_owned());
+
+        let all_ok = super::run_lint_checks(&execution, &[suite], Phase::SinglePrompt)
+            .expect("lint checks should complete");
+
+        assert!(!all_ok, "lint should still fail when re-check fails after fix");
 
         let _ = fs::remove_dir_all(&project_dir);
     }

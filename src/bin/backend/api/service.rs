@@ -1294,6 +1294,7 @@ fn event_group(event_type: EventType) -> &'static str {
         EventType::TestRun
         | EventType::PostGreenOutput
         | EventType::Lint
+        | EventType::LintFix
         | EventType::PhaseFailure => "test",
         EventType::Msg | EventType::PhaseChange | EventType::Error | EventType::Job => "log",
     }
@@ -1305,6 +1306,7 @@ fn parse_event_type(value: &str) -> Result<EventType, ApiError> {
         "test_run" => Ok(EventType::TestRun),
         "post_green_output" => Ok(EventType::PostGreenOutput),
         "lint" => Ok(EventType::Lint),
+        "lint_fix" => Ok(EventType::LintFix),
         "phase_change" => Ok(EventType::PhaseChange),
         "git_op" => Ok(EventType::GitOp),
         "diff" => Ok(EventType::Diff),
