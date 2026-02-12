@@ -9,6 +9,7 @@ pub trait GitOps: Send + Sync {
     fn diff_summary_for_files(&self, cwd: &Path, files: &[String]) -> Result<String>;
     fn commit_committer_timestamp_rfc3339(&self, cwd: &Path, commit_hash: &str) -> Result<String>;
     fn commit_and_tag(&self, cwd: &Path, message: &str) -> Result<String>;
+    fn commit_paths(&self, cwd: &Path, paths: &[&str], message: &str) -> Result<()>;
     fn create_worktree(&self, branch: &str, worktree_path: &Path) -> Result<()>;
     fn merge_branch_into_main(&self, branch: &str, main_branch: &str) -> Result<()>;
     fn remove_worktree(&self, worktree_path: &Path, branch: &str) -> Result<()>;
@@ -142,6 +143,27 @@ impl GitOps for ShellGitOps {
         let tag = format!("chief/{}", &commit_hash.chars().take(8).collect::<String>());
         let _ = self.run_status(cwd, &["tag", &tag]);
         Ok(commit_hash)
+    }
+
+    fn commit_paths(&self, cwd: &Path, paths: &[&str], message: &str) -> Result<()> {
+        let mut add_args = vec!["add", "--"];
+        add_args.extend(paths);
+        self.run_status(cwd, &add_args)?;
+
+        let status = Self::command_with_safe_directory(cwd)
+            .args(["commit", "-m", message, "--"])
+            .args(paths)
+            .status()
+            .context("failed to run git commit")?;
+
+        if !status.success() {
+            // If nothing actually changed, the commit is a no-op — that's fine.
+            let output = self.run_capture(cwd, &["diff", "--cached", "--name-only"])?;
+            if !output.is_empty() {
+                return Err(anyhow!("git commit for paths {:?} failed", paths));
+            }
+        }
+        Ok(())
     }
 
     fn create_worktree(&self, branch: &str, worktree_path: &Path) -> Result<()> {

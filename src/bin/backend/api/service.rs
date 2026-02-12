@@ -606,12 +606,24 @@ impl ApiService {
         payload: UpdateChiefYamlRequest,
     ) -> Result<MessageResponse, ApiError> {
         let context = self.project_context(project).await?;
-        fs::write(&context.config_path, payload.content).with_context(|| {
+        fs::write(&context.config_path, &payload.content).with_context(|| {
             format!(
                 "failed to write chief config at {}",
                 context.config_path.display()
             )
         })?;
+
+        if let Err(err) =
+            context
+                .git
+                .commit_paths(&context.project_dir, &["chief.yaml"], "chore: update chief.yaml via settings")
+        {
+            info!(
+                project,
+                error = %err,
+                "skipped git commit for chief.yaml settings update"
+            );
+        }
 
         Ok(MessageResponse {
             message: "chief.yaml updated".to_owned(),
@@ -1346,7 +1358,7 @@ mod tests {
         resolve_last_done_todo_committed_at,
     };
     use crate::api::error::ApiError;
-    use crate::api::types::StartProjectRequest;
+    use crate::api::types::{StartProjectRequest, UpdateChiefYamlRequest};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -1504,6 +1516,10 @@ mod tests {
 
         fn commit_and_tag(&self, _cwd: &Path, _message: &str) -> anyhow::Result<String> {
             Ok("noop".to_owned())
+        }
+
+        fn commit_paths(&self, _cwd: &Path, _paths: &[&str], _message: &str) -> anyhow::Result<()> {
+            Ok(())
         }
 
         fn create_worktree(&self, _branch: &str, _worktree_path: &Path) -> anyhow::Result<()> {
@@ -2282,6 +2298,158 @@ mod tests {
         assert!(
             files.is_empty(),
             "clean workspace marker should record an empty files list"
+        );
+    }
+
+    fn setup_service_with_chief_yaml(
+        initial_todos_yaml: &str,
+        initial_chief_yaml: &str,
+    ) -> (TempDir, ApiService, String, PathBuf) {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(&project_dir, initial_todos_yaml);
+        write_chief_yaml(&project_dir, initial_chief_yaml);
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+        (workspace, service, project_name, project_dir)
+    }
+
+    #[tokio::test]
+    async fn update_chief_yaml_commits_changes_to_git() {
+        let (_workspace, service, project, project_dir) = setup_service_with_chief_yaml(
+            r#"todos:
+  - id: todo-1
+    todo: Example
+    expectations: Example
+    priority: 1
+    test_suites: []
+    status: pending"#,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let updated_yaml = "chief:\n  flow: tdd\n";
+        service
+            .update_chief_yaml(
+                &project,
+                UpdateChiefYamlRequest {
+                    content: updated_yaml.to_owned(),
+                },
+            )
+            .await
+            .expect("update_chief_yaml should succeed");
+
+        let saved = fs::read_to_string(project_dir.join("chief.yaml"))
+            .expect("chief.yaml should exist");
+        assert_eq!(saved, updated_yaml, "file should contain updated content");
+
+        let log = run_git(&project_dir, &["log", "--oneline", "-1"]);
+        assert!(
+            log.contains("update chief.yaml via settings"),
+            "latest commit should be the chief.yaml settings update, got: {log}"
+        );
+
+        let status = run_git(&project_dir, &["status", "--porcelain"]);
+        let user_changes = status
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .filter(|path| !is_internal_workspace_state_file(path))
+            .collect::<Vec<_>>();
+        assert!(
+            user_changes.is_empty(),
+            "chief.yaml should be committed (no dirty state), got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_chief_yaml_noop_commit_when_content_unchanged() {
+        let (_workspace, service, project, project_dir) = setup_service_with_chief_yaml(
+            r#"todos:
+  - id: todo-1
+    todo: Example
+    expectations: Example
+    priority: 1
+    test_suites: []
+    status: pending"#,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let commit_before = run_git(&project_dir, &["rev-parse", "HEAD"]);
+
+        let existing_content =
+            fs::read_to_string(project_dir.join("chief.yaml")).expect("chief.yaml should exist");
+        service
+            .update_chief_yaml(
+                &project,
+                UpdateChiefYamlRequest {
+                    content: existing_content,
+                },
+            )
+            .await
+            .expect("update_chief_yaml should succeed even without changes");
+
+        let commit_after = run_git(&project_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            commit_before, commit_after,
+            "no new commit should be created when chief.yaml content is unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_chief_yaml_does_not_commit_other_dirty_files() {
+        let (_workspace, service, project, project_dir) = setup_service_with_chief_yaml(
+            r#"todos:
+  - id: todo-1
+    todo: Example
+    expectations: Example
+    priority: 1
+    test_suites: []
+    status: pending"#,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        fs::write(project_dir.join("unrelated.txt"), "dirty\n")
+            .expect("failed to create unrelated dirty file");
+
+        service
+            .update_chief_yaml(
+                &project,
+                UpdateChiefYamlRequest {
+                    content: "chief:\n  flow: tdd\n".to_owned(),
+                },
+            )
+            .await
+            .expect("update_chief_yaml should succeed");
+
+        let committed_files = run_git(&project_dir, &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+        assert_eq!(
+            committed_files.trim(),
+            "chief.yaml",
+            "only chief.yaml should be in the commit, got: {committed_files}"
+        );
+
+        let status = run_git(&project_dir, &["status", "--porcelain"]);
+        assert!(
+            status.contains("unrelated.txt"),
+            "unrelated dirty file should remain uncommitted, got: {status}"
         );
     }
 

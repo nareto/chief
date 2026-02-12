@@ -2304,6 +2304,10 @@ mod tests {
             Ok("noop-commit".to_owned())
         }
 
+        fn commit_paths(&self, _cwd: &Path, _paths: &[&str], _message: &str) -> Result<()> {
+            Ok(())
+        }
+
         fn create_worktree(&self, _branch: &str, _worktree_path: &Path) -> Result<()> {
             Ok(())
         }
