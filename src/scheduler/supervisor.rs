@@ -527,4 +527,14 @@ mod tests {
             "runtime last_error should preserve retry exhaustion detail: {runtime_error}"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "placeholder until multi-agent supervisor refactor lands"]
+    async fn multi_agent_terminal_failure_cancels_peer_workers_and_stops_run() {
+        // TODO: After the multi-agent supervisor refactor, cover desired_agents > 1 and assert:
+        // - one worker terminal failure flips stop/cancel for the project run,
+        // - peer workers are cancelled/drained,
+        // - no new todo claims occur after cancellation,
+        // - the run exits with failure and pending todos are preserved.
+    }
 }

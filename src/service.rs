@@ -746,38 +746,88 @@ impl ChiefEngine {
             .map_err(OrchestratorError::into_error)
     }
 
-    pub fn run_todos_until_done_with_retries<FC, FR>(
+    fn run_todo_queue_with_runner<FC, FR, FN>(
+        &self,
+        run_id: &str,
+        flow_kind: FlowKind,
+        model_override: Option<String>,
+        max_retries: usize,
+        on_todo_completed: &mut FC,
+        on_retry: &mut FR,
+        mut run_next_todo: FN,
+    ) -> OrchestratorResult<()>
+    where
+        FC: FnMut(&TodoOutcome),
+        FR: FnMut(usize, usize, &anyhow::Error),
+        FN: FnMut(
+            &str,
+            FlowKind,
+            Option<String>,
+            usize,
+            &mut FR,
+        ) -> OrchestratorResult<Option<TodoOutcome>>,
+    {
+        loop {
+            let next = run_next_todo(
+                run_id,
+                flow_kind,
+                model_override.clone(),
+                max_retries.max(1),
+                on_retry,
+            )?;
+
+            let Some(outcome) = next else {
+                return Ok(());
+            };
+            on_todo_completed(&outcome);
+        }
+    }
+
+    fn run_todos_until_done_with_retries_with_runner<FC, FR, FN>(
         &self,
         flow_kind: FlowKind,
         model_override: Option<String>,
         max_retries: usize,
         mut on_todo_completed: FC,
         mut on_retry: FR,
+        mut run_next_todo: FN,
     ) -> OrchestratorResult<()>
     where
         FC: FnMut(&TodoOutcome),
         FR: FnMut(usize, usize, &anyhow::Error),
+        FN: FnMut(
+            &str,
+            FlowKind,
+            Option<String>,
+            usize,
+            &mut FR,
+        ) -> OrchestratorResult<Option<TodoOutcome>>,
     {
         let run_id = self
             .start_run()
             .map_err(|err| self.classify_runtime_error(err))?;
 
-        let result = (|| -> OrchestratorResult<()> {
-            loop {
-                let next = self.run_next_todo_in_run_with_retry_hook(
-                    &run_id,
-                    flow_kind,
-                    model_override.clone(),
-                    max_retries.max(1),
-                    &mut on_retry,
-                )?;
-
-                let Some(outcome) = next else {
-                    return Ok(());
-                };
-                on_todo_completed(&outcome);
-            }
-        })();
+        let result = self.run_todo_queue_with_runner(
+            &run_id,
+            flow_kind,
+            model_override,
+            max_retries,
+            &mut on_todo_completed,
+            &mut on_retry,
+            |runner_run_id,
+             runner_flow_kind,
+             runner_model_override,
+             runner_max_retries,
+             runner_on_retry| {
+                run_next_todo(
+                    runner_run_id,
+                    runner_flow_kind,
+                    runner_model_override,
+                    runner_max_retries,
+                    runner_on_retry,
+                )
+            },
+        );
 
         self.finish_run(
             &run_id,
@@ -790,6 +840,36 @@ impl ChiefEngine {
         .map_err(|err| self.classify_runtime_error(err))?;
 
         result
+    }
+
+    pub fn run_todos_until_done_with_retries<FC, FR>(
+        &self,
+        flow_kind: FlowKind,
+        model_override: Option<String>,
+        max_retries: usize,
+        on_todo_completed: FC,
+        on_retry: FR,
+    ) -> OrchestratorResult<()>
+    where
+        FC: FnMut(&TodoOutcome),
+        FR: FnMut(usize, usize, &anyhow::Error),
+    {
+        self.run_todos_until_done_with_retries_with_runner(
+            flow_kind,
+            model_override,
+            max_retries,
+            on_todo_completed,
+            on_retry,
+            |run_id, flow_kind, model_override, max_retries, retry_hook| {
+                self.run_next_todo_in_run_with_retry_hook(
+                    run_id,
+                    flow_kind,
+                    model_override,
+                    max_retries,
+                    retry_hook,
+                )
+            },
+        )
     }
 
     pub fn process_requirements(
@@ -1122,8 +1202,11 @@ mod tests {
         ChiefEngine, ProjectContext, ProjectRegistry, is_transient_lock_contention_error,
         retry_transient_lock_contention_with_delay,
     };
+    use crate::domain::{RunExitStatus, Todo, TodoStatus};
+    use crate::flow::{FlowKind, TodoOutcome};
     use crate::orchestrator::OrchestratorError;
     use anyhow::anyhow;
+    use rusqlite::Connection;
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -1162,6 +1245,19 @@ mod tests {
             "git init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn pending_todo(text: &str) -> Todo {
+        Todo {
+            id: String::new(),
+            todo: text.to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        }
+        .normalize()
     }
 
     #[test]
@@ -1254,6 +1350,86 @@ mod tests {
         assert!(
             err.to_string().contains("duplicate project name"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn run_todos_until_done_with_retries_stops_after_first_terminal_todo_failure() {
+        let root = TempDir::new("cli-fail-fast");
+        let project_dir = root.path.join("project");
+        init_git_repo(&project_dir);
+        fs::write(project_dir.join("chief.yaml"), "chief: {}\n")
+            .expect("failed to write chief.yaml fixture");
+
+        let context = ProjectContext::load(&project_dir).expect("failed to load project context");
+        let first = context
+            .store
+            .append_todo(pending_todo("first todo"))
+            .expect("failed to append first todo");
+        let second = context
+            .store
+            .append_todo(pending_todo("second todo"))
+            .expect("failed to append second todo");
+
+        let engine = ChiefEngine::new(context.clone());
+        let mut runner_calls = 0usize;
+        let mut completed_ids = Vec::new();
+
+        let result = engine.run_todos_until_done_with_retries_with_runner(
+            FlowKind::SinglePrompt,
+            None,
+            3,
+            |outcome: &TodoOutcome| completed_ids.push(outcome.todo_id.clone()),
+            |_attempt, _total, _err| {},
+            |_run_id, _flow_kind, _model_override, _max_retries, _retry_hook| {
+                runner_calls += 1;
+                Err(OrchestratorError::retryable(anyhow!(
+                    "simulated terminal todo failure"
+                )))
+            },
+        );
+
+        assert!(
+            matches!(result, Err(OrchestratorError::Retryable(_))),
+            "todo queue should fail on the first terminal todo failure"
+        );
+        assert_eq!(
+            runner_calls, 1,
+            "CLI todo queue should stop immediately instead of trying another todo"
+        );
+        assert!(
+            completed_ids.is_empty(),
+            "no todo completion callback should fire on immediate terminal failure"
+        );
+
+        let todos = context.store.list_todos().expect("failed to list todos");
+        let pending_ids = todos
+            .iter()
+            .filter(|todo| todo.status == TodoStatus::Pending)
+            .map(|todo| todo.id.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            pending_ids.contains(&first.id),
+            "first todo should remain pending after terminal failure"
+        );
+        assert!(
+            pending_ids.contains(&second.id),
+            "second todo should never be picked once first todo fails terminally"
+        );
+
+        let conn = Connection::open(&context.store.db_path).expect("failed to open chief.db");
+        let (run_status, run_exit_status): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, exit_status FROM runs ORDER BY started_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("failed to query latest run");
+        assert_eq!(run_status, "finished");
+        assert_eq!(
+            run_exit_status.as_deref(),
+            Some(RunExitStatus::Failure.as_str()),
+            "CLI run should finish with failure after terminal todo failure"
         );
     }
 
