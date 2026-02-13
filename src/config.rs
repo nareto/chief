@@ -60,6 +60,8 @@ pub struct ChiefConfig {
     pub max_retries: usize,
     #[serde(default = "default_max_loop")]
     pub max_loop: usize,
+    #[serde(default = "default_required_stable_iterations")]
+    pub required_stable_iterations: usize,
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
     #[serde(default = "default_suite_command_timeout_seconds")]
@@ -82,6 +84,7 @@ impl Default for ChiefConfig {
             agent_extra_args: Vec::new(),
             max_retries: default_max_retries(),
             max_loop: default_max_loop(),
+            required_stable_iterations: default_required_stable_iterations(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
             suite_command_timeout_seconds: default_suite_command_timeout_seconds(),
             agent_log_max_output_lines: default_agent_log_max_output_lines(),
@@ -150,6 +153,10 @@ fn default_max_loop() -> usize {
     6
 }
 
+fn default_required_stable_iterations() -> usize {
+    2
+}
+
 fn default_agent_timeout_seconds() -> u64 {
     2_700
 }
@@ -200,6 +207,20 @@ mod tests {
         let yaml = "chief: {}\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.chief.max_loop, 6);
+    }
+
+    #[test]
+    fn parse_required_stable_iterations_default() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.required_stable_iterations, 2);
+    }
+
+    #[test]
+    fn parse_required_stable_iterations_override() {
+        let yaml = "chief:\n  required_stable_iterations: 4\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.required_stable_iterations, 4);
     }
 
     #[test]

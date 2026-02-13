@@ -325,6 +325,49 @@ impl ProjectStore {
         Ok(before.saturating_sub(retained.len()))
     }
 
+    pub fn claim_next_pending_todo(&self) -> Result<Option<Todo>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        let mut stmt = tx.prepare(
+            "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
+             FROM todos
+             WHERE status IN ('pending', 'attempted')
+             ORDER BY priority DESC, id ASC
+             LIMIT 1",
+        )?;
+
+        let Some(mut todo) = stmt
+            .query_row([], parse_todo_row)
+            .optional()
+            .context("failed to fetch next pending todo for claim")?
+        else {
+            return Ok(None);
+        };
+        drop(stmt);
+
+        let changed = tx.execute(
+            "UPDATE todos
+             SET status = ?1, updated_at = ?2
+             WHERE id = ?3 AND status IN ('pending', 'attempted')",
+            params![
+                TodoStatus::InProgress.as_str(),
+                Utc::now().to_rfc3339(),
+                &todo.id
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+
+        todo.status = TodoStatus::InProgress;
+
+        self.sync_todos_file_from_conn(&tx)?;
+        tx.commit()?;
+        self.auto_commit_todos_yaml()?;
+        Ok(Some(todo))
+    }
+
     pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
@@ -1122,6 +1165,75 @@ mod tests {
             .find(|item| item.id == todo.id)
             .expect("todo should exist in file");
         assert_eq!(file_todo.status, TodoStatus::InProgress);
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn claim_next_pending_todo_respects_priority_then_id_order() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let fixtures = vec![
+            Todo {
+                id: "todo-z".to_owned(),
+                todo: "lower priority".to_owned(),
+                expectations: String::new(),
+                priority: 5,
+                test_suites: Vec::new(),
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            }
+            .normalize(),
+            Todo {
+                id: "todo-b".to_owned(),
+                todo: "highest priority second id".to_owned(),
+                expectations: String::new(),
+                priority: 9,
+                test_suites: Vec::new(),
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            }
+            .normalize(),
+            Todo {
+                id: "todo-a".to_owned(),
+                todo: "highest priority first id".to_owned(),
+                expectations: String::new(),
+                priority: 9,
+                test_suites: Vec::new(),
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            }
+            .normalize(),
+        ];
+
+        for todo in fixtures {
+            store
+                .append_todo(todo)
+                .expect("append_todo should succeed for fixture");
+        }
+
+        let first = store
+            .claim_next_pending_todo()
+            .expect("first claim should succeed")
+            .expect("first claim should exist");
+        let second = store
+            .claim_next_pending_todo()
+            .expect("second claim should succeed")
+            .expect("second claim should exist");
+        let third = store
+            .claim_next_pending_todo()
+            .expect("third claim should succeed")
+            .expect("third claim should exist");
+        let fourth = store
+            .claim_next_pending_todo()
+            .expect("fourth claim should succeed");
+
+        assert_eq!(first.id, "todo-a");
+        assert_eq!(second.id, "todo-b");
+        assert_eq!(third.id, "todo-z");
+        assert!(fourth.is_none(), "no more pending todos should remain");
 
         let _ = fs::remove_dir_all(&project_dir);
     }

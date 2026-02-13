@@ -1264,14 +1264,15 @@ pub struct TddFlow {
 
 impl Default for TddFlow {
     fn default() -> Self {
-        Self::with_max_loop(6)
+        Self::with_loop_policy(6, 2)
     }
 }
 
 impl TddFlow {
-    pub fn with_max_loop(max_loop: usize) -> Self {
+    pub fn with_loop_policy(max_loop: usize, required_stable_iterations: usize) -> Self {
         let mut red_loop = ConvergenceLoopPolicy::default();
         red_loop.max_loops = max_loop.max(1);
+        red_loop.required_stable_iterations = required_stable_iterations.max(1);
         Self {
             red_loop,
             green_loop: UntilPassLoopPolicy {
@@ -1354,14 +1355,15 @@ pub struct SinglePromptFlow {
 
 impl Default for SinglePromptFlow {
     fn default() -> Self {
-        Self::with_max_loop(6)
+        Self::with_loop_policy(6, 2)
     }
 }
 
 impl SinglePromptFlow {
-    pub fn with_max_loop(max_loop: usize) -> Self {
+    pub fn with_loop_policy(max_loop: usize, required_stable_iterations: usize) -> Self {
         let mut loop_policy = ConvergenceLoopPolicy::default();
         loop_policy.max_loops = max_loop.max(1);
+        loop_policy.required_stable_iterations = required_stable_iterations.max(1);
         Self { loop_policy }
     }
 }
@@ -1597,11 +1599,22 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
     }
 }
 
-pub fn build_flow(flow_kind: FlowKind, max_loop: usize) -> Box<dyn TodoFlow> {
+pub fn build_flow(
+    flow_kind: FlowKind,
+    max_loop: usize,
+    required_stable_iterations: usize,
+) -> Box<dyn TodoFlow> {
     let max_loop = max_loop.max(1);
+    let required_stable_iterations = required_stable_iterations.max(1);
     match flow_kind {
-        FlowKind::SinglePrompt => Box::new(SinglePromptFlow::with_max_loop(max_loop)),
-        FlowKind::Tdd => Box::new(TddFlow::with_max_loop(max_loop)),
+        FlowKind::SinglePrompt => Box::new(SinglePromptFlow::with_loop_policy(
+            max_loop,
+            required_stable_iterations,
+        )),
+        FlowKind::Tdd => Box::new(TddFlow::with_loop_policy(
+            max_loop,
+            required_stable_iterations,
+        )),
     }
 }
 
@@ -2149,8 +2162,8 @@ mod tests {
 
     #[test]
     fn build_flow_matches_kind() {
-        let tdd = build_flow(FlowKind::Tdd, 6);
-        let single_prompt = build_flow(FlowKind::SinglePrompt, 6);
+        let tdd = build_flow(FlowKind::Tdd, 6, 2);
+        let single_prompt = build_flow(FlowKind::SinglePrompt, 6, 2);
 
         assert_eq!(tdd.name(), "tdd");
         assert_eq!(single_prompt.name(), "single_prompt");
@@ -3858,7 +3871,7 @@ mod tests {
             prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
-        let flow = build_flow(FlowKind::SinglePrompt, 6);
+        let flow = build_flow(FlowKind::SinglePrompt, 6, 2);
         let outcome = flow
             .run_todo(&mut execution)
             .expect("single_prompt flow should complete");

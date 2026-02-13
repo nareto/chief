@@ -1,5 +1,3 @@
-#[path = "scheduler/selector.rs"]
-mod selector;
 #[path = "scheduler/supervisor.rs"]
 mod supervisor;
 #[path = "scheduler/worker.rs"]

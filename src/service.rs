@@ -102,14 +102,8 @@ impl ProjectContext {
         }
     }
 
-    pub fn pick_next_todo_priority(&self) -> Result<Option<Todo>> {
-        let mut candidates = self.store.list_available_todos()?;
-        candidates.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.id.cmp(&b.id)));
-        Ok(candidates.into_iter().next())
-    }
-
-    pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
-        self.store.claim_todo(todo_id)
+    pub fn claim_next_pending_todo(&self) -> Result<Option<Todo>> {
+        self.store.claim_next_pending_todo()
     }
 
     pub fn create_job(
@@ -354,7 +348,11 @@ impl ChiefEngine {
             )));
         }
 
-        let flow = build_flow(flow_kind, self.project.chief_yaml.chief.max_loop);
+        let flow = build_flow(
+            flow_kind,
+            self.project.chief_yaml.chief.max_loop,
+            self.project.chief_yaml.chief.required_stable_iterations,
+        );
         let agent = self.project.build_agent(model_override);
 
         let mut execution = FlowExecution {
@@ -607,16 +605,9 @@ impl ChiefEngine {
             .map_err(|err| self.classify_runtime_error(err))?;
 
         let result = (|| -> OrchestratorResult<Option<TodoOutcome>> {
-            let Some(next) = self
-                .project
-                .pick_next_todo_priority()
-                .map_err(|err| self.classify_runtime_error(err))?
-            else {
-                return Ok(None);
-            };
             let Some(todo) = self
                 .project
-                .claim_todo(&next.id)
+                .claim_next_pending_todo()
                 .map_err(|err| self.classify_runtime_error(err))?
             else {
                 return Ok(None);

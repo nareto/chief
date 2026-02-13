@@ -1264,7 +1264,6 @@ fn parse_todo_status_input(value: &str) -> Option<TodoStatus> {
     match value.trim() {
         "pending" => Some(TodoStatus::Pending),
         "in_progress" => Some(TodoStatus::InProgress),
-        "attempted" => Some(TodoStatus::Pending),
         "done" => Some(TodoStatus::Done),
         _ => None,
     }
@@ -1355,7 +1354,7 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
 mod tests {
     use super::{
         ApiService, RETRY_CLEANUP_DISCARDED_MSG_PREFIX, is_internal_workspace_state_file,
-        resolve_last_done_todo_committed_at,
+        parse_todo_status_input, resolve_last_done_todo_committed_at,
     };
     use crate::api::error::ApiError;
     use crate::api::types::{StartProjectRequest, UpdateChiefYamlRequest};
@@ -1451,6 +1450,20 @@ mod tests {
             status,
             done_at_commit: done_at_commit.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn parse_todo_status_input_rejects_attempted() {
+        assert_eq!(
+            parse_todo_status_input("pending"),
+            Some(TodoStatus::Pending)
+        );
+        assert_eq!(
+            parse_todo_status_input("in_progress"),
+            Some(TodoStatus::InProgress)
+        );
+        assert_eq!(parse_todo_status_input("done"), Some(TodoStatus::Done));
+        assert_eq!(parse_todo_status_input("attempted"), None);
     }
 
     #[derive(Debug)]

@@ -6,6 +6,7 @@ chief:
   agent_extra_args: []
   max_retries: 2
   max_loop: 6
+  required_stable_iterations: 2
   agent_timeout_seconds: 2700 # set to 0 for no timeout
   suite_command_timeout_seconds: 1800
   agent_log_max_output_lines: 10

@@ -1,4 +1,4 @@
-use super::{Scheduler, WorkerResult, selector, worker};
+use super::{Scheduler, WorkerResult, worker};
 use crate::domain::{JobRecord, JobStatus, RunExitStatus, Todo};
 use crate::flow::FlowKind;
 use crate::service::{ChiefEngine, ProjectContext};
@@ -114,26 +114,9 @@ impl Scheduler {
 
             while workers.len() < desired_agents && !stop_requested {
                 let _selection_guard = selection_lock.lock().await;
-                let available = context.store.list_available_todos()?;
-                if available.is_empty() {
-                    break;
-                }
-
-                let in_progress = context.store.list_in_progress_todos()?;
                 spawn_count += 1;
-                let selected_id = selector::select_todo_id(
-                    &context,
-                    spawn_count,
-                    &available,
-                    &in_progress,
-                    model_override.clone(),
-                    cancel_signal.clone(),
-                )
-                .await
-                .unwrap_or_else(|_| available[0].id.clone());
-
-                let Some(claimed) = context.claim_todo(&selected_id)? else {
-                    continue;
+                let Some(claimed) = context.claim_next_pending_todo()? else {
+                    break;
                 };
 
                 let use_worktree = desired_agents > 1;
