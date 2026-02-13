@@ -5,7 +5,7 @@ id: {{ todo.id }}
 todo: {{ todo.todo }}
 expectations: {{ todo.expectations }}
 
-Implement the task fully, including relevant tests. Reuse existing patterns and avoid codebase fragmentation.
+Implement the task fully, including relevant tests. Include essential documentation (both in and out of code) when appropriate. Reuse existing patterns and avoid codebase fragmentation.
 
 The available test suites for this codebase are:
 
@@ -77,8 +77,9 @@ SQLITE QUERY: `{{ failure.sqlite_query }}`
 ---
 After some checks, we just learned that the work done in previous iterations passed all linting and tests. In this case, your task changes slightly: check that the files touched by previous iterations do indeed satisfy the todo. 
 
-If you find the implementation and the tests to be both complete, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
+{% endif %}
+{% endif %}
+
+If you find the existing implementation and the tests to be both complete, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
 
 However, if you find anything lacking, please do the appropriate modifications (both in implementation and tests) and we will continue to work on this todo.
-{% endif %}
-{% endif %}
