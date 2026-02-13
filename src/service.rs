@@ -350,7 +350,7 @@ impl ChiefEngine {
 
         let flow = build_flow(
             flow_kind,
-            self.project.chief_yaml.chief.max_loop,
+            self.project.chief_yaml.chief.max_loop_iterations,
             self.project.chief_yaml.chief.required_stable_iterations,
         );
         let agent = self.project.build_agent(model_override);
@@ -590,6 +590,105 @@ impl ChiefEngine {
         )
     }
 
+    fn run_next_todo_in_run_with_retry_hook<FR>(
+        &self,
+        run_id: &str,
+        flow_kind: FlowKind,
+        model_override: Option<String>,
+        max_retries: usize,
+        on_retry: &mut FR,
+    ) -> OrchestratorResult<Option<TodoOutcome>>
+    where
+        FR: FnMut(usize, usize, &anyhow::Error),
+    {
+        let Some(todo) = self
+            .project
+            .claim_next_pending_todo()
+            .map_err(|err| self.classify_runtime_error(err))?
+        else {
+            return Ok(None);
+        };
+
+        let mut job = self
+            .project
+            .create_job(run_id, 1, flow_kind, Some(todo.id.clone()), None)
+            .map_err(|err| self.classify_runtime_error(err))?;
+        job = self
+            .project
+            .set_job_status(job, JobStatus::Running, None)
+            .context("failed to set job status running")
+            .map_err(|err| self.classify_runtime_error(err))?;
+
+        match self.run_single_todo_with_retries(
+            run_id,
+            &job.id,
+            1,
+            todo.clone(),
+            flow_kind,
+            self.project.project_dir.clone(),
+            model_override,
+            Arc::new(AtomicBool::new(false)),
+            max_retries.max(1),
+            |attempt, total, err| on_retry(attempt, total, err),
+        ) {
+            Ok(outcome) => {
+                if let Some(commit_hash) = outcome.commit_hash.as_deref() {
+                    if let Err(err) = self.project.store.update_todo_status(
+                        &todo.id,
+                        TodoStatus::Done,
+                        Some(commit_hash),
+                    ) {
+                        self.log_state_update_error(
+                            run_id,
+                            Some(&job.id),
+                            Some(&todo.id),
+                            "failed to mark todo done",
+                            &err,
+                        );
+                    }
+                }
+                if let Err(err) = self.project.set_job_status(job, JobStatus::Completed, None) {
+                    self.log_state_update_error(
+                        run_id,
+                        None,
+                        Some(&todo.id),
+                        "failed to update job status to completed",
+                        &err,
+                    );
+                }
+                Ok(Some(outcome))
+            }
+            Err(err) => {
+                if let Err(status_err) =
+                    self.project
+                        .store
+                        .update_todo_status(&todo.id, TodoStatus::Pending, None)
+                {
+                    self.log_state_update_error(
+                        run_id,
+                        Some(&job.id),
+                        Some(&todo.id),
+                        "failed to mark todo pending after worker failure",
+                        &status_err,
+                    );
+                }
+                if let Err(status_err) =
+                    self.project
+                        .set_job_status(job, JobStatus::Failed, Some(err.to_string()))
+                {
+                    self.log_state_update_error(
+                        run_id,
+                        None,
+                        Some(&todo.id),
+                        "failed to update job status to failed",
+                        &status_err,
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
     fn run_next_todo_once_with_retry_hook<FR>(
         &self,
         flow_kind: FlowKind,
@@ -604,94 +703,13 @@ impl ChiefEngine {
             .start_run()
             .map_err(|err| self.classify_runtime_error(err))?;
 
-        let result = (|| -> OrchestratorResult<Option<TodoOutcome>> {
-            let Some(todo) = self
-                .project
-                .claim_next_pending_todo()
-                .map_err(|err| self.classify_runtime_error(err))?
-            else {
-                return Ok(None);
-            };
-
-            let mut job = self
-                .project
-                .create_job(&run_id, 1, flow_kind, Some(todo.id.clone()), None)
-                .map_err(|err| self.classify_runtime_error(err))?;
-            job = self
-                .project
-                .set_job_status(job, JobStatus::Running, None)
-                .context("failed to set job status running")
-                .map_err(|err| self.classify_runtime_error(err))?;
-
-            match self.run_single_todo_with_retries(
-                &run_id,
-                &job.id,
-                1,
-                todo.clone(),
-                flow_kind,
-                self.project.project_dir.clone(),
-                model_override,
-                Arc::new(AtomicBool::new(false)),
-                max_retries.max(1),
-                |attempt, total, err| on_retry(attempt, total, err),
-            ) {
-                Ok(outcome) => {
-                    if let Some(commit_hash) = outcome.commit_hash.as_deref() {
-                        if let Err(err) = self.project.store.update_todo_status(
-                            &todo.id,
-                            TodoStatus::Done,
-                            Some(commit_hash),
-                        ) {
-                            self.log_state_update_error(
-                                &run_id,
-                                Some(&job.id),
-                                Some(&todo.id),
-                                "failed to mark todo done",
-                                &err,
-                            );
-                        }
-                    }
-                    if let Err(err) = self.project.set_job_status(job, JobStatus::Completed, None) {
-                        self.log_state_update_error(
-                            &run_id,
-                            None,
-                            Some(&todo.id),
-                            "failed to update job status to completed",
-                            &err,
-                        );
-                    }
-                    Ok(Some(outcome))
-                }
-                Err(err) => {
-                    if let Err(status_err) =
-                        self.project
-                            .store
-                            .update_todo_status(&todo.id, TodoStatus::Pending, None)
-                    {
-                        self.log_state_update_error(
-                            &run_id,
-                            Some(&job.id),
-                            Some(&todo.id),
-                            "failed to mark todo pending after worker failure",
-                            &status_err,
-                        );
-                    }
-                    if let Err(status_err) =
-                        self.project
-                            .set_job_status(job, JobStatus::Failed, Some(err.to_string()))
-                    {
-                        self.log_state_update_error(
-                            &run_id,
-                            None,
-                            Some(&todo.id),
-                            "failed to update job status to failed",
-                            &status_err,
-                        );
-                    }
-                    Err(err)
-                }
-            }
-        })();
+        let result = self.run_next_todo_in_run_with_retry_hook(
+            &run_id,
+            flow_kind,
+            model_override,
+            max_retries,
+            on_retry,
+        );
 
         self.finish_run(
             &run_id,
@@ -740,19 +758,38 @@ impl ChiefEngine {
         FC: FnMut(&TodoOutcome),
         FR: FnMut(usize, usize, &anyhow::Error),
     {
-        loop {
-            let next = self.run_next_todo_once_with_retry_hook(
-                flow_kind,
-                model_override.clone(),
-                max_retries.max(1),
-                &mut on_retry,
-            )?;
+        let run_id = self
+            .start_run()
+            .map_err(|err| self.classify_runtime_error(err))?;
 
-            let Some(outcome) = next else {
-                return Ok(());
-            };
-            on_todo_completed(&outcome);
-        }
+        let result = (|| -> OrchestratorResult<()> {
+            loop {
+                let next = self.run_next_todo_in_run_with_retry_hook(
+                    &run_id,
+                    flow_kind,
+                    model_override.clone(),
+                    max_retries.max(1),
+                    &mut on_retry,
+                )?;
+
+                let Some(outcome) = next else {
+                    return Ok(());
+                };
+                on_todo_completed(&outcome);
+            }
+        })();
+
+        self.finish_run(
+            &run_id,
+            match &result {
+                Ok(_) => RunExitStatus::Success,
+                Err(err) if err.is_unrecoverable() => RunExitStatus::UnrecoverableFailure,
+                Err(_) => RunExitStatus::Failure,
+            },
+        )
+        .map_err(|err| self.classify_runtime_error(err))?;
+
+        result
     }
 
     pub fn process_requirements(

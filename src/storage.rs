@@ -328,49 +328,55 @@ impl ProjectStore {
     pub fn claim_next_pending_todo(&self) -> Result<Option<Todo>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        let normalized_legacy = self.normalize_legacy_attempted_todos_to_pending(&tx)?;
 
         let mut stmt = tx.prepare(
             "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
              FROM todos
-             WHERE status IN ('pending', 'attempted')
+             WHERE status = ?1
              ORDER BY priority DESC, id ASC
              LIMIT 1",
         )?;
 
-        let Some(mut todo) = stmt
-            .query_row([], parse_todo_row)
+        let mut claimed = stmt
+            .query_row(params![TodoStatus::Pending.as_str()], parse_todo_row)
             .optional()
-            .context("failed to fetch next pending todo for claim")?
-        else {
-            return Ok(None);
-        };
+            .context("failed to fetch next pending todo for claim")?;
         drop(stmt);
 
-        let changed = tx.execute(
-            "UPDATE todos
-             SET status = ?1, updated_at = ?2
-             WHERE id = ?3 AND status IN ('pending', 'attempted')",
-            params![
-                TodoStatus::InProgress.as_str(),
-                Utc::now().to_rfc3339(),
-                &todo.id
-            ],
-        )?;
-        if changed == 0 {
-            return Ok(None);
+        if let Some(todo) = claimed.as_mut() {
+            let changed = tx.execute(
+                "UPDATE todos
+                 SET status = ?1, updated_at = ?2
+                 WHERE id = ?3 AND status = ?4",
+                params![
+                    TodoStatus::InProgress.as_str(),
+                    Utc::now().to_rfc3339(),
+                    &todo.id,
+                    TodoStatus::Pending.as_str(),
+                ],
+            )?;
+            if changed == 0 {
+                claimed = None;
+            } else {
+                todo.status = TodoStatus::InProgress;
+            }
         }
 
-        todo.status = TodoStatus::InProgress;
-
-        self.sync_todos_file_from_conn(&tx)?;
+        if normalized_legacy > 0 || claimed.is_some() {
+            self.sync_todos_file_from_conn(&tx)?;
+        }
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
-        Ok(Some(todo))
+        if normalized_legacy > 0 || claimed.is_some() {
+            self.auto_commit_todos_yaml()?;
+        }
+        Ok(claimed)
     }
 
     pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        let normalized_legacy = self.normalize_legacy_attempted_todos_to_pending(&tx)?;
 
         let mut stmt = tx.prepare(
             "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
@@ -379,39 +385,43 @@ impl ProjectStore {
              LIMIT 1",
         )?;
 
-        let Some(mut todo) = stmt
+        let mut claimed = stmt
             .query_row(params![todo_id], parse_todo_row)
             .optional()
-            .context("failed to fetch todo for claim")?
-        else {
-            return Ok(None);
-        };
+            .context("failed to fetch todo for claim")?;
         drop(stmt);
 
-        if todo.status != TodoStatus::Pending {
-            return Ok(None);
+        if let Some(todo) = claimed.as_mut() {
+            if todo.status == TodoStatus::Pending {
+                let changed = tx.execute(
+                    "UPDATE todos
+                     SET status = ?1, updated_at = ?2
+                     WHERE id = ?3 AND status = ?4",
+                    params![
+                        TodoStatus::InProgress.as_str(),
+                        Utc::now().to_rfc3339(),
+                        todo_id,
+                        TodoStatus::Pending.as_str(),
+                    ],
+                )?;
+                if changed == 0 {
+                    claimed = None;
+                } else {
+                    todo.status = TodoStatus::InProgress;
+                }
+            } else {
+                claimed = None;
+            }
         }
 
-        let changed = tx.execute(
-            "UPDATE todos
-             SET status = ?1, updated_at = ?2
-             WHERE id = ?3 AND status IN ('pending', 'attempted')",
-            params![
-                TodoStatus::InProgress.as_str(),
-                Utc::now().to_rfc3339(),
-                todo_id
-            ],
-        )?;
-        if changed == 0 {
-            return Ok(None);
+        if normalized_legacy > 0 || claimed.is_some() {
+            self.sync_todos_file_from_conn(&tx)?;
         }
-
-        todo.status = TodoStatus::InProgress;
-
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
-        Ok(Some(todo))
+        if normalized_legacy > 0 || claimed.is_some() {
+            self.auto_commit_todos_yaml()?;
+        }
+        Ok(claimed)
     }
 
     pub fn start_run(&self, run_id: &str) -> Result<()> {
@@ -783,6 +793,16 @@ impl ProjectStore {
         Ok(())
     }
 
+    fn normalize_legacy_attempted_todos_to_pending(&self, conn: &Connection) -> Result<usize> {
+        conn.execute(
+            "UPDATE todos
+             SET status = ?1, updated_at = ?2
+             WHERE status = 'attempted'",
+            params![TodoStatus::Pending.as_str(), Utc::now().to_rfc3339()],
+        )
+        .context("failed to normalize legacy attempted todos to pending")
+    }
+
     fn conn(&self) -> Result<Connection> {
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open {}", self.db_path.display()))?;
@@ -1080,7 +1100,7 @@ mod tests {
     use super::ProjectStore;
     use crate::domain::{EventRecord, EventType, Todo, TodoStatus};
     use chrono::Utc;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
     use std::collections::{BTreeMap, HashSet};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1234,6 +1254,55 @@ mod tests {
         assert_eq!(second.id, "todo-b");
         assert_eq!(third.id, "todo-z");
         assert!(fourth.is_none(), "no more pending todos should remain");
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn claim_next_pending_todo_normalizes_legacy_attempted_status_before_claim() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: String::new(),
+            todo: "legacy attempted".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        }
+        .normalize();
+        let todo = store.append_todo(todo).expect("append_todo should succeed");
+
+        {
+            let conn = Connection::open(&store.db_path).expect("failed to open sqlite db");
+            conn.execute(
+                "UPDATE todos SET status = 'attempted' WHERE id = ?1",
+                params![&todo.id],
+            )
+            .expect("failed to force attempted legacy status");
+        }
+
+        let claimed = store
+            .claim_next_pending_todo()
+            .expect("claim_next_pending_todo should succeed")
+            .expect("legacy attempted todo should be normalized and claimed");
+        assert_eq!(claimed.id, todo.id);
+        assert_eq!(claimed.status, TodoStatus::InProgress);
+
+        let persisted = store
+            .list_todos()
+            .expect("list_todos should succeed")
+            .into_iter()
+            .find(|item| item.id == todo.id)
+            .expect("todo should still exist");
+        assert_eq!(
+            persisted.status,
+            TodoStatus::InProgress,
+            "todo should be claimed after legacy status normalization"
+        );
 
         let _ = fs::remove_dir_all(&project_dir);
     }
