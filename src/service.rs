@@ -8,8 +8,7 @@ use crate::domain::{
 use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
 use crate::git::{GitOps, ShellGitOps};
 use crate::orchestrator::{
-    OrchestratorError, OrchestratorResult, retry_with_policy_and_hook,
-    retry_with_policy_and_hook_and_delay,
+    OrchestratorError, OrchestratorResult, retry_with_policy_and_hook_and_delay,
 };
 use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
@@ -355,7 +354,7 @@ impl ChiefEngine {
             )));
         }
 
-        let flow = build_flow(flow_kind);
+        let flow = build_flow(flow_kind, self.project.chief_yaml.chief.max_loop);
         let agent = self.project.build_agent(model_override);
 
         let mut execution = FlowExecution {
@@ -593,11 +592,16 @@ impl ChiefEngine {
         )
     }
 
-    pub fn run_next_todo_once(
+    fn run_next_todo_once_with_retry_hook<FR>(
         &self,
         flow_kind: FlowKind,
         model_override: Option<String>,
-    ) -> OrchestratorResult<Option<TodoOutcome>> {
+        max_retries: usize,
+        on_retry: &mut FR,
+    ) -> OrchestratorResult<Option<TodoOutcome>>
+    where
+        FR: FnMut(usize, usize, &anyhow::Error),
+    {
         let run_id = self
             .start_run()
             .map_err(|err| self.classify_runtime_error(err))?;
@@ -628,7 +632,7 @@ impl ChiefEngine {
                 .context("failed to set job status running")
                 .map_err(|err| self.classify_runtime_error(err))?;
 
-            match self.run_single_todo_once(
+            match self.run_single_todo_with_retries(
                 &run_id,
                 &job.id,
                 1,
@@ -637,6 +641,8 @@ impl ChiefEngine {
                 self.project.project_dir.clone(),
                 model_override,
                 Arc::new(AtomicBool::new(false)),
+                max_retries.max(1),
+                |attempt, total, err| on_retry(attempt, total, err),
             ) {
                 Ok(outcome) => {
                     if let Some(commit_hash) = outcome.commit_hash.as_deref() {
@@ -669,13 +675,13 @@ impl ChiefEngine {
                     if let Err(status_err) =
                         self.project
                             .store
-                            .update_todo_status(&todo.id, TodoStatus::Attempted, None)
+                            .update_todo_status(&todo.id, TodoStatus::Pending, None)
                     {
                         self.log_state_update_error(
                             &run_id,
                             Some(&job.id),
                             Some(&todo.id),
-                            "failed to mark todo attempted",
+                            "failed to mark todo pending after worker failure",
                             &status_err,
                         );
                     }
@@ -709,6 +715,19 @@ impl ChiefEngine {
         result
     }
 
+    pub fn run_next_todo_once(
+        &self,
+        flow_kind: FlowKind,
+        model_override: Option<String>,
+    ) -> OrchestratorResult<Option<TodoOutcome>> {
+        self.run_next_todo_once_with_retry_hook(
+            flow_kind,
+            model_override,
+            self.project.chief_yaml.chief.max_retries.max(1),
+            &mut |_attempt, _total, _err| {},
+        )
+    }
+
     pub fn run_next_todo(
         &self,
         flow_kind: FlowKind,
@@ -731,10 +750,11 @@ impl ChiefEngine {
         FR: FnMut(usize, usize, &anyhow::Error),
     {
         loop {
-            let next = retry_with_policy_and_hook(
-                max_retries,
-                |_attempt, _max_retries| self.run_next_todo_once(flow_kind, model_override.clone()),
-                |attempt, total, err| on_retry(attempt, total, err),
+            let next = self.run_next_todo_once_with_retry_hook(
+                flow_kind,
+                model_override.clone(),
+                max_retries.max(1),
+                &mut on_retry,
             )?;
 
             let Some(outcome) = next else {

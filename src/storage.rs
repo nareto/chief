@@ -188,7 +188,7 @@ impl ProjectStore {
         let todos = self.list_todos()?;
         Ok(todos
             .into_iter()
-            .filter(|todo| todo.status != TodoStatus::Done && todo.status != TodoStatus::InProgress)
+            .filter(|todo| todo.status == TodoStatus::Pending)
             .collect())
     }
 
@@ -345,14 +345,14 @@ impl ProjectStore {
         };
         drop(stmt);
 
-        if matches!(todo.status, TodoStatus::Done | TodoStatus::InProgress) {
+        if todo.status != TodoStatus::Pending {
             return Ok(None);
         }
 
         let changed = tx.execute(
             "UPDATE todos
              SET status = ?1, updated_at = ?2
-             WHERE id = ?3 AND status NOT IN ('done', 'in_progress')",
+             WHERE id = ?3 AND status IN ('pending', 'attempted')",
             params![
                 TodoStatus::InProgress.as_str(),
                 Utc::now().to_rfc3339(),
@@ -912,7 +912,6 @@ impl ProjectStore {
 fn parse_todo_status(value: &str) -> TodoStatus {
     match value {
         "in_progress" => TodoStatus::InProgress,
-        "attempted" => TodoStatus::Attempted,
         "done" => TodoStatus::Done,
         _ => TodoStatus::Pending,
     }

@@ -32,9 +32,9 @@ impl Phase {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
+    #[serde(alias = "attempted")]
     Pending,
     InProgress,
-    Attempted,
     Done,
 }
 
@@ -43,7 +43,6 @@ impl TodoStatus {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
-            Self::Attempted => "attempted",
             Self::Done => "done",
         }
     }

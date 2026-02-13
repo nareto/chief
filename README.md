@@ -287,6 +287,7 @@ chief:
   agent: codex
   model: gpt-5
   max_retries: 10
+  max_loop: 6
   agent_timeout_seconds: 2700
   suite_command_timeout_seconds: 1800
 

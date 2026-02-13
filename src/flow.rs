@@ -1264,10 +1264,22 @@ pub struct TddFlow {
 
 impl Default for TddFlow {
     fn default() -> Self {
+        Self::with_max_loop(6)
+    }
+}
+
+impl TddFlow {
+    pub fn with_max_loop(max_loop: usize) -> Self {
+        let mut red_loop = ConvergenceLoopPolicy::default();
+        red_loop.max_loops = max_loop.max(1);
         Self {
-            red_loop: ConvergenceLoopPolicy::default(),
-            green_loop: UntilPassLoopPolicy::default(),
-            post_green_loop: UntilPassLoopPolicy::default(),
+            red_loop,
+            green_loop: UntilPassLoopPolicy {
+                max_loops: max_loop.max(1),
+            },
+            post_green_loop: UntilPassLoopPolicy {
+                max_loops: max_loop.max(1),
+            },
         }
     }
 }
@@ -1342,9 +1354,15 @@ pub struct SinglePromptFlow {
 
 impl Default for SinglePromptFlow {
     fn default() -> Self {
-        Self {
-            loop_policy: ConvergenceLoopPolicy::default(),
-        }
+        Self::with_max_loop(6)
+    }
+}
+
+impl SinglePromptFlow {
+    pub fn with_max_loop(max_loop: usize) -> Self {
+        let mut loop_policy = ConvergenceLoopPolicy::default();
+        loop_policy.max_loops = max_loop.max(1);
+        Self { loop_policy }
     }
 }
 
@@ -1579,10 +1597,11 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
     }
 }
 
-pub fn build_flow(flow_kind: FlowKind) -> Box<dyn TodoFlow> {
+pub fn build_flow(flow_kind: FlowKind, max_loop: usize) -> Box<dyn TodoFlow> {
+    let max_loop = max_loop.max(1);
     match flow_kind {
-        FlowKind::SinglePrompt => Box::new(SinglePromptFlow::default()),
-        FlowKind::Tdd => Box::new(TddFlow::default()),
+        FlowKind::SinglePrompt => Box::new(SinglePromptFlow::with_max_loop(max_loop)),
+        FlowKind::Tdd => Box::new(TddFlow::with_max_loop(max_loop)),
     }
 }
 
@@ -1863,7 +1882,11 @@ fn run_lint_checks(
                     execution.run_suite_command(fix_cmd, &cwd, &suite.env, timeout_seconds)?;
 
                 execution.log_event(
-                    if fix_out.exit_code == 0 { "info" } else { "warning" },
+                    if fix_out.exit_code == 0 {
+                        "info"
+                    } else {
+                        "warning"
+                    },
                     Some(phase),
                     EventType::LintFix,
                     format!(
@@ -1887,7 +1910,11 @@ fn run_lint_checks(
                     // Re-run lint after successful fix.
                     if let Some(recheck) = execution.run_lint_suite(suite, phase)? {
                         execution.log_event(
-                            if recheck.exit_code == 0 { "info" } else { "warning" },
+                            if recheck.exit_code == 0 {
+                                "info"
+                            } else {
+                                "warning"
+                            },
                             Some(phase),
                             EventType::Lint,
                             format!(
@@ -2122,8 +2149,8 @@ mod tests {
 
     #[test]
     fn build_flow_matches_kind() {
-        let tdd = build_flow(FlowKind::Tdd);
-        let single_prompt = build_flow(FlowKind::SinglePrompt);
+        let tdd = build_flow(FlowKind::Tdd, 6);
+        let single_prompt = build_flow(FlowKind::SinglePrompt, 6);
 
         assert_eq!(tdd.name(), "tdd");
         assert_eq!(single_prompt.name(), "single_prompt");
@@ -3831,7 +3858,7 @@ mod tests {
             prepared_suites: RefCell::new(BTreeSet::new()),
         };
 
-        let flow = build_flow(FlowKind::SinglePrompt);
+        let flow = build_flow(FlowKind::SinglePrompt, 6);
         let outcome = flow
             .run_todo(&mut execution)
             .expect("single_prompt flow should complete");
@@ -3957,10 +3984,7 @@ mod tests {
         // The lint command fails on first run but the fix command creates a marker
         // that makes the lint command succeed on re-run.
         let marker = project_dir.join("lint-fixed.txt");
-        let lint_cmd = format!(
-            "test -f '{}' && exit 0 || exit 1",
-            marker.display()
-        );
+        let lint_cmd = format!("test -f '{}' && exit 0 || exit 1", marker.display());
         let fix_cmd = format!("printf fixed > '{}'", marker.display());
 
         let mut suite = suite_named("fixable");
@@ -4022,7 +4046,10 @@ mod tests {
         let all_ok = super::run_lint_checks(&execution, &[suite], Phase::SinglePrompt)
             .expect("lint checks should complete");
 
-        assert!(!all_ok, "lint should still fail when re-check fails after fix");
+        assert!(
+            !all_ok,
+            "lint should still fail when re-check fails after fix"
+        );
 
         let _ = fs::remove_dir_all(&project_dir);
     }

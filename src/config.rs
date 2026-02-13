@@ -58,6 +58,8 @@ pub struct ChiefConfig {
     pub agent_extra_args: Vec<String>,
     #[serde(default = "default_max_retries")]
     pub max_retries: usize,
+    #[serde(default = "default_max_loop")]
+    pub max_loop: usize,
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
     #[serde(default = "default_suite_command_timeout_seconds")]
@@ -79,6 +81,7 @@ impl Default for ChiefConfig {
             model_reasoning_effort: None,
             agent_extra_args: Vec::new(),
             max_retries: default_max_retries(),
+            max_loop: default_max_loop(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
             suite_command_timeout_seconds: default_suite_command_timeout_seconds(),
             agent_log_max_output_lines: default_agent_log_max_output_lines(),
@@ -143,6 +146,10 @@ fn default_max_retries() -> usize {
     2
 }
 
+fn default_max_loop() -> usize {
+    6
+}
+
 fn default_agent_timeout_seconds() -> u64 {
     2_700
 }
@@ -186,6 +193,13 @@ mod tests {
         let yaml = "chief: {}\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.chief.max_retries, 2);
+    }
+
+    #[test]
+    fn parse_max_loop_default() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.max_loop, 6);
     }
 
     #[test]

@@ -232,10 +232,8 @@ impl Scheduler {
                             let mut states = self.states.lock().await;
                             if let Some(state) = states.get_mut(&project_name) {
                                 state.last_error = result.error.clone();
-                                if result.unrecoverable {
-                                    state.stop_requested = true;
-                                    state.cancel_signal.store(true, Ordering::SeqCst);
-                                }
+                                state.stop_requested = true;
+                                state.cancel_signal.store(true, Ordering::SeqCst);
                             }
                         }
                     }
@@ -244,6 +242,8 @@ impl Scheduler {
                         let mut states = self.states.lock().await;
                         if let Some(state) = states.get_mut(&project_name) {
                             state.last_error = Some(format!("worker join error: {err}"));
+                            state.stop_requested = true;
+                            state.cancel_signal.store(true, Ordering::SeqCst);
                         }
                     }
                 }
@@ -448,7 +448,7 @@ mod tests {
                 invocation
                     .context
                     .store
-                    .update_todo_status(&invocation.todo.id, TodoStatus::Attempted, None)
+                    .update_todo_status(&invocation.todo.id, TodoStatus::Pending, None)
                     .expect("failed to update todo status");
                 invocation
                     .context
@@ -495,21 +495,13 @@ mod tests {
         );
 
         let todos = refreshed.store.list_todos().expect("failed to list todos");
-        let attempted_count = todos
-            .iter()
-            .filter(|todo| todo.status == TodoStatus::Attempted)
-            .count();
         let pending_count = todos
             .iter()
             .filter(|todo| todo.status == TodoStatus::Pending)
             .count();
         assert_eq!(
-            attempted_count, 1,
-            "exactly one todo should be attempted after the unrecoverable failure"
-        );
-        assert_eq!(
-            pending_count, 1,
-            "remaining todos should stay pending after unrecoverable shutdown"
+            pending_count, 2,
+            "todos should be pending after unrecoverable shutdown"
         );
 
         let conn = Connection::open(&refreshed.store.db_path).expect("failed to open chief.db");

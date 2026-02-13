@@ -369,7 +369,7 @@ impl ApiService {
             .count();
         let available_todos = todos
             .iter()
-            .filter(|todo| todo.status != TodoStatus::Done && todo.status != TodoStatus::InProgress)
+            .filter(|todo| todo.status == TodoStatus::Pending)
             .count();
         let last_done_todo_committed_at =
             resolve_last_done_todo_committed_at(&context.git, &context.project_dir, &todos);
@@ -613,11 +613,11 @@ impl ApiService {
             )
         })?;
 
-        if let Err(err) =
-            context
-                .git
-                .commit_paths(&context.project_dir, &["chief.yaml"], "chore: update chief.yaml via settings")
-        {
+        if let Err(err) = context.git.commit_paths(
+            &context.project_dir,
+            &["chief.yaml"],
+            "chore: update chief.yaml via settings",
+        ) {
             info!(
                 project,
                 error = %err,
@@ -1264,7 +1264,7 @@ fn parse_todo_status_input(value: &str) -> Option<TodoStatus> {
     match value.trim() {
         "pending" => Some(TodoStatus::Pending),
         "in_progress" => Some(TodoStatus::InProgress),
-        "attempted" => Some(TodoStatus::Attempted),
+        "attempted" => Some(TodoStatus::Pending),
         "done" => Some(TodoStatus::Done),
         _ => None,
     }
@@ -2143,12 +2143,12 @@ mod tests {
     priority: 3
     test_suites: []
     status: pending
-  - id: attempted-1
-    todo: Attempted todo
+  - id: pending-2
+    todo: Second pending todo
     expectations: reset marker should be recorded
     priority: 2
     test_suites: []
-    status: attempted
+    status: pending
   - id: done-1
     todo: Done todo
     expectations: done todos should be ignored
@@ -2219,8 +2219,8 @@ mod tests {
         marker_todo_ids.sort();
         assert_eq!(
             marker_todo_ids,
-            vec!["attempted-1".to_owned(), "pending-1".to_owned()],
-            "marker events should target pending/attempted todos only"
+            vec!["pending-1".to_owned(), "pending-2".to_owned()],
+            "marker events should target non-done todos only"
         );
 
         for marker in &markers {
@@ -2355,8 +2355,8 @@ mod tests {
             .await
             .expect("update_chief_yaml should succeed");
 
-        let saved = fs::read_to_string(project_dir.join("chief.yaml"))
-            .expect("chief.yaml should exist");
+        let saved =
+            fs::read_to_string(project_dir.join("chief.yaml")).expect("chief.yaml should exist");
         assert_eq!(saved, updated_yaml, "file should contain updated content");
 
         let log = run_git(&project_dir, &["log", "--oneline", "-1"]);
@@ -2439,7 +2439,10 @@ mod tests {
             .await
             .expect("update_chief_yaml should succeed");
 
-        let committed_files = run_git(&project_dir, &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+        let committed_files = run_git(
+            &project_dir,
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        );
         assert_eq!(
             committed_files.trim(),
             "chief.yaml",

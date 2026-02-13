@@ -122,14 +122,14 @@ where
             if let Err(status_err) =
                 context
                     .store
-                    .update_todo_status(&todo.id, TodoStatus::Attempted, None)
+                    .update_todo_status(&todo.id, TodoStatus::Pending, None)
             {
                 report_state_update_error(
                     &context,
                     &run_id,
                     Some(&job.id),
                     Some(&todo.id),
-                    "failed to mark todo attempted after worktree-root failure",
+                    "failed to mark todo pending after worktree-root failure",
                     &status_err,
                 );
             }
@@ -156,14 +156,14 @@ where
             if let Err(status_err) =
                 context
                     .store
-                    .update_todo_status(&todo.id, TodoStatus::Attempted, None)
+                    .update_todo_status(&todo.id, TodoStatus::Pending, None)
             {
                 report_state_update_error(
                     &context,
                     &run_id,
                     Some(&job.id),
                     Some(&todo.id),
-                    "failed to mark todo attempted after worktree creation failure",
+                    "failed to mark todo pending after worktree creation failure",
                     &status_err,
                 );
             }
@@ -228,14 +228,14 @@ where
                 if let Err(status_err) =
                     context
                         .store
-                        .update_todo_status(&todo_id, TodoStatus::Attempted, None)
+                        .update_todo_status(&todo_id, TodoStatus::Pending, None)
                 {
                     report_state_update_error(
                         &context,
                         &run_id,
                         Some(&job.id),
                         Some(&todo_id),
-                        "failed to mark todo attempted after merge error",
+                        "failed to mark todo pending after merge error",
                         &status_err,
                     );
                 }
@@ -320,14 +320,14 @@ where
             if let Err(status_err) =
                 context
                     .store
-                    .update_todo_status(&todo_id, TodoStatus::Attempted, None)
+                    .update_todo_status(&todo_id, TodoStatus::Pending, None)
             {
                 report_state_update_error(
                     &context,
                     &run_id,
                     Some(&job.id),
                     Some(&todo_id),
-                    "failed to mark todo attempted after worker failure",
+                    "failed to mark todo pending after worker failure",
                     &status_err,
                 );
             }
@@ -586,8 +586,8 @@ mod tests {
             .expect("todo should still exist");
         assert_eq!(
             persisted_todo.status,
-            TodoStatus::Attempted,
-            "todo should be marked attempted after unrecoverable worker failure"
+            TodoStatus::Pending,
+            "todo should be reset to pending after unrecoverable worker failure"
         );
     }
 
@@ -713,8 +713,8 @@ mod tests {
             .expect("todo should still exist");
         assert_eq!(
             persisted_todo.status,
-            TodoStatus::Attempted,
-            "todo should be marked attempted after retry exhaustion"
+            TodoStatus::Pending,
+            "todo should be reset to pending after retry exhaustion"
         );
     }
 }
