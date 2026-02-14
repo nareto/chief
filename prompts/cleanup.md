@@ -32,4 +32,7 @@ Guardrails you NEED to respect:
 - Do not alter program logic
 - Do not alter UX flow
 
+
+If you find the existing implementation to be sufficinetly clean, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
+
 When in doubt about a change, don't make it.
