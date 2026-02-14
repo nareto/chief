@@ -65,8 +65,7 @@ impl Scheduler {
                 None,
                 crate::domain::EventType::Job,
                 format!(
-                    "Recovered {} stale in-progress todo(s) to pending before supervisor start",
-                    recovered_in_progress
+                    "Recovered {recovered_in_progress} stale in-progress todo(s) to pending before supervisor start"
                 ),
                 std::collections::BTreeMap::new(),
             )?;

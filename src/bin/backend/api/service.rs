@@ -175,7 +175,7 @@ impl ApiService {
 
         let status = match payload.status {
             Some(raw) => parse_todo_status_input(&raw)
-                .ok_or_else(|| ApiError::unprocessable(format!("invalid todo status '{}'", raw)))?,
+                .ok_or_else(|| ApiError::unprocessable(format!("invalid todo status '{raw}'")))?,
             None => current.status,
         };
 
@@ -540,8 +540,8 @@ impl ApiService {
                 "warning",
                 Some(Phase::Red),
                 EventType::GitOp,
-                marker_message.clone(),
-                marker_payload.clone(),
+                marker_message,
+                marker_payload,
             )
         } else {
             for todo_id in &todo_ids {
@@ -1326,8 +1326,7 @@ fn parse_event_type(value: &str) -> Result<EventType, ApiError> {
         "error" => Ok(EventType::Error),
         "job" => Ok(EventType::Job),
         other => Err(ApiError::unprocessable(format!(
-            "unsupported event_type '{}', see /api/projects/{{project}}/events for valid values",
-            other
+            "unsupported event_type '{other}', see /api/projects/{{project}}/events for valid values"
         ))),
     }
 }
@@ -1342,8 +1341,7 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
         "post_green" => Ok(Phase::PostGreen),
         "exit" => Ok(Phase::Exit),
         other => Err(ApiError::unprocessable(format!(
-            "unsupported phase '{}'",
-            other
+            "unsupported phase '{other}'"
         ))),
     }
 }
