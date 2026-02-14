@@ -1,5 +1,5 @@
 use crate::config::ChiefConfig;
-use crate::domain::AgentOutput;
+use crate::domain::{AgentOutput, WaitState};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::io::{self, Read, Write};
@@ -294,13 +294,6 @@ fn shell_escape(part: &str) -> String {
     }
     let escaped = part.replace('"', "\\\"");
     format!("\"{escaped}\"")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitState {
-    Completed,
-    TimedOut,
-    Cancelled,
 }
 
 fn wait_with_timeout(

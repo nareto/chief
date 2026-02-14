@@ -1,6 +1,8 @@
 use crate::agent::{AgentCancelledError, AgentRequest, CodingAgent};
 use crate::config::{ChiefConfig, TestSuiteConfig};
-use crate::domain::{AgentOutput, EventRecord, EventType, LoopDecision, Phase, Todo};
+use crate::domain::{
+    AgentOutput, EventRecord, EventType, LoopDecision, Phase, Todo, WaitState, payload_from_json,
+};
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::{EventQuery, ProjectStore};
@@ -219,7 +221,7 @@ pub fn execute_suite_command(
     })
 }
 
-fn configure_process_group(process: &mut Command) {
+pub fn configure_process_group(process: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -227,7 +229,7 @@ fn configure_process_group(process: &mut Command) {
     }
 }
 
-fn terminate_process_tree(child: &mut std::process::Child) {
+pub fn terminate_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         if let Ok(pid) = i32::try_from(child.id()) {
@@ -2054,13 +2056,6 @@ fn wait_for_command_with_cancel(
     ))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitState {
-    Completed,
-    TimedOut,
-    Cancelled,
-}
-
 fn spawn_pipe_reader<T>(pipe: Option<T>) -> JoinHandle<Result<Vec<u8>>>
 where
     T: Read + Send + 'static,
@@ -2122,13 +2117,6 @@ fn run_test_and_lint(
     }
 
     Ok(lint_ok && tests_ok)
-}
-
-fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
-    match value {
-        Value::Object(map) => map.into_iter().collect(),
-        _ => BTreeMap::new(),
-    }
 }
 
 #[cfg(test)]
