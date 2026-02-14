@@ -354,15 +354,13 @@ fn run_tail_events(cli: &Cli, args: &TailEventsArgs) -> Result<()> {
             event.msg
         );
         if let Some(output) = event.payload.get("output").and_then(|value| value.as_str()) {
-            let tail = output
+            let mut lines: Vec<_> = output
                 .lines()
                 .rev()
                 .take(context.chief_yaml.chief.agent_log_max_output_lines)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            lines.reverse();
+            let tail = lines.join("\n");
             if !tail.trim().is_empty() {
                 println!("{tail}");
             }

@@ -71,6 +71,17 @@ impl ApiError {
         }
     }
 
+    pub fn classify_store_error(error: anyhow::Error) -> Self {
+        let message = error.to_string();
+        if message.contains("not found") {
+            Self::not_found(message)
+        } else if message.contains("already exists") {
+            Self::unprocessable(message)
+        } else {
+            Self::internal(error)
+        }
+    }
+
     pub fn internal(error: anyhow::Error) -> Self {
         if let Some(reset) = db_reset_required_from_anyhow(&error) {
             return Self {
