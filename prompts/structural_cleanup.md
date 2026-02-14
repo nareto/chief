@@ -23,8 +23,8 @@ The result should in principle adhere to best clean code principles (but do not 
 Guardrails you NEED to respect:
 - Ensure all tests pass 
 - You may update test imports, module paths, and helper locations to match new structure, but do not change what any test asserts or the scenarios it covers.
-- Do not alter outward-facing interfaces like API routes, CLI flags, config schema, exported symbols, DB schema...
+- Do not alter outward-facing interfaces like API routes, CLI flags, config schema,  DB schema...
 - Do not change what the code does (but you are free to change how it's organized)
 - Do not alter UX flow
 
-If you find the existing implementation to be sufficinetly clean, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
+If you find the existing implementation to be sufficiently clean, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
