@@ -160,7 +160,7 @@ impl GitOps for ShellGitOps {
             // If nothing actually changed, the commit is a no-op — that's fine.
             let output = self.run_capture(cwd, &["diff", "--cached", "--name-only"])?;
             if !output.is_empty() {
-                return Err(anyhow!("git commit for paths {:?} failed", paths));
+                return Err(anyhow!("git commit for paths {paths:?} failed"));
             }
         }
         Ok(())

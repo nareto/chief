@@ -160,7 +160,7 @@ fn build_cors_layer(allow_origins: &[String]) -> Result<CorsLayer> {
         .map(|origin| {
             origin
                 .parse::<HeaderValue>()
-                .map_err(|err| anyhow!("invalid CORS origin '{}': {}", origin, err))
+                .map_err(|err| anyhow!("invalid CORS origin '{origin}': {err}"))
         })
         .collect::<Result<Vec<_>>>()?;
 

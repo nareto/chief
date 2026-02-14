@@ -181,13 +181,11 @@ pub fn execute_suite_command(
         let timeout_seconds = timeout_seconds.unwrap_or_default();
         if merged_output.is_empty() {
             merged_output = format!(
-                "suite command timed out after {} second(s) and was terminated.",
-                timeout_seconds
+                "suite command timed out after {timeout_seconds} second(s) and was terminated."
             );
         } else {
             merged_output = format!(
-                "suite command timed out after {} second(s) and was terminated.\n{}",
-                timeout_seconds, merged_output
+                "suite command timed out after {timeout_seconds} second(s) and was terminated.\n{merged_output}"
             );
         }
     }
@@ -722,7 +720,7 @@ impl<'a> FlowExecution<'a> {
             EventType::Diff,
             "Iteration git change detection",
             payload_from_json(json!({
-                "touched_files": touched_files.clone(),
+                "touched_files": &touched_files,
                 "had_git_changes": had_git_changes,
             })),
         )?;

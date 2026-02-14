@@ -219,7 +219,7 @@ impl ProjectStore {
             ],
         )?;
         if changed == 0 {
-            return Err(anyhow!("todo '{}' not found", todo_id));
+            return Err(anyhow!("todo '{todo_id}' not found"));
         }
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
@@ -255,7 +255,7 @@ impl ProjectStore {
         drop(stmt);
 
         let Some(existing) = existing else {
-            return Err(anyhow!("todo '{}' not found", existing_id));
+            return Err(anyhow!("todo '{existing_id}' not found"));
         };
 
         let mut next = todo.normalize();
@@ -290,7 +290,7 @@ impl ProjectStore {
 
         let changed = tx.execute("DELETE FROM todos WHERE id = ?1", params![todo_id])?;
         if changed == 0 {
-            return Err(anyhow!("todo '{}' not found", todo_id));
+            return Err(anyhow!("todo '{todo_id}' not found"));
         }
 
         self.sync_todos_file_from_conn(&tx)?;
@@ -559,7 +559,7 @@ impl ProjectStore {
         }
         if let Some(text) = &query.contains_text {
             sql.push_str(" AND (msg LIKE ? OR payload LIKE ?)");
-            let pattern = format!("%{}%", text);
+            let pattern = format!("%{text}%");
             bind_values.push(Value::String(pattern.clone()));
             bind_values.push(Value::String(pattern));
         }
@@ -946,9 +946,7 @@ impl ProjectStore {
             .collect::<Vec<_>>();
         if columns != expected_vec {
             return Err(anyhow!(
-                "unexpected schema for table {table}: expected {:?}, got {:?}",
-                expected_vec,
-                columns
+                "unexpected schema for table {table}: expected {expected_vec:?}, got {columns:?}"
             ));
         }
         Ok(())

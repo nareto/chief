@@ -275,7 +275,7 @@ fn run(cli: &Cli) -> Result<()> {
     let flow_input = cli.flow.as_deref().unwrap_or(configured_flow);
     let flow_kind: FlowKind = flow_input
         .parse()
-        .with_context(|| format!("invalid flow '{}'", flow_input))?;
+        .with_context(|| format!("invalid flow '{flow_input}'"))?;
 
     let requirements_text = load_requirements_text(&cli.requirements, &cli.requirements_file)?;
     if !requirements_text.trim().is_empty() {
