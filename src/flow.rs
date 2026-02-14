@@ -36,6 +36,23 @@ impl FlowKind {
             Self::SinglePrompt => "single_prompt",
         }
     }
+
+    /// Resolve a configured flow string to its canonical name.
+    /// Known flow names are normalized, empty input defaults to `SinglePrompt`,
+    /// and unrecognized values are returned as-is (custom flow names).
+    pub fn resolve_name(input: &str) -> String {
+        let trimmed = input.trim();
+        trimmed
+            .parse::<FlowKind>()
+            .map(|kind| kind.as_str().to_owned())
+            .unwrap_or_else(|_| {
+                if trimmed.is_empty() {
+                    FlowKind::SinglePrompt.as_str().to_owned()
+                } else {
+                    trimmed.to_owned()
+                }
+            })
+    }
 }
 
 #[derive(Debug, Clone)]

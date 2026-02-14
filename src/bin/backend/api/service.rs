@@ -374,17 +374,7 @@ impl ApiService {
         let last_done_todo_committed_at =
             resolve_last_done_todo_committed_at(&context.git, &context.project_dir, &todos);
 
-        let configured_flow = context.chief_yaml.chief.flow.trim();
-        let configured_flow_name = configured_flow
-            .parse::<FlowKind>()
-            .map(|kind| kind.as_str().to_owned())
-            .unwrap_or_else(|_| {
-                if configured_flow.is_empty() {
-                    FlowKind::SinglePrompt.as_str().to_owned()
-                } else {
-                    configured_flow.to_owned()
-                }
-            });
+        let configured_flow_name = FlowKind::resolve_name(&context.chief_yaml.chief.flow);
 
         Ok(StateResponse {
             project: project.to_owned(),

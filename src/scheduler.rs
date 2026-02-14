@@ -100,17 +100,7 @@ impl Scheduler {
             .into_iter()
             .map(|project| {
                 let runtime = states.get(&project.name);
-                let configured_flow = project.chief_yaml.chief.flow.trim();
-                let configured_flow_name = configured_flow
-                    .parse::<FlowKind>()
-                    .map(|kind| kind.as_str().to_owned())
-                    .unwrap_or_else(|_| {
-                        if configured_flow.is_empty() {
-                            FlowKind::SinglePrompt.as_str().to_owned()
-                        } else {
-                            configured_flow.to_owned()
-                        }
-                    });
+                let configured_flow_name = FlowKind::resolve_name(&project.chief_yaml.chief.flow);
                 ProjectRuntimeView {
                     name: project.name.clone(),
                     project_dir: project.project_dir.display().to_string(),
