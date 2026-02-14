@@ -160,6 +160,19 @@ Clean completed todos:
 cargo run --bin chief -- --project-dir /path/to/project clean-done
 ```
 
+Run suite commands directly for one configured suite:
+
+```bash
+# test and lint commands support --target (for {target} placeholders)
+cargo run --bin chief -- --project-dir /path/to/project suite test --suite backend --target src/lib.rs
+cargo run --bin chief -- --project-dir /path/to/project suite lint --suite backend --target src
+
+# prepare/fix commands from chief.yaml
+cargo run --bin chief -- --project-dir /path/to/project suite test_init --suite backend
+cargo run --bin chief -- --project-dir /path/to/project suite test_setup --suite backend
+cargo run --bin chief -- --project-dir /path/to/project suite lint_fix --suite backend --target src
+```
+
 ## Backend usage
 
 Run backend over a projects directory containing multiple git projects:
