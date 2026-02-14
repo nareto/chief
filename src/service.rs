@@ -4,6 +4,7 @@ use crate::agent::{
 use crate::config::ChiefYaml;
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoStatus,
+    payload_from_json,
 };
 use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
 use crate::git::{GitOps, ShellGitOps};
@@ -1068,13 +1069,6 @@ impl ChiefEngine {
         ) {
             warn!("failed to record state-update error event: {log_err:#}");
         }
-    }
-}
-
-fn payload_from_json(value: serde_json::Value) -> BTreeMap<String, serde_json::Value> {
-    match value {
-        serde_json::Value::Object(map) => map.into_iter().collect(),
-        _ => BTreeMap::new(),
     }
 }
 

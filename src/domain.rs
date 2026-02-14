@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use md5::Digest;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,5 +262,19 @@ impl AgentOutput {
             stderr: String::new(),
             merged_output,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitState {
+    Completed,
+    TimedOut,
+    Cancelled,
+}
+
+pub(crate) fn payload_from_json(value: Value) -> BTreeMap<String, Value> {
+    match value {
+        Value::Object(map) => map.into_iter().collect(),
+        _ => BTreeMap::new(),
     }
 }

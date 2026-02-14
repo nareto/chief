@@ -14,7 +14,8 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use chief::domain::{EventType, JobStatus, Phase, RunExitStatus, Todo, TodoStatus};
 use chief::flow::{
-    FlowKind, SuiteCommandKind, execute_suite_command, suite_command_cwd, suite_command_for_kind,
+    FlowKind, SuiteCommandKind, configure_process_group, execute_suite_command, suite_command_cwd,
+    suite_command_for_kind, terminate_process_tree,
 };
 use chief::git::GitOps;
 use chief::scheduler::Scheduler;
@@ -1035,27 +1036,6 @@ fn execute_suite_command_streaming(
         stdout,
         stderr,
     })
-}
-
-fn configure_process_group(process: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        process.process_group(0);
-    }
-}
-
-fn terminate_process_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        if let Ok(pid) = i32::try_from(child.id()) {
-            let pgid = nix::unistd::Pid::from_raw(pid);
-            let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
-            std::thread::sleep(Duration::from_millis(200));
-            let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
-        }
-    }
-    let _ = child.kill();
 }
 
 fn spawn_suite_stream_reader<T>(
