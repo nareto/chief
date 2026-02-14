@@ -5,6 +5,7 @@ Your task is to review the whole codebase and clean it up, without changing obse
     - dead code: unused imports, unreachable branches, functions or variables that are never used
     - inconsistent error handling: mixing try/catch with returning errors, silently swallowing exceptions
 - structural fixes:
+    - unhealthy length: functions, classes or files that are too long and should be broken up into multiple parts
     - security naivety: no input validation, secrets like API keys hard-coded
     - spaghetti code: unclear, intricated codepaths
     - codebase fragmentation: mix of different, overlapping patterns or styles 
