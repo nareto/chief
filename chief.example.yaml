@@ -70,3 +70,35 @@ suites:
 #     env:
 #       NODE_ENV: test
 #     strip_root_from_target: true
+
+# -----------------------------
+# Playwright E2E suite (Docker)
+# -----------------------------
+# Runs Playwright inside the official Docker image for reproducible,
+# dependency-free E2E tests. Mount your project into the container and
+# let mcr.microsoft.com/playwright handle browser binaries.
+#
+# suites:
+#   - name: frontend-e2e
+#     language: TypeScript
+#     framework: Playwright
+#     test_root: frontend
+#     test_command: >-
+#       docker run --rm --network host
+#       -v "$PWD":/app -w /app
+#       -e CI=true
+#       mcr.microsoft.com/playwright:v1.52.0-noble
+#       npx playwright test {target}
+#     target_type: file
+#     default_target: e2e
+#     file_patterns: ["*.spec.ts", "*.e2e.ts"]
+#     lint_command: npm run lint
+#     post_green_command: >-
+#       docker run --rm --network host
+#       -v "$PWD":/app -w /app
+#       -e CI=true
+#       mcr.microsoft.com/playwright:v1.52.0-noble
+#       npx playwright test
+#     command_timeout_seconds: 1800
+#     env: {}
+#     strip_root_from_target: true
