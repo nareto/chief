@@ -225,44 +225,43 @@ fn parse_codex_json_output(output: &str) -> String {
             continue;
         };
 
-        if let Some(item) = value.get("item") {
-            if let Some(obj) = item.as_object() {
-                let item_type = obj.get("type").and_then(Value::as_str).unwrap_or_default();
-                if item_type == "agent_message" {
-                    if let Some(text) = obj.get("text").and_then(Value::as_str) {
+        if let Some(item) = value.get("item")
+            && let Some(obj) = item.as_object()
+        {
+            let item_type = obj.get("type").and_then(Value::as_str).unwrap_or_default();
+            if item_type == "agent_message"
+                && let Some(text) = obj.get("text").and_then(Value::as_str)
+            {
+                parts.push(text.to_owned());
+                continue;
+            }
+            if item_type == "message"
+                && obj.get("role").and_then(Value::as_str) == Some("assistant")
+            {
+                match obj.get("content") {
+                    Some(Value::String(text)) => {
                         parts.push(text.to_owned());
                         continue;
                     }
-                }
-                if item_type == "message"
-                    && obj.get("role").and_then(Value::as_str) == Some("assistant")
-                {
-                    match obj.get("content") {
-                        Some(Value::String(text)) => {
-                            parts.push(text.to_owned());
-                            continue;
-                        }
-                        Some(Value::Array(chunks)) => {
-                            let mut combined = String::new();
-                            for chunk in chunks {
-                                if let Some(text) = chunk.get("text").and_then(Value::as_str) {
-                                    combined.push_str(text);
-                                    continue;
-                                }
-                                if chunk.get("type").and_then(Value::as_str) == Some("output_text")
-                                {
-                                    if let Some(text) = chunk.get("text").and_then(Value::as_str) {
-                                        combined.push_str(text);
-                                    }
-                                }
-                            }
-                            if !combined.is_empty() {
-                                parts.push(combined);
+                    Some(Value::Array(chunks)) => {
+                        let mut combined = String::new();
+                        for chunk in chunks {
+                            if let Some(text) = chunk.get("text").and_then(Value::as_str) {
+                                combined.push_str(text);
                                 continue;
                             }
+                            if chunk.get("type").and_then(Value::as_str) == Some("output_text")
+                                && let Some(text) = chunk.get("text").and_then(Value::as_str)
+                            {
+                                combined.push_str(text);
+                            }
                         }
-                        _ => {}
+                        if !combined.is_empty() {
+                            parts.push(combined);
+                            continue;
+                        }
                     }
+                    _ => {}
                 }
             }
         }
@@ -473,30 +472,40 @@ mod tests {
 
     #[test]
     fn claude_command_includes_model_from_config() {
-        let mut config = ChiefConfig::default();
-        config.model = Some("opus".to_owned());
+        let config = ChiefConfig {
+            model: Some("opus".to_owned()),
+            ..ChiefConfig::default()
+        };
         let agent = ClaudeAgent::from_config(&config, None);
 
         let command = agent.build_command(&[]);
         assert!(
-            command.windows(2).any(|window| window == ["--model", "opus"]),
+            command
+                .windows(2)
+                .any(|window| window == ["--model", "opus"]),
             "claude command should include configured model: {command:?}"
         );
     }
 
     #[test]
     fn claude_command_prefers_runtime_model_override() {
-        let mut config = ChiefConfig::default();
-        config.model = Some("opus".to_owned());
+        let config = ChiefConfig {
+            model: Some("opus".to_owned()),
+            ..ChiefConfig::default()
+        };
         let agent = ClaudeAgent::from_config(&config, Some("sonnet".to_owned()));
 
         let command = agent.build_command(&[]);
         assert!(
-            command.windows(2).any(|window| window == ["--model", "sonnet"]),
+            command
+                .windows(2)
+                .any(|window| window == ["--model", "sonnet"]),
             "claude command should include runtime model override: {command:?}"
         );
         assert!(
-            !command.windows(2).any(|window| window == ["--model", "opus"]),
+            !command
+                .windows(2)
+                .any(|window| window == ["--model", "opus"]),
             "claude command should not include config model when runtime override is present: {command:?}"
         );
     }

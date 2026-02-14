@@ -569,9 +569,7 @@ impl ApiService {
             .store
             .finish_run(&run_id, run_exit_status)
             .map_err(ApiError::internal)?;
-        if let Err(err) = log_result {
-            return Err(err);
-        }
+        log_result?;
 
         Ok(MessageResponse {
             message: if changed_files.is_empty() {

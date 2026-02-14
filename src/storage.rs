@@ -163,8 +163,7 @@ impl ProjectStore {
         if todo_ids.is_empty() {
             tx.execute("DELETE FROM todos", [])?;
         } else {
-            let placeholders = std::iter::repeat("?")
-                .take(todo_ids.len())
+            let placeholders = std::iter::repeat_n("?", todo_ids.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             let delete_sql = format!("DELETE FROM todos WHERE id NOT IN ({placeholders})");
