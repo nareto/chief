@@ -89,6 +89,8 @@ pub async fn run() -> Result<()> {
         cli.allow_origins.clone()
     };
 
+    let cors_layer = build_cors_layer(&effective_allow_origins)?;
+
     let scheduler = Scheduler::new(registry, max_agents_per_project);
     let state = Arc::new(AppState {
         service: ApiService::new(scheduler, default_agents_per_project),
@@ -120,9 +122,9 @@ pub async fn run() -> Result<()> {
                     .on_response(DefaultOnResponse::new().level(Level::INFO))
                     .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
             )
-            .layer(build_cors_layer(&cli.allow_origins)?)
+            .layer(cors_layer)
     } else {
-        build_router(state).layer(build_cors_layer(&cli.allow_origins)?)
+        build_router(state).layer(cors_layer)
     };
     let app = if cli.frontend_dir.exists() {
         app.fallback_service(ServeDir::new(&cli.frontend_dir))
@@ -141,21 +143,15 @@ pub async fn run() -> Result<()> {
 }
 
 fn build_cors_layer(allow_origins: &[String]) -> Result<CorsLayer> {
-    let effective = if allow_origins.is_empty() {
-        vec!["http://localhost:3000".to_owned()]
-    } else {
-        allow_origins.to_vec()
-    };
-
     let base = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
         .allow_headers(Any);
 
-    if effective.iter().any(|origin| origin == "*") {
+    if allow_origins.iter().any(|origin| origin == "*") {
         return Ok(base.allow_origin(Any));
     }
 
-    let parsed = effective
+    let parsed = allow_origins
         .iter()
         .map(|origin| {
             origin

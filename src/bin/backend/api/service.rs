@@ -207,16 +207,10 @@ impl ApiService {
             return Err(ApiError::unprocessable("todo text cannot be empty"));
         }
 
-        let updated = context.store.update_todo(todo_id, todo).map_err(|err| {
-            let message = err.to_string();
-            if message.contains("not found") {
-                ApiError::not_found(message)
-            } else if message.contains("already exists") {
-                ApiError::unprocessable(message)
-            } else {
-                ApiError::internal(err)
-            }
-        })?;
+        let updated = context
+            .store
+            .update_todo(todo_id, todo)
+            .map_err(ApiError::classify_store_error)?;
 
         Ok(TodoResponse { todo: updated })
     }
@@ -228,14 +222,10 @@ impl ApiService {
     ) -> Result<MessageResponse, ApiError> {
         let context = self.project_context(project).await?;
 
-        context.store.delete_todo(todo_id).map_err(|err| {
-            let message = err.to_string();
-            if message.contains("not found") {
-                ApiError::not_found(message)
-            } else {
-                ApiError::internal(err)
-            }
-        })?;
+        context
+            .store
+            .delete_todo(todo_id)
+            .map_err(ApiError::classify_store_error)?;
 
         Ok(MessageResponse {
             message: format!("deleted todo '{todo_id}'"),
@@ -900,14 +890,7 @@ impl ApiService {
         self.scheduler
             .get_project_context(project)
             .await
-            .map_err(|err| {
-                let message = err.to_string();
-                if message.contains("not found") {
-                    ApiError::not_found(message)
-                } else {
-                    ApiError::internal(err)
-                }
-            })
+            .map_err(ApiError::classify_store_error)
     }
 }
 
