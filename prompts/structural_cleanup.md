@@ -1,11 +1,7 @@
-Your task is to review the whole codebase and clean it up, without changing observable behaviour. Look out for:
+Your task is to review the whole codebase and refactor as needed, without changing observable behaviour. 
 
-- mechanical fixes:
-    - style clashing: e.g. snake_case and camelCase
-    - dead code: unused imports, unreachable branches, functions or variables that are never used
-    - inconsistent error handling: mixing try/catch with returning errors, silently swallowing exceptions
-- structural fixes:
-    - unhealthy length: functions, classes or files that are too long and should be broken up into multiple parts
+Look out for structural fixes: break up oversized files, extract cohesive modules and subsystems, rename for clarity, eliminate duplication across module boundaries, and simplify tangled code paths. More examples of stuff to fix: 
+    - unhealthy length: functions, classes or files that are too long and should be broken up into multiple parts. Approximate target (not hard rules): files at most ~500 lines, functions at most ~80 lines
     - security naivety: no input validation, secrets like API keys hard-coded
     - spaghetti code: unclear, intricated codepaths
     - codebase fragmentation: mix of different, overlapping patterns or styles 
@@ -15,7 +11,6 @@ Your task is to review the whole codebase and clean it up, without changing obse
     - boilerplate overload: excessive use of design patterns where they aren't needed
     - project structure clash: conflicting patterns for directory and modules structure or file naming
     - mock data leftovers: hard-coded variables, unfinished "TODO" comments
-
 
 The result should in principle adhere to best clean code principles (but do not obsess over this):
 - Meaningful names that accurately represent the actual role in the code logic
@@ -27,12 +22,9 @@ The result should in principle adhere to best clean code principles (but do not 
 
 Guardrails you NEED to respect:
 - Ensure all tests pass 
-- Do not modify existing tests, unless there is no other way 
+- You may update test imports, module paths, and helper locations to match new structure, but do not change what any test asserts or the scenarios it covers.
 - Do not alter outward-facing interfaces like API routes, CLI flags, config schema, exported symbols, DB schema...
-- Do not alter program logic
+- Do not change what the code does (but you are free to change how it's organized)
 - Do not alter UX flow
 
-
 If you find the existing implementation to be sufficinetly clean, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the todo is properly done and we can move on. 
-
-When in doubt about a change, don't make it.
