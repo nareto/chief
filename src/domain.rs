@@ -191,16 +191,10 @@ impl Todo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TodoFile {
     #[serde(default)]
     pub todos: Vec<Todo>,
-}
-
-impl Default for TodoFile {
-    fn default() -> Self {
-        Self { todos: Vec::new() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

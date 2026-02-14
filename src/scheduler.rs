@@ -218,8 +218,8 @@ impl Scheduler {
             })
             .map(|job| job.run_id);
 
-        if let Some(run_id) = run_id {
-            if let Err(err) = context.log_project_event(
+        if let Some(run_id) = run_id
+            && let Err(err) = context.log_project_event(
                 &run_id,
                 None,
                 None,
@@ -228,13 +228,13 @@ impl Scheduler {
                 EventType::Job,
                 format!("Stop requested for {project_name}; cancelling active work now"),
                 BTreeMap::new(),
-            ) {
-                warn!(
-                    project = %project_name,
-                    error = %err,
-                    "failed to log immediate stop-requested event"
-                );
-            }
+            )
+        {
+            warn!(
+                project = %project_name,
+                error = %err,
+                "failed to log immediate stop-requested event"
+            );
         }
 
         Ok(())

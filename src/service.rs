@@ -632,20 +632,20 @@ impl ChiefEngine {
             |attempt, total, err| on_retry(attempt, total, err),
         ) {
             Ok(outcome) => {
-                if let Some(commit_hash) = outcome.commit_hash.as_deref() {
-                    if let Err(err) = self.project.store.update_todo_status(
+                if let Some(commit_hash) = outcome.commit_hash.as_deref()
+                    && let Err(err) = self.project.store.update_todo_status(
                         &todo.id,
                         TodoStatus::Done,
                         Some(commit_hash),
-                    ) {
-                        self.log_state_update_error(
-                            run_id,
-                            Some(&job.id),
-                            Some(&todo.id),
-                            "failed to mark todo done",
-                            &err,
-                        );
-                    }
+                    )
+                {
+                    self.log_state_update_error(
+                        run_id,
+                        Some(&job.id),
+                        Some(&todo.id),
+                        "failed to mark todo done",
+                        &err,
+                    );
                 }
                 if let Err(err) = self.project.set_job_status(job, JobStatus::Completed, None) {
                     self.log_state_update_error(
@@ -1082,7 +1082,7 @@ fn retry_transient_lock_contention_with_delay<T, F, H, S>(
     initial_error: anyhow::Error,
     mut operation: F,
     mut on_retry: H,
-    mut sleep: S,
+    sleep: S,
 ) -> OrchestratorResult<T>
 where
     F: FnMut() -> OrchestratorResult<T>,
@@ -1109,7 +1109,7 @@ where
         |attempt, _total, err, delay| {
             on_retry(attempt, TRANSIENT_LOCK_RETRY_ATTEMPTS, err, delay);
         },
-        |delay| sleep(delay),
+        sleep,
     );
 
     match outcome {
@@ -1129,13 +1129,13 @@ fn is_transient_lock_contention_error(err: &anyhow::Error) -> bool {
     }
 
     for cause in err.chain() {
-        if let Some(io_err) = cause.downcast_ref::<io::Error>() {
-            if matches!(
+        if let Some(io_err) = cause.downcast_ref::<io::Error>()
+            && matches!(
                 io_err.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-            ) {
-                return true;
-            }
+            )
+        {
+            return true;
         }
 
         if has_transient_lock_contention_signature(&cause.to_string()) {
@@ -1156,21 +1156,21 @@ fn has_transient_lock_contention_signature(message: &str) -> bool {
 
 fn is_known_unrecoverable_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
-        if let Some(io_err) = cause.downcast_ref::<io::Error>() {
-            if matches!(
+        if let Some(io_err) = cause.downcast_ref::<io::Error>()
+            && matches!(
                 io_err.kind(),
                 io::ErrorKind::PermissionDenied
                     | io::ErrorKind::NotFound
                     | io::ErrorKind::ReadOnlyFilesystem
-            ) {
-                return true;
-            }
+            )
+        {
+            return true;
         }
 
-        if let Some(sqlite_err) = cause.downcast_ref::<rusqlite::Error>() {
-            if is_unrecoverable_sqlite_error(sqlite_err) {
-                return true;
-            }
+        if let Some(sqlite_err) = cause.downcast_ref::<rusqlite::Error>()
+            && is_unrecoverable_sqlite_error(sqlite_err)
+        {
+            return true;
         }
     }
 

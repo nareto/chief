@@ -351,7 +351,7 @@ impl<'a> FlowExecution<'a> {
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !tail.trim().is_empty() {
-                    line.push_str("\n");
+                    line.push('\n');
                     line.push_str(&tail);
                 }
             }
@@ -886,12 +886,13 @@ fn suite_name_from_event(event: &EventRecord) -> Option<String> {
         return Some(suite);
     }
 
-    if let Some(open) = event.msg.rfind('(') {
-        if event.msg.ends_with(')') && open + 1 < event.msg.len() - 1 {
-            let suite = event.msg[open + 1..event.msg.len() - 1].trim();
-            if !suite.is_empty() {
-                return Some(suite.to_owned());
-            }
+    if let Some(open) = event.msg.rfind('(')
+        && event.msg.ends_with(')')
+        && open + 1 < event.msg.len() - 1
+    {
+        let suite = event.msg[open + 1..event.msg.len() - 1].trim();
+        if !suite.is_empty() {
+            return Some(suite.to_owned());
         }
     }
 
@@ -1270,9 +1271,10 @@ impl Default for TddFlow {
 
 impl TddFlow {
     pub fn with_loop_policy(max_loop: usize, required_stable_iterations: usize) -> Self {
-        let mut red_loop = ConvergenceLoopPolicy::default();
-        red_loop.max_loops = max_loop.max(1);
-        red_loop.required_stable_iterations = required_stable_iterations.max(1);
+        let red_loop = ConvergenceLoopPolicy {
+            max_loops: max_loop.max(1),
+            required_stable_iterations: required_stable_iterations.max(1),
+        };
         Self {
             red_loop,
             green_loop: UntilPassLoopPolicy {
@@ -1361,9 +1363,10 @@ impl Default for SinglePromptFlow {
 
 impl SinglePromptFlow {
     pub fn with_loop_policy(max_loop: usize, required_stable_iterations: usize) -> Self {
-        let mut loop_policy = ConvergenceLoopPolicy::default();
-        loop_policy.max_loops = max_loop.max(1);
-        loop_policy.required_stable_iterations = required_stable_iterations.max(1);
+        let loop_policy = ConvergenceLoopPolicy {
+            max_loops: max_loop.max(1),
+            required_stable_iterations: required_stable_iterations.max(1),
+        };
         Self { loop_policy }
     }
 }
@@ -2645,8 +2648,10 @@ mod tests {
         let git = NoopGitOps {
             root: project_dir.clone(),
         };
-        let mut chief_config = ChiefConfig::default();
-        chief_config.agent_log_max_output_lines = 2;
+        let chief_config = ChiefConfig {
+            agent_log_max_output_lines: 2,
+            ..ChiefConfig::default()
+        };
 
         let execution = FlowExecution {
             run_id: "run-1".to_owned(),
@@ -2724,8 +2729,10 @@ mod tests {
         let git = NoopGitOps {
             root: project_dir.clone(),
         };
-        let mut chief_config = ChiefConfig::default();
-        chief_config.agent_log_max_output_lines = 2;
+        let chief_config = ChiefConfig {
+            agent_log_max_output_lines: 2,
+            ..ChiefConfig::default()
+        };
 
         let execution = FlowExecution {
             run_id: "run-1".to_owned(),
@@ -2874,8 +2881,10 @@ mod tests {
         let git = NoopGitOps {
             root: project_dir.clone(),
         };
-        let mut chief_config = ChiefConfig::default();
-        chief_config.agent_log_max_output_lines = 2;
+        let chief_config = ChiefConfig {
+            agent_log_max_output_lines: 2,
+            ..ChiefConfig::default()
+        };
 
         let execution = FlowExecution {
             run_id: "run-1".to_owned(),

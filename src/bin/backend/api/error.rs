@@ -75,9 +75,9 @@ impl ApiError {
         if let Some(reset) = db_reset_required_from_anyhow(&error) {
             return Self {
                 status: StatusCode::CONFLICT,
-                message: format!(
+                message:
                     "chief.db is inconsistent for this project. Reset is required before continuing."
-                ),
+                        .to_owned(),
                 code: Some("db_reset_required".to_owned()),
                 details: Some(serde_json::json!({
                     "db_path": reset.db_path.display().to_string(),
