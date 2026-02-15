@@ -557,6 +557,7 @@ mod tests {
             cache_key_files: vec!["package-lock.json".to_owned()],
             cache_mode: SuiteCacheMode::Copy,
             post_green_command: None,
+            cleanup_command: None,
             command_timeout_seconds: None,
             lint_command: None,
             lint_fix_command: None,

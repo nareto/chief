@@ -152,6 +152,7 @@ struct SuiteExecutionFingerprint {
     lint_command: Option<String>,
     lint_fix_command: Option<String>,
     post_green_command: Option<String>,
+    cleanup_command: Option<String>,
     test_init: Option<String>,
     test_setup: Option<String>,
     cache_paths: Vec<String>,
@@ -281,6 +282,23 @@ pub fn execute_suite_command(
     })
 }
 
+pub fn execute_suite_cleanup_command(
+    cleanup_command: Option<&str>,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    timeout_seconds: Option<u64>,
+) -> Result<Option<AgentOutput>> {
+    let Some(command) = cleanup_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let cancel_signal = Arc::new(AtomicBool::new(false));
+    let out = execute_suite_command(command, cwd, env, &cancel_signal, timeout_seconds)?;
+    Ok(Some(out))
+}
+
 pub fn configure_process_group(process: &mut Command) {
     #[cfg(unix)]
     {
@@ -386,6 +404,7 @@ impl<'a> FlowExecution<'a> {
                 lint_command: suite.lint_command,
                 lint_fix_command: suite.lint_fix_command,
                 post_green_command: suite.post_green_command,
+                cleanup_command: suite.cleanup_command,
                 test_init: suite.test_init,
                 test_setup: suite.test_setup,
                 cache_paths: suite.cache_paths,
@@ -756,7 +775,59 @@ impl<'a> FlowExecution<'a> {
             &cwd,
             timeout_seconds,
         )?;
-        self.run_suite_command(&cmd, &cwd, &suite.env, timeout_seconds)
+        let test_output = self.run_suite_command(&cmd, &cwd, &suite.env, timeout_seconds);
+        let cleanup_output = execute_suite_cleanup_command(
+            suite.cleanup_command.as_deref(),
+            &cwd,
+            &suite.env,
+            Some(timeout_seconds),
+        );
+
+        match cleanup_output {
+            Ok(Some(out)) => {
+                self.log_event(
+                    if out.exit_code == 0 {
+                        "info"
+                    } else {
+                        "warning"
+                    },
+                    Some(phase),
+                    EventType::Msg,
+                    format!(
+                        "Cleanup command {} ({})",
+                        if out.exit_code == 0 {
+                            "passed"
+                        } else {
+                            "failed"
+                        },
+                        suite.name
+                    ),
+                    payload_from_json(json!({
+                        "suite": suite.name,
+                        "kind": "cleanup",
+                        "command": out.command,
+                        "exit_code": out.exit_code,
+                        "output": out.merged_output,
+                    })),
+                )?;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.log_event(
+                    "warning",
+                    Some(phase),
+                    EventType::Msg,
+                    format!("Cleanup command failed to execute ({})", suite.name),
+                    payload_from_json(json!({
+                        "suite": suite.name,
+                        "kind": "cleanup",
+                        "error": err.to_string(),
+                    })),
+                )?;
+            }
+        }
+
+        test_output
     }
 
     pub fn run_lint_suite(
@@ -2520,6 +2591,7 @@ mod tests {
             cache_key_files: Vec::new(),
             cache_mode: crate::config::SuiteCacheMode::Copy,
             post_green_command: None,
+            cleanup_command: None,
             command_timeout_seconds: None,
             lint_command: None,
             lint_fix_command: None,
@@ -2667,6 +2739,61 @@ mod tests {
         assert!(
             marker_file.exists(),
             "all suites should run even when an earlier suite fails"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn run_test_suite_executes_cleanup_command_even_on_test_failure() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "cleanup should run after test command".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+        let cleanup_marker = project_dir.join("cleanup-ran.txt");
+
+        let execution = FlowExecution {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let mut suite = suite_named_with_test_command("frontend", "exit 1");
+        suite.cleanup_command = Some("printf cleanup > cleanup-ran.txt".to_owned());
+
+        let out = execution
+            .run_test_suite(&suite, Phase::SinglePrompt)
+            .expect("test command should complete with nonzero exit");
+        assert_eq!(out.exit_code, 1, "test result should be preserved");
+        assert!(
+            cleanup_marker.exists(),
+            "cleanup command should run even when test command fails"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
