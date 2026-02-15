@@ -64,6 +64,15 @@ pub async fn stop_project(
     Ok(Json(state.service.stop_project(&project).await?))
 }
 
+pub async fn stop_readiness_check(
+    Path(project): Path<String>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::types::MessageResponse>, ApiError> {
+    auth::require_sensitive_access(&state, &headers)?;
+    Ok(Json(state.service.stop_readiness_check(&project).await?))
+}
+
 pub async fn get_todos(
     Path(project): Path<String>,
     State(state): State<Arc<AppState>>,

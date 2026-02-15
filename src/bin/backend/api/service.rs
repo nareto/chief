@@ -2,16 +2,17 @@ use crate::api::error::ApiError;
 use crate::api::types::{
     ActiveJobResponse, AddTodoRequest, ChiefYamlResponse, EventsQuery, EventsResponse,
     FileDiffQuery, FileDiffResponse, JobsResponse, LogQuery, MessageResponse, PhaseIteration,
-    ProjectsResponse, RequirementsRequest, RequirementsResponse, RunSuiteCheckRequest,
-    RunSuiteCheckResponse, RunSuiteCheckStreamEvent, StartProjectRequest, StateResponse,
-    SuiteCheckOutputStream, TodoProgress, TodoResponse, TodosResponse, UpdateChiefYamlRequest,
-    UpdateTodoRequest,
+    ProjectReadinessResponse, ProjectsResponse, RequirementsRequest, RequirementsResponse,
+    RunSuiteCheckRequest, RunSuiteCheckResponse, RunSuiteCheckStreamEvent, StartProjectRequest,
+    StateResponse, SuiteCheckOutputStream, TodoProgress, TodoResponse, TodosResponse,
+    UpdateChiefYamlRequest, UpdateTodoRequest,
 };
 use anyhow::{Context, anyhow};
 use axum::body::Body;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
+use chief::config::TestSuiteConfig;
 use chief::domain::{EventType, JobStatus, Phase, RunExitStatus, Todo, TodoStatus};
 use chief::flow::{
     FlowKind, SuiteCommandKind, configure_process_group, execute_suite_command, suite_command_cwd,
@@ -20,13 +21,13 @@ use chief::flow::{
 use chief::git::GitOps;
 use chief::scheduler::Scheduler;
 use chief::service::ChiefEngine;
-use chief::storage::EventQuery;
+use chief::storage::{EventQuery, ReadinessStatus};
 use futures_util::stream;
-use std::collections::BTreeMap;
-use std::collections::HashSet;
+use serde_json::json;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -41,6 +42,7 @@ use uuid::Uuid;
 pub struct ApiService {
     scheduler: Scheduler,
     default_agents_per_project: usize,
+    readiness_cancel_signals: Arc<tokio::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 struct SuiteCheckPlan {
@@ -53,14 +55,60 @@ struct SuiteCheckPlan {
     timeout_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessCommandKind {
+    TestInit,
+    TestSetup,
+    Lint,
+    Test,
+}
+
+impl ReadinessCommandKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TestInit => "test_init",
+            Self::TestSetup => "test_setup",
+            Self::Lint => "lint",
+            Self::Test => "test",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReadinessCommandPlan {
+    suite_name: String,
+    kind: ReadinessCommandKind,
+    command_template: String,
+    uses_target_placeholder: bool,
+    target_candidates: Vec<String>,
+    cwd: PathBuf,
+    cwd_display: String,
+    env: BTreeMap<String, String>,
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ReadinessCommandResult {
+    suite_name: String,
+    kind: ReadinessCommandKind,
+    command: String,
+    cwd: String,
+    target: Option<String>,
+    exit_code: i32,
+    blocking_failure: bool,
+    output_tail: String,
+}
+
 const RETRY_CLEANUP_DISCARDED_MSG_PREFIX: &str =
     "Retry cleanup: discarded local git changes before loop";
+const READINESS_UNCHECKED_SUMMARY: &str = "Readiness check has not run yet.";
 
 impl ApiService {
     pub fn new(scheduler: Scheduler, default_agents_per_project: usize) -> Self {
         Self {
             scheduler,
             default_agents_per_project: default_agents_per_project.max(1),
+            readiness_cancel_signals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -104,6 +152,12 @@ impl ApiService {
             .parse::<FlowKind>()
             .map_err(|err| ApiError::unprocessable(err.to_string()))?;
 
+        let start_anyway = payload.start_anyway.unwrap_or(false);
+        if !start_anyway {
+            self.run_and_persist_readiness_check(&project, &context)
+                .await?;
+        }
+
         self.scheduler
             .start_project(project.clone(), agents, flow_kind, payload.model)
             .await
@@ -126,6 +180,31 @@ impl ApiService {
             .map_err(ApiError::internal)?;
         Ok(MessageResponse {
             message: format!("stop requested for project {project}"),
+        })
+    }
+
+    pub async fn stop_readiness_check(&self, project: &str) -> Result<MessageResponse, ApiError> {
+        let context = self.project_context(project).await?;
+        let signal = {
+            let signals = self.readiness_cancel_signals.lock().await;
+            signals.get(project).cloned()
+        };
+
+        let Some(signal) = signal else {
+            return Err(ApiError::unprocessable(
+                "no readiness check is currently running for this project",
+            ));
+        };
+
+        signal.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = context.store.set_readiness_result(
+            ReadinessStatus::NotReady,
+            "Not ready: readiness check cancelled by user.",
+            &json!({ "cancelled_by_user": true }),
+        );
+
+        Ok(MessageResponse {
+            message: format!("requested readiness-check stop for project {project}"),
         })
     }
 
@@ -335,6 +414,10 @@ impl ApiService {
         let chief_db_size_bytes = fs::metadata(&context.store.db_path)
             .map(|metadata| metadata.len())
             .ok();
+        let readiness = context
+            .store
+            .get_readiness_state()
+            .map_err(ApiError::internal)?;
 
         let active_job = jobs
             .iter()
@@ -401,6 +484,19 @@ impl ApiService {
                 total: todos.len(),
             },
             active_job,
+            readiness: ProjectReadinessResponse {
+                status: readiness.status.as_str().to_owned(),
+                summary: if readiness.summary.trim().is_empty() {
+                    READINESS_UNCHECKED_SUMMARY.to_owned()
+                } else {
+                    readiness.summary
+                },
+                checking_started_at: readiness
+                    .checking_started_at
+                    .map(|value| value.to_rfc3339()),
+                checked_at: readiness.checked_at.map(|value| value.to_rfc3339()),
+                updated_at: readiness.updated_at.to_rfc3339(),
+            },
         })
     }
 
@@ -607,6 +703,140 @@ impl ApiService {
         Ok(MessageResponse {
             message: "chief.yaml updated".to_owned(),
         })
+    }
+
+    async fn run_and_persist_readiness_check(
+        &self,
+        project: &str,
+        context: &chief::service::ProjectContext,
+    ) -> Result<(), ApiError> {
+        let command_plans = build_readiness_command_plans(context);
+        let suite_count = context.chief_yaml.suites.len();
+        let command_count = command_plans.len();
+        let checking_summary = if suite_count == 0 {
+            "Checking project readiness (no suites configured)".to_owned()
+        } else {
+            format!("Checking project readiness across {suite_count} suite(s)")
+        };
+
+        context
+            .store
+            .set_readiness_checking(&checking_summary)
+            .map_err(ApiError::internal)?;
+
+        info!(
+            project,
+            suites = suite_count,
+            commands = command_count,
+            "running project readiness check before start"
+        );
+
+        let cancel_signal = self
+            .register_readiness_cancel_signal(project)
+            .await
+            .map_err(ApiError::internal)?;
+        let execution = tokio::task::spawn_blocking({
+            let cancel_signal = cancel_signal.clone();
+            move || execute_readiness_command_plans(command_plans, cancel_signal)
+        })
+        .await;
+        self.clear_readiness_cancel_signal(project, &cancel_signal)
+            .await;
+
+        let results = match execution {
+            Ok(Ok(results)) => results,
+            Ok(Err(err)) => {
+                let cancelled_by_user = err
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("cancelled by user");
+                let summary = if cancelled_by_user {
+                    "Not ready: readiness check cancelled by user.".to_owned()
+                } else {
+                    format!("Not ready: readiness check execution failed ({err})")
+                };
+                let details = json!({
+                    "error": err.to_string(),
+                    "commands_total": command_count,
+                    "suite_count": suite_count,
+                    "cancelled_by_user": cancelled_by_user,
+                });
+                let _ = context.store.set_readiness_result(
+                    ReadinessStatus::NotReady,
+                    &summary,
+                    &details,
+                );
+                if cancelled_by_user {
+                    return Err(ApiError::unprocessable(summary));
+                }
+                return Err(ApiError::internal(err));
+            }
+            Err(err) => {
+                let summary = format!("Not ready: readiness check task failed ({err})");
+                let details = json!({
+                    "error": err.to_string(),
+                    "commands_total": command_count,
+                    "suite_count": suite_count,
+                });
+                let _ = context.store.set_readiness_result(
+                    ReadinessStatus::NotReady,
+                    &summary,
+                    &details,
+                );
+                return Err(ApiError::internal(anyhow!(
+                    "readiness check task failed: {err}"
+                )));
+            }
+        };
+
+        let failed_commands = results
+            .iter()
+            .filter(|result| result.blocking_failure)
+            .count();
+        let summary = build_readiness_summary(&results, suite_count);
+        let details = build_readiness_details(&results, suite_count);
+        let final_status = if failed_commands == 0 {
+            ReadinessStatus::Ready
+        } else {
+            ReadinessStatus::NotReady
+        };
+
+        context
+            .store
+            .set_readiness_result(final_status, &summary, &details)
+            .map_err(ApiError::internal)?;
+
+        info!(
+            project,
+            suites = suite_count,
+            commands = results.len(),
+            failed_commands,
+            status = final_status.as_str(),
+            "project readiness check finished"
+        );
+
+        if final_status == ReadinessStatus::Ready {
+            return Ok(());
+        }
+
+        let first_failure = results
+            .iter()
+            .find(|result| result.blocking_failure)
+            .map(|result| {
+                format!(
+                    "suite '{}' {} exited {}",
+                    result.suite_name,
+                    result.kind.as_str(),
+                    result.exit_code
+                )
+            })
+            .unwrap_or_default();
+
+        Err(ApiError::unprocessable(if first_failure.is_empty() {
+            summary
+        } else {
+            format!("{summary}. First failed command: {first_failure}")
+        }))
     }
 
     pub async fn run_suite_check(
@@ -884,6 +1114,29 @@ impl ApiService {
         Ok(context.store)
     }
 
+    async fn register_readiness_cancel_signal(
+        &self,
+        project: &str,
+    ) -> anyhow::Result<Arc<AtomicBool>> {
+        let signal = Arc::new(AtomicBool::new(false));
+        let mut signals = self.readiness_cancel_signals.lock().await;
+        if let Some(existing) = signals.insert(project.to_owned(), signal.clone()) {
+            existing.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(signal)
+    }
+
+    async fn clear_readiness_cancel_signal(&self, project: &str, signal: &Arc<AtomicBool>) {
+        let mut signals = self.readiness_cancel_signals.lock().await;
+        let should_remove = signals
+            .get(project)
+            .map(|current| Arc::ptr_eq(current, signal))
+            .unwrap_or(false);
+        if should_remove {
+            signals.remove(project);
+        }
+    }
+
     async fn project_context(
         &self,
         project: &str,
@@ -893,6 +1146,426 @@ impl ApiService {
             .await
             .map_err(ApiError::classify_store_error)
     }
+}
+
+fn build_readiness_command_plans(
+    context: &chief::service::ProjectContext,
+) -> Vec<ReadinessCommandPlan> {
+    let mut plans = Vec::new();
+    let default_timeout = context.chief_yaml.chief.suite_command_timeout_seconds;
+
+    for suite in &context.chief_yaml.suites {
+        let mut target_candidates = collect_readiness_targets(&context.project_dir, suite);
+        if let Some(default_target) = normalized_default_target(suite)
+            && !target_candidates.contains(&default_target)
+        {
+            target_candidates.push(default_target);
+        }
+        let timeout_seconds = suite
+            .command_timeout_seconds
+            .unwrap_or(default_timeout)
+            .max(1);
+        let cwd = suite_command_cwd(&context.project_dir, suite);
+        let cwd_display = cwd.display().to_string();
+
+        if let Some(command_template) = suite
+            .test_init
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_owned)
+        {
+            plans.push(ReadinessCommandPlan {
+                suite_name: suite.name.clone(),
+                kind: ReadinessCommandKind::TestInit,
+                uses_target_placeholder: command_template.contains("{target}"),
+                command_template,
+                target_candidates: target_candidates.clone(),
+                cwd: cwd.clone(),
+                cwd_display: cwd_display.clone(),
+                env: suite.env.clone(),
+                timeout_seconds,
+            });
+        }
+
+        if let Some(command_template) = suite
+            .test_setup
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_owned)
+        {
+            plans.push(ReadinessCommandPlan {
+                suite_name: suite.name.clone(),
+                kind: ReadinessCommandKind::TestSetup,
+                uses_target_placeholder: command_template.contains("{target}"),
+                command_template,
+                target_candidates: target_candidates.clone(),
+                cwd: cwd.clone(),
+                cwd_display: cwd_display.clone(),
+                env: suite.env.clone(),
+                timeout_seconds,
+            });
+        }
+
+        if let Some(command_template) = suite
+            .lint_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_owned)
+        {
+            plans.push(ReadinessCommandPlan {
+                suite_name: suite.name.clone(),
+                kind: ReadinessCommandKind::Lint,
+                uses_target_placeholder: command_template.contains("{target}"),
+                command_template,
+                target_candidates: target_candidates.clone(),
+                cwd: cwd.clone(),
+                cwd_display: cwd_display.clone(),
+                env: suite.env.clone(),
+                timeout_seconds,
+            });
+        }
+
+        if let Some(command_template) =
+            Some(suite.test_command.trim().to_owned()).filter(|command| !command.is_empty())
+        {
+            plans.push(ReadinessCommandPlan {
+                suite_name: suite.name.clone(),
+                kind: ReadinessCommandKind::Test,
+                uses_target_placeholder: command_template.contains("{target}"),
+                command_template,
+                target_candidates,
+                cwd,
+                cwd_display,
+                env: suite.env.clone(),
+                timeout_seconds,
+            });
+        }
+    }
+
+    plans
+}
+
+fn normalized_default_target(suite: &TestSuiteConfig) -> Option<String> {
+    suite
+        .default_target
+        .as_deref()
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .map(str::to_owned)
+}
+
+fn collect_readiness_targets(project_dir: &Path, suite: &TestSuiteConfig) -> Vec<String> {
+    let patterns = suite
+        .file_patterns
+        .iter()
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .collect::<Vec<_>>();
+
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let tracked_files = git_list_tracked_files(project_dir, suite.test_root.trim());
+    if tracked_files.is_empty() {
+        return Vec::new();
+    }
+
+    let root_prefix = normalized_root_prefix(suite.test_root.trim());
+    let mut targets = std::collections::BTreeSet::new();
+    for file in tracked_files {
+        let relative = strip_root_prefix(&file, root_prefix.as_deref()).unwrap_or(file.as_str());
+        let matches_pattern = patterns
+            .iter()
+            .any(|pattern| pattern.matches(relative) || pattern.matches(&file));
+        if !matches_pattern {
+            continue;
+        }
+
+        let selected = if suite.strip_root_from_target {
+            relative.to_owned()
+        } else {
+            file.clone()
+        };
+        if !selected.trim().is_empty() {
+            targets.insert(selected);
+        }
+    }
+    targets.into_iter().collect()
+}
+
+fn git_list_tracked_files(project_dir: &Path, test_root: &str) -> Vec<String> {
+    let output = if test_root.is_empty() || test_root == "." {
+        Command::new("git")
+            .arg("-c")
+            .arg("safe.directory=*")
+            .args(["ls-files", "--"])
+            .current_dir(project_dir)
+            .output()
+    } else {
+        Command::new("git")
+            .arg("-c")
+            .arg("safe.directory=*")
+            .args(["ls-files", "--", test_root])
+            .current_dir(project_dir)
+            .output()
+    };
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let mut files = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn normalized_root_prefix(test_root: &str) -> Option<String> {
+    let trimmed = test_root.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return None;
+    }
+    Some(trimmed.trim_end_matches('/').to_owned())
+}
+
+fn strip_root_prefix<'a>(path: &'a str, root_prefix: Option<&str>) -> Option<&'a str> {
+    let Some(root_prefix) = root_prefix else {
+        return Some(path);
+    };
+
+    if path == root_prefix {
+        return Some("");
+    }
+    let prefix = format!("{root_prefix}/");
+    path.strip_prefix(&prefix)
+}
+
+fn replace_target_placeholder(command_template: &str, target: &str) -> String {
+    command_template.replace("{target}", target)
+}
+
+fn execute_readiness_command_plans(
+    plans: Vec<ReadinessCommandPlan>,
+    cancel_signal: Arc<AtomicBool>,
+) -> anyhow::Result<Vec<ReadinessCommandResult>> {
+    let mut results = Vec::with_capacity(plans.len());
+
+    for plan in plans {
+        if cancel_signal.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("readiness check cancelled by user"));
+        }
+
+        if !plan.cwd.exists() {
+            results.push(ReadinessCommandResult {
+                suite_name: plan.suite_name,
+                kind: plan.kind,
+                command: plan.command_template,
+                cwd: plan.cwd_display,
+                target: None,
+                exit_code: 127,
+                blocking_failure: true,
+                output_tail: format!("working directory does not exist: {}", plan.cwd.display()),
+            });
+            continue;
+        }
+
+        if !plan.cwd.is_dir() {
+            results.push(ReadinessCommandResult {
+                suite_name: plan.suite_name,
+                kind: plan.kind,
+                command: plan.command_template,
+                cwd: plan.cwd_display,
+                target: None,
+                exit_code: 127,
+                blocking_failure: true,
+                output_tail: format!(
+                    "working directory is not a directory: {}",
+                    plan.cwd.display()
+                ),
+            });
+            continue;
+        }
+
+        if !plan.uses_target_placeholder {
+            results.push(run_readiness_command_attempt(
+                &plan,
+                plan.command_template.clone(),
+                None,
+                &cancel_signal,
+            ));
+            continue;
+        }
+
+        if plan.target_candidates.is_empty() {
+            results.push(ReadinessCommandResult {
+                suite_name: plan.suite_name,
+                kind: plan.kind,
+                command: plan.command_template,
+                cwd: plan.cwd_display,
+                target: None,
+                exit_code: 127,
+                blocking_failure: true,
+                output_tail: "command uses {target}, but no file_patterns target matched and default_target is not set".to_owned(),
+            });
+            continue;
+        }
+
+        let mut selected: Option<ReadinessCommandResult> = None;
+        for target in &plan.target_candidates {
+            if cancel_signal.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(anyhow!("readiness check cancelled by user"));
+            }
+            let command = replace_target_placeholder(&plan.command_template, target);
+            let attempt =
+                run_readiness_command_attempt(&plan, command, Some(target.clone()), &cancel_signal);
+            let runnable = !attempt.blocking_failure;
+            selected = Some(attempt);
+            if runnable {
+                break;
+            }
+        }
+        if let Some(result) = selected {
+            results.push(result);
+        }
+    }
+
+    Ok(results)
+}
+
+fn run_readiness_command_attempt(
+    plan: &ReadinessCommandPlan,
+    command: String,
+    target: Option<String>,
+    cancel_signal: &Arc<AtomicBool>,
+) -> ReadinessCommandResult {
+    let out = execute_suite_command(
+        &command,
+        &plan.cwd,
+        &plan.env,
+        cancel_signal,
+        Some(plan.timeout_seconds),
+    );
+
+    match out {
+        Ok(out) => ReadinessCommandResult {
+            suite_name: plan.suite_name.clone(),
+            kind: plan.kind,
+            command: out.command,
+            cwd: plan.cwd_display.clone(),
+            target,
+            exit_code: out.exit_code,
+            blocking_failure: readiness_exit_code_is_blocking(plan.kind, out.exit_code),
+            output_tail: readiness_output_tail(&out.merged_output),
+        },
+        Err(err) => ReadinessCommandResult {
+            suite_name: plan.suite_name.clone(),
+            kind: plan.kind,
+            command,
+            cwd: plan.cwd_display.clone(),
+            target,
+            exit_code: 127,
+            blocking_failure: true,
+            output_tail: readiness_output_tail(&err.to_string()),
+        },
+    }
+}
+
+fn readiness_exit_code_is_blocking(kind: ReadinessCommandKind, exit_code: i32) -> bool {
+    match kind {
+        ReadinessCommandKind::TestInit | ReadinessCommandKind::TestSetup => exit_code != 0,
+        ReadinessCommandKind::Lint | ReadinessCommandKind::Test => !matches!(exit_code, 0 | 1 | 5),
+    }
+}
+
+fn readiness_output_tail(output: &str) -> String {
+    let lines = output
+        .lines()
+        .rev()
+        .take(25)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if lines.chars().count() > 2_000 {
+        let reversed = lines.chars().rev().take(2_000).collect::<String>();
+        return reversed.chars().rev().collect();
+    }
+
+    lines
+}
+
+fn build_readiness_summary(results: &[ReadinessCommandResult], suite_count: usize) -> String {
+    if suite_count == 0 {
+        return "Ready: no suites configured, so readiness check skipped command execution."
+            .to_owned();
+    }
+
+    if results.is_empty() {
+        return format!(
+            "Ready: no runnable suite commands detected across {suite_count} suite(s)."
+        );
+    }
+
+    let failed_commands = results
+        .iter()
+        .filter(|result| result.blocking_failure)
+        .count();
+
+    if failed_commands == 0 {
+        format!(
+            "Ready: validated {} command(s) across {suite_count} suite(s).",
+            results.len()
+        )
+    } else {
+        format!(
+            "Not ready: {} command(s) failed across {} checked command(s).",
+            failed_commands,
+            results.len()
+        )
+    }
+}
+
+fn build_readiness_details(
+    results: &[ReadinessCommandResult],
+    suite_count: usize,
+) -> serde_json::Value {
+    let failed_commands = results
+        .iter()
+        .filter(|result| result.blocking_failure)
+        .count();
+
+    json!({
+        "suite_count": suite_count,
+        "commands_total": results.len(),
+        "commands_failed": failed_commands,
+        "commands": results
+            .iter()
+            .map(|result| json!({
+                "suite": result.suite_name,
+                "kind": result.kind.as_str(),
+                "command": result.command,
+                "cwd": result.cwd,
+                "target": result.target,
+                "exit_code": result.exit_code,
+                "failed": result.blocking_failure,
+                "output_tail": result.output_tail,
+            }))
+            .collect::<Vec<_>>()
+    })
 }
 
 enum SuiteStreamChunk {
@@ -1314,7 +1987,7 @@ mod tests {
     use chief::git::GitOps;
     use chief::scheduler::Scheduler;
     use chief::service::ProjectRegistry;
-    use chief::storage::{EventQuery, ProjectStore};
+    use chief::storage::{EventQuery, ProjectStore, ReadinessStatus};
     use rusqlite::Connection;
     use std::collections::HashMap;
     use std::fs;
@@ -1595,6 +2268,7 @@ mod tests {
                     agents: Some(1),
                     flow: None,
                     model: None,
+                    start_anyway: None,
                 },
             )
             .await
@@ -1652,6 +2326,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_project_blocks_when_readiness_check_detects_broken_suite_command() {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: pending-1
+    todo: Example pending todo
+    expectations: Example expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: single_prompt
+suites:
+  - name: smoke
+    language: rust
+    framework: cargo
+    test_root: .
+    test_command: "missing-ready-check-cmd {target}"
+    default_target: "."
+    lint_command: "echo lint-ok""#,
+        );
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+
+        let err = service
+            .start_project(
+                project_name.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                    start_anyway: None,
+                },
+            )
+            .await
+            .expect_err("start_project should fail when readiness check is not ready");
+
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "readiness check failures should block start with HTTP 422"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        let message = payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.contains("Not ready"),
+            "expected readiness failure message, got: {message}"
+        );
+
+        let readiness = store
+            .get_readiness_state()
+            .expect("readiness state should be persisted");
+        assert_eq!(readiness.status, ReadinessStatus::NotReady);
+        assert!(
+            readiness.checked_at.is_some(),
+            "readiness check should persist completion time"
+        );
+        assert!(
+            readiness.summary.contains("Not ready"),
+            "readiness summary should explain command failures"
+        );
+    }
+
+    #[tokio::test]
     async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
         let workspace = TempDir::new("workspace");
         let project_name = format!("project-{}", Uuid::new_v4());
@@ -1702,6 +2469,7 @@ mod tests {
                     agents: Some(1),
                     flow: None,
                     model: None,
+                    start_anyway: None,
                 },
             )
             .await

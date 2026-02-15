@@ -15,6 +15,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/projects/{project}/stop", post(handlers::stop_project))
         .route(
+            "/api/projects/{project}/readiness/stop",
+            post(handlers::stop_readiness_check),
+        )
+        .route(
             "/api/projects/{project}/todos",
             get(handlers::get_todos).post(handlers::add_todo),
         )
