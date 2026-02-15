@@ -425,6 +425,17 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
         .block_on(service.run_readiness_check(&project_name, args.force))
         .map_err(anyhow::Error::new)?;
 
+    if result.ran {
+        if let Some(stream_output) = service.readiness_stream_snapshot(&project_name) {
+            if !stream_output.trim().is_empty() {
+                print!("{stream_output}");
+                if !stream_output.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+    }
+
     println!("project: {project_name}");
     println!("status: {}", result.readiness.status);
     println!("summary: {}", result.readiness.summary);
