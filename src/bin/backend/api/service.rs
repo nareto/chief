@@ -195,6 +195,8 @@ impl ApiService {
             ));
         }
         context.refresh().map_err(ApiError::internal)?;
+        let chief_yaml_hash =
+            chief_yaml_content_hash(&context.config_path).map_err(ApiError::internal)?;
         let agents = payload
             .agents
             .unwrap_or(self.default_agents_per_project)
@@ -210,8 +212,17 @@ impl ApiService {
 
         let start_anyway = payload.start_anyway.unwrap_or(false);
         if !start_anyway {
-            self.run_and_persist_readiness_check(&project, &context)
-                .await?;
+            let should_run = should_run_readiness_check(&context.store, &chief_yaml_hash)
+                .map_err(ApiError::internal)?;
+            if should_run {
+                self.run_and_persist_readiness_check(&project, &context, &chief_yaml_hash)
+                    .await?;
+            } else {
+                info!(
+                    project,
+                    "skipping pre-run checks because previous checks succeeded and chief.yaml is unchanged"
+                );
+            }
         }
 
         self.scheduler
@@ -779,6 +790,7 @@ impl ApiService {
         &self,
         project: &str,
         context: &chief::service::ProjectContext,
+        chief_yaml_hash: &str,
     ) -> Result<(), ApiError> {
         let command_plans = build_readiness_command_plans(context);
         let suite_count = context.chief_yaml.suites.len();
@@ -859,12 +871,14 @@ impl ApiService {
             let project_name = project.to_owned();
             let store = context.store.clone();
             let readiness_run_id_for_task = readiness_run_id.clone();
+            let chief_yaml_hash_for_task = chief_yaml_hash.to_owned();
             tokio::spawn(async move {
                 service
                     .execute_and_persist_readiness_check(
                         project_name,
                         store,
                         readiness_run_id_for_task,
+                        chief_yaml_hash_for_task,
                         readiness_log,
                         readiness_stream,
                         command_plans,
@@ -884,6 +898,7 @@ impl ApiService {
                     "error": err.to_string(),
                     "commands_total": command_count,
                     "suite_count": suite_count,
+                    "chief_yaml_hash": chief_yaml_hash,
                 });
                 let _ = context.store.set_readiness_result(
                     ReadinessStatus::NotReady,
@@ -903,6 +918,7 @@ impl ApiService {
         project: String,
         store: ProjectStore,
         readiness_run_id: String,
+        chief_yaml_hash: String,
         readiness_log: ReadinessLogContext,
         readiness_stream: ReadinessStreamContext,
         command_plans: Vec<ReadinessCommandPlan>,
@@ -953,6 +969,7 @@ impl ApiService {
                     "commands_total": command_count,
                     "suite_count": suite_count,
                     "cancelled_by_user": cancelled_by_user,
+                    "chief_yaml_hash": chief_yaml_hash.as_str(),
                 });
                 let _ = store.set_readiness_result(ReadinessStatus::NotReady, &summary, &details);
                 let mut payload = readiness_payload("pre_run_checks_failed");
@@ -992,6 +1009,7 @@ impl ApiService {
                     "error": err.to_string(),
                     "commands_total": command_count,
                     "suite_count": suite_count,
+                    "chief_yaml_hash": chief_yaml_hash.as_str(),
                 });
                 let _ = store.set_readiness_result(ReadinessStatus::NotReady, &summary, &details);
                 let mut payload = readiness_payload("pre_run_checks_failed");
@@ -1019,7 +1037,7 @@ impl ApiService {
             .filter(|result| result.blocking_failure)
             .count();
         let summary = build_readiness_summary(&results, suite_count);
-        let details = build_readiness_details(&results, suite_count);
+        let details = build_readiness_details(&results, suite_count, &chief_yaml_hash);
         let final_status = if failed_commands == 0 {
             ReadinessStatus::Ready
         } else {
@@ -1588,6 +1606,27 @@ fn collect_readiness_targets(project_dir: &Path, suite: &TestSuiteConfig) -> Vec
     targets.into_iter().collect()
 }
 
+fn chief_yaml_content_hash(config_path: &Path) -> anyhow::Result<String> {
+    let content = fs::read(config_path)
+        .with_context(|| format!("failed to read chief config at {}", config_path.display()))?;
+    Ok(format!("{:x}", md5::compute(content)))
+}
+
+fn should_run_readiness_check(store: &ProjectStore, chief_yaml_hash: &str) -> anyhow::Result<bool> {
+    let readiness = store.get_readiness_state()?;
+    if readiness.status != ReadinessStatus::Ready {
+        return Ok(true);
+    }
+    let previous_hash = readiness_chief_yaml_hash(&readiness.details);
+    Ok(previous_hash != Some(chief_yaml_hash))
+}
+
+fn readiness_chief_yaml_hash(details: &serde_json::Value) -> Option<&str> {
+    details
+        .get("chief_yaml_hash")
+        .and_then(serde_json::Value::as_str)
+}
+
 fn git_list_tracked_files(project_dir: &Path, test_root: &str) -> Vec<String> {
     let output = if test_root.is_empty() || test_root == "." {
         Command::new("git")
@@ -1979,6 +2018,7 @@ fn build_readiness_summary(results: &[ReadinessCommandResult], suite_count: usiz
 fn build_readiness_details(
     results: &[ReadinessCommandResult],
     suite_count: usize,
+    chief_yaml_hash: &str,
 ) -> serde_json::Value {
     let failed_commands = results
         .iter()
@@ -1989,6 +2029,7 @@ fn build_readiness_details(
         "suite_count": suite_count,
         "commands_total": results.len(),
         "commands_failed": failed_commands,
+        "chief_yaml_hash": chief_yaml_hash,
         "commands": results
             .iter()
             .map(|result| json!({
@@ -2441,8 +2482,9 @@ fn parse_phase(value: &str) -> Result<Phase, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiService, RETRY_CLEANUP_DISCARDED_MSG_PREFIX, is_internal_workspace_state_file,
-        parse_todo_status_input, resolve_last_done_todo_committed_at,
+        ApiService, RETRY_CLEANUP_DISCARDED_MSG_PREFIX, chief_yaml_content_hash,
+        is_internal_workspace_state_file, parse_todo_status_input, readiness_chief_yaml_hash,
+        resolve_last_done_todo_committed_at,
     };
     use crate::api::error::ApiError;
     use crate::api::types::{StartProjectRequest, UpdateChiefYamlRequest};
@@ -3040,6 +3082,220 @@ suites:
             response.message.contains("flow=single_prompt"),
             "start_project should use refreshed chief.yaml flow, got message: {}",
             response.message
+        );
+    }
+
+    #[tokio::test]
+    async fn start_project_skips_pre_run_checks_when_last_success_matches_chief_yaml() {
+        let (_workspace, service, project, project_dir) = setup_service_with_chief_yaml(
+            r#"todos:
+  - id: done-1
+    todo: Completed todo
+    expectations: Already done
+    priority: 1
+    test_suites: []
+    status: done"#,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let chief_yaml_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+            .expect("chief.yaml hash should be computed");
+        store
+            .set_readiness_result(
+                ReadinessStatus::Ready,
+                "Ready: cached pre-run checks.",
+                &serde_json::json!({
+                    "chief_yaml_hash": chief_yaml_hash,
+                    "commands_total": 0,
+                    "commands_failed": 0,
+                }),
+            )
+            .expect("seeded readiness state should persist");
+        let readiness_before = store
+            .get_readiness_state()
+            .expect("readiness state should be readable before start");
+
+        service
+            .start_project(
+                project.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                    start_anyway: None,
+                },
+            )
+            .await
+            .expect("start_project should succeed when readiness can be reused");
+
+        let readiness_after = store
+            .get_readiness_state()
+            .expect("readiness state should be readable after start");
+        assert_eq!(readiness_after.status, ReadinessStatus::Ready);
+        assert_eq!(
+            readiness_after.summary, readiness_before.summary,
+            "pre-run checks should be skipped when chief.yaml is unchanged and previous check succeeded"
+        );
+        assert_eq!(
+            readiness_after.checked_at, readiness_before.checked_at,
+            "checked_at should remain unchanged when pre-run checks are skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_success() {
+        let (_workspace, service, project, project_dir) = setup_service_with_chief_yaml(
+            r#"todos:
+  - id: done-1
+    todo: Completed todo
+    expectations: Already done
+    priority: 1
+    test_suites: []
+    status: done"#,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let original_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+            .expect("chief.yaml hash should be computed");
+        store
+            .set_readiness_result(
+                ReadinessStatus::Ready,
+                "Ready: cached pre-run checks.",
+                &serde_json::json!({
+                    "chief_yaml_hash": original_hash,
+                    "commands_total": 0,
+                    "commands_failed": 0,
+                }),
+            )
+            .expect("seeded readiness state should persist");
+        let readiness_before = store
+            .get_readiness_state()
+            .expect("readiness state should be readable before start");
+
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: tdd"#,
+        );
+        let updated_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+            .expect("updated chief.yaml hash should be computed");
+        assert_ne!(
+            updated_hash,
+            readiness_chief_yaml_hash(&readiness_before.details).unwrap_or_default(),
+            "fixture should use a modified chief.yaml hash"
+        );
+
+        let response = service
+            .start_project(
+                project.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                    start_anyway: None,
+                },
+            )
+            .await
+            .expect("start_project should succeed after rerunning pre-run checks");
+        assert!(
+            response.message.contains("flow=tdd"),
+            "start_project should use updated chief.yaml flow, got: {}",
+            response.message
+        );
+
+        let readiness_after = store
+            .get_readiness_state()
+            .expect("readiness state should be readable after start");
+        assert_eq!(readiness_after.status, ReadinessStatus::Ready);
+        assert_ne!(
+            readiness_after.summary, readiness_before.summary,
+            "rerun pre-run checks should replace cached readiness summary"
+        );
+        assert_ne!(
+            readiness_after.checked_at, readiness_before.checked_at,
+            "checked_at should be refreshed when chief.yaml changes"
+        );
+        assert_eq!(
+            readiness_chief_yaml_hash(&readiness_after.details),
+            Some(updated_hash.as_str()),
+            "rerun readiness details should persist the latest chief.yaml hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_project_reruns_pre_run_checks_when_previous_result_was_not_successful() {
+        let (_workspace, service, project, project_dir) = setup_service_with_chief_yaml(
+            r#"todos:
+  - id: done-1
+    todo: Completed todo
+    expectations: Already done
+    priority: 1
+    test_suites: []
+    status: done"#,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let store = ProjectStore::new(&project_dir);
+        let chief_yaml_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+            .expect("chief.yaml hash should be computed");
+        store
+            .set_readiness_result(
+                ReadinessStatus::NotReady,
+                "Not ready: cached pre-run checks failure.",
+                &serde_json::json!({
+                    "chief_yaml_hash": chief_yaml_hash,
+                    "commands_total": 1,
+                    "commands_failed": 1,
+                }),
+            )
+            .expect("seeded readiness failure should persist");
+        let readiness_before = store
+            .get_readiness_state()
+            .expect("readiness state should be readable before start");
+        assert_eq!(
+            readiness_before.status,
+            ReadinessStatus::NotReady,
+            "fixture should seed a failed readiness state"
+        );
+
+        service
+            .start_project(
+                project.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                    start_anyway: None,
+                },
+            )
+            .await
+            .expect("start_project should rerun pre-run checks after failure");
+
+        let readiness_after = store
+            .get_readiness_state()
+            .expect("readiness state should be readable after start");
+        assert_eq!(
+            readiness_after.status,
+            ReadinessStatus::Ready,
+            "rerun pre-run checks should recover readiness status"
+        );
+        assert!(
+            readiness_after.summary.starts_with("Ready:"),
+            "rerun pre-run checks should replace failure summary with success details"
+        );
+        assert_ne!(
+            readiness_after.checked_at, readiness_before.checked_at,
+            "checked_at should be refreshed when rerunning after failed readiness"
+        );
+        assert_eq!(
+            readiness_chief_yaml_hash(&readiness_after.details),
+            Some(chief_yaml_hash.as_str()),
+            "rerun readiness details should persist the current chief.yaml hash"
         );
     }
 
