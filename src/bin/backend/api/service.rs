@@ -15,8 +15,8 @@ use axum::response::{IntoResponse, Response};
 use chief::config::TestSuiteConfig;
 use chief::domain::{EventRecord, EventType, JobStatus, Phase, RunExitStatus, Todo, TodoStatus};
 use chief::flow::{
-    FlowKind, SuiteCommandKind, configure_process_group, execute_suite_command, suite_command_cwd,
-    suite_command_for_kind, terminate_process_tree,
+    FlowKind, SuiteCommandKind, configure_process_group, execute_suite_cleanup_command,
+    execute_suite_command, suite_command_cwd, suite_command_for_kind, terminate_process_tree,
 };
 use chief::git::{
     GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, ShellGitOps,
@@ -63,6 +63,7 @@ struct SuiteCheckPlan {
     suite_name: String,
     kind: SuiteCommandKind,
     command: String,
+    cleanup_command: Option<String>,
     cwd: PathBuf,
     cwd_display: String,
     env: BTreeMap<String, String>,
@@ -99,6 +100,7 @@ struct ReadinessCommandPlan {
     suite_name: String,
     kind: ReadinessCommandKind,
     command_template: String,
+    cleanup_command: Option<String>,
     uses_target_placeholder: bool,
     target_candidates: Vec<String>,
     cwd: PathBuf,
@@ -1270,6 +1272,7 @@ impl ApiService {
                     suite_name,
                     kind,
                     command,
+                    cleanup_command,
                     cwd,
                     cwd_display,
                     env,
@@ -1292,12 +1295,56 @@ impl ApiService {
         let cancel_signal = Arc::new(AtomicBool::new(false));
 
         let output = tokio::task::spawn_blocking(move || {
-            execute_suite_command(&command, &cwd, &env, &cancel_signal, Some(timeout_seconds))
+            let test_result =
+                execute_suite_command(&command, &cwd, &env, &cancel_signal, Some(timeout_seconds));
+            let cleanup_result = if kind == SuiteCommandKind::Test {
+                execute_suite_cleanup_command(
+                    cleanup_command.as_deref(),
+                    &cwd,
+                    &env,
+                    Some(timeout_seconds),
+                )
+            } else {
+                Ok(None)
+            };
+            (test_result, cleanup_result)
         })
         .await;
 
         let response = match output {
-            Ok(Ok(output)) => {
+            Ok((Ok(output), cleanup_result)) => {
+                match cleanup_result {
+                    Ok(Some(cleanup_out)) => {
+                        if cleanup_out.exit_code == 0 {
+                            info!(
+                                project,
+                                suite = %suite_name,
+                                kind = %kind_label,
+                                command = %cleanup_out.command,
+                                "suite cleanup command finished"
+                            );
+                        } else {
+                            warn!(
+                                project,
+                                suite = %suite_name,
+                                kind = %kind_label,
+                                command = %cleanup_out.command,
+                                exit_code = cleanup_out.exit_code,
+                                "suite cleanup command failed"
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        warn!(
+                            project,
+                            suite = %suite_name,
+                            kind = %kind_label,
+                            error = %err,
+                            "suite cleanup command execution failed"
+                        );
+                    }
+                }
                 info!(
                     project,
                     suite = %suite_name,
@@ -1319,7 +1366,39 @@ impl ApiService {
                     stderr: output.stderr,
                 })
             }
-            Ok(Err(err)) => {
+            Ok((Err(err), cleanup_result)) => {
+                match cleanup_result {
+                    Ok(Some(cleanup_out)) => {
+                        if cleanup_out.exit_code == 0 {
+                            info!(
+                                project,
+                                suite = %suite_name,
+                                kind = %kind_label,
+                                command = %cleanup_out.command,
+                                "suite cleanup command finished after command failure"
+                            );
+                        } else {
+                            warn!(
+                                project,
+                                suite = %suite_name,
+                                kind = %kind_label,
+                                command = %cleanup_out.command,
+                                exit_code = cleanup_out.exit_code,
+                                "suite cleanup command failed after command failure"
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(cleanup_err) => {
+                        warn!(
+                            project,
+                            suite = %suite_name,
+                            kind = %kind_label,
+                            error = %cleanup_err,
+                            "suite cleanup command execution failed after command failure"
+                        );
+                    }
+                }
                 error!(
                     project,
                     suite = %suite_name,
@@ -1395,6 +1474,7 @@ impl ApiService {
                 suite_name,
                 kind,
                 command,
+                cleanup_command,
                 cwd,
                 cwd_display,
                 env,
@@ -1403,7 +1483,7 @@ impl ApiService {
             let kind_label = kind.as_str().to_owned();
 
             let stream_sender = sender.clone();
-            match execute_suite_command_streaming(
+            let command_result = execute_suite_command_streaming(
                 &suite_name,
                 kind,
                 &command,
@@ -1421,8 +1501,53 @@ impl ApiService {
                         },
                     );
                 },
-            ) {
+            );
+
+            let cleanup_result = if kind == SuiteCommandKind::Test {
+                execute_suite_cleanup_command(
+                    cleanup_command.as_deref(),
+                    &cwd,
+                    &env,
+                    Some(timeout_seconds),
+                )
+            } else {
+                Ok(None)
+            };
+
+            match command_result {
                 Ok(result) => {
+                    match cleanup_result {
+                        Ok(Some(cleanup_out)) => {
+                            if cleanup_out.exit_code == 0 {
+                                info!(
+                                    project = %project_name,
+                                    suite = %suite_name,
+                                    kind = %kind_label,
+                                    command = %cleanup_out.command,
+                                    "suite cleanup command finished"
+                                );
+                            } else {
+                                warn!(
+                                    project = %project_name,
+                                    suite = %suite_name,
+                                    kind = %kind_label,
+                                    command = %cleanup_out.command,
+                                    exit_code = cleanup_out.exit_code,
+                                    "suite cleanup command failed"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            warn!(
+                                project = %project_name,
+                                suite = %suite_name,
+                                kind = %kind_label,
+                                error = %err,
+                                "suite cleanup command execution failed"
+                            );
+                        }
+                    }
                     info!(
                         project = %project_name,
                         suite = %result.suite,
@@ -1438,6 +1563,38 @@ impl ApiService {
                     );
                 }
                 Err(err) => {
+                    match cleanup_result {
+                        Ok(Some(cleanup_out)) => {
+                            if cleanup_out.exit_code == 0 {
+                                info!(
+                                    project = %project_name,
+                                    suite = %suite_name,
+                                    kind = %kind_label,
+                                    command = %cleanup_out.command,
+                                    "suite cleanup command finished after command failure"
+                                );
+                            } else {
+                                warn!(
+                                    project = %project_name,
+                                    suite = %suite_name,
+                                    kind = %kind_label,
+                                    command = %cleanup_out.command,
+                                    exit_code = cleanup_out.exit_code,
+                                    "suite cleanup command failed after command failure"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(cleanup_err) => {
+                            warn!(
+                                project = %project_name,
+                                suite = %suite_name,
+                                kind = %kind_label,
+                                error = %cleanup_err,
+                                "suite cleanup command execution failed after command failure"
+                            );
+                        }
+                    }
                     error!(
                         project = %project_name,
                         suite = %suite_name,
@@ -1531,6 +1688,11 @@ impl ApiService {
                 suite_name: suite.name,
                 kind: payload.kind,
                 command,
+                cleanup_command: if payload.kind == SuiteCommandKind::Test {
+                    suite.cleanup_command.clone()
+                } else {
+                    None
+                },
                 cwd,
                 cwd_display,
                 env: suite.env,
@@ -1718,6 +1880,7 @@ fn build_readiness_command_plans(
                 kind: ReadinessCommandKind::TestInit,
                 uses_target_placeholder: command_template.contains("{target}"),
                 command_template,
+                cleanup_command: None,
                 target_candidates: target_candidates.clone(),
                 cwd: cwd.clone(),
                 cwd_display: cwd_display.clone(),
@@ -1738,6 +1901,7 @@ fn build_readiness_command_plans(
                 kind: ReadinessCommandKind::TestSetup,
                 uses_target_placeholder: command_template.contains("{target}"),
                 command_template,
+                cleanup_command: None,
                 target_candidates: target_candidates.clone(),
                 cwd: cwd.clone(),
                 cwd_display: cwd_display.clone(),
@@ -1758,6 +1922,7 @@ fn build_readiness_command_plans(
                 kind: ReadinessCommandKind::Lint,
                 uses_target_placeholder: command_template.contains("{target}"),
                 command_template,
+                cleanup_command: None,
                 target_candidates: target_candidates.clone(),
                 cwd: cwd.clone(),
                 cwd_display: cwd_display.clone(),
@@ -1774,6 +1939,7 @@ fn build_readiness_command_plans(
                 kind: ReadinessCommandKind::Test,
                 uses_target_placeholder: command_template.contains("{target}"),
                 command_template,
+                cleanup_command: suite.cleanup_command.clone(),
                 target_candidates,
                 cwd,
                 cwd_display,
@@ -2197,8 +2363,38 @@ fn run_readiness_command_attempt(
         },
     );
 
+    let cleanup_out = if plan.kind == ReadinessCommandKind::Test {
+        execute_suite_cleanup_command(
+            plan.cleanup_command.as_deref(),
+            &plan.cwd,
+            &plan.env,
+            Some(plan.timeout_seconds),
+        )
+    } else {
+        Ok(None)
+    };
+
     match out {
         Ok(out) => {
+            match cleanup_out {
+                Ok(Some(cleanup)) => {
+                    if let Some(stream_context) = stream_context {
+                        stream_context.push_text(format!(
+                            "[pre-run-checks:{}:cleanup] exit={}\n",
+                            plan.suite_name, cleanup.exit_code
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    if let Some(stream_context) = stream_context {
+                        stream_context.push_text(format!(
+                            "[pre-run-checks:{}:cleanup] failed: {}\n",
+                            plan.suite_name, err
+                        ));
+                    }
+                }
+            }
             let blocking_failure = readiness_exit_code_is_blocking(plan.kind, out.exit_code);
             if let Some(stream_context) = stream_context {
                 stream_context.push_text(format!(
@@ -2221,6 +2417,25 @@ fn run_readiness_command_attempt(
             }
         }
         Err(err) => {
+            match cleanup_out {
+                Ok(Some(cleanup)) => {
+                    if let Some(stream_context) = stream_context {
+                        stream_context.push_text(format!(
+                            "[pre-run-checks:{}:cleanup] exit={}\n",
+                            plan.suite_name, cleanup.exit_code
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(cleanup_err) => {
+                    if let Some(stream_context) = stream_context {
+                        stream_context.push_text(format!(
+                            "[pre-run-checks:{}:cleanup] failed: {}\n",
+                            plan.suite_name, cleanup_err
+                        ));
+                    }
+                }
+            }
             if let Some(stream_context) = stream_context {
                 stream_context.push_text(format!(
                     "[pre-run-checks:{}:{}] failed: {}\n",

@@ -14,6 +14,12 @@ chief:
   use_agent_log_truncation_for_stdout_logs: false
 
 suites:
+  # Execution model:
+  # - Each todo runs in its own temporary git worktree (isolated from your main checkout).
+  # - Optional cache_paths are snapshotted on successful pre-run checks and then copied/symlinked
+  #   into each fresh todo worktree according to cache_mode.
+  # - Optional cleanup_command runs after each test_command attempt (pass/fail/timeout/cancel).
+  #
   # -----------------------------
   # Rust project suite
   # -----------------------------
@@ -28,6 +34,7 @@ suites:
     lint_command: cargo clippy
     # lint_fix_command: cargo fmt
     post_green_command: cargo test
+    # cleanup_command: pkill -f "cargo test.*$PWD" || true
     # Optional worktree dependency cache (snapshotted during successful pre-run checks)
     # and re-hydrated into each fresh todo worktree.
     # cache_paths: [target]
@@ -52,9 +59,15 @@ suites:
 #     lint_command: ruff check {target}
 #     lint_fix_command: ruff check --fix {target}
 #     post_green_command: pytest -q
-#     cache_paths: [.venv]
-#     cache_key_files: [poetry.lock, requirements-dev.txt]
-#     cache_mode: copy
+#     # cleanup_command: pkill -f "pytest.*$PWD" || true
+#     #
+#     # Usually DO NOT cache `.venv`:
+#     # many Python virtualenvs contain absolute interpreter/site-package paths and may break
+#     # when copied into per-todo worktrees.
+#     # Prefer rebuilding venv per worktree, or cache only safe tool caches.
+#     # cache_paths: [.ruff_cache, .mypy_cache]
+#     # cache_key_files: [poetry.lock, requirements-dev.txt]
+#     # cache_mode: copy
 #     command_timeout_seconds: 1800 # optional per-suite override (seconds)
 #     env: {}
 #     strip_root_from_target: true
@@ -67,19 +80,23 @@ suites:
 #     language: TypeScript
 #     framework: Vitest
 #     test_root: frontend
-#     test_command: npm run test -- {target}
+#     test_command: npm run test -- --run --maxWorkers=2 {target}
 #     target_type: file
 #     default_target: src
 #     file_patterns: ["*.test.ts", "*.test.tsx"]
 #     lint_command: npm run lint
 #     lint_fix_command: npm run lint -- --fix
 #     post_green_command: npm run build
+#     # Optional suite-specific teardown after each test command attempt.
+#     # cleanup_command: pkill -f "vitest.*$PWD" || true
 #     cache_paths: [node_modules]
 #     cache_key_files: [package-lock.json, pnpm-lock.yaml, yarn.lock]
 #     cache_mode: copy
 #     command_timeout_seconds: 1800 # optional per-suite override (seconds)
 #     env:
 #       NODE_ENV: test
+#       CI: "true"
+#       NODE_OPTIONS: --max-old-space-size=2048
 #     strip_root_from_target: true
 
 # -----------------------------

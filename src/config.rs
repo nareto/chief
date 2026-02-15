@@ -144,6 +144,8 @@ pub struct TestSuiteConfig {
     #[serde(default)]
     pub post_green_command: Option<String>,
     #[serde(default)]
+    pub cleanup_command: Option<String>,
+    #[serde(default)]
     pub command_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub lint_command: Option<String>,
@@ -292,5 +294,21 @@ mod tests {
     cache_mode: symlink"#;
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.suites[0].cache_mode, SuiteCacheMode::Symlink);
+    }
+
+    #[test]
+    fn parse_cleanup_command() {
+        let yaml = r#"suites:
+  - name: backend
+    language: Rust
+    framework: cargo
+    test_root: .
+    test_command: cargo test
+    cleanup_command: pkill -f vitest || true"#;
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            parsed.suites[0].cleanup_command.as_deref(),
+            Some("pkill -f vitest || true")
+        );
     }
 }

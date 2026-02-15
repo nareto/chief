@@ -4,7 +4,8 @@ mod api;
 use anyhow::{Context, Result, bail};
 use chief::config::TestSuiteConfig;
 use chief::flow::{
-    FlowKind, SuiteCommandKind, execute_suite_command, suite_command_cwd, suite_command_for_kind,
+    FlowKind, SuiteCommandKind, execute_suite_cleanup_command, execute_suite_command,
+    suite_command_cwd, suite_command_for_kind,
 };
 use chief::orchestrator::OrchestratorError;
 use chief::scheduler::Scheduler;
@@ -595,6 +596,29 @@ fn run_suite_command_kind(
         Some(timeout_seconds),
     )?;
 
+    if matches!(kind, SuiteCliCommandKind::Test) {
+        match execute_suite_cleanup_command(
+            suite.cleanup_command.as_deref(),
+            &cwd,
+            &suite.env,
+            Some(timeout_seconds),
+        ) {
+            Ok(Some(cleanup_out)) => {
+                eprintln!(
+                    "cleanup_command exit_code={} command={}",
+                    cleanup_out.exit_code, cleanup_out.command
+                );
+                if !cleanup_out.merged_output.trim().is_empty() {
+                    eprintln!("{}", cleanup_out.merged_output);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("warning: cleanup_command failed to execute: {err}");
+            }
+        }
+    }
+
     println!("suite: {}", suite.name);
     println!("kind: {}", kind.as_str());
     println!("cwd: {}", cwd.display());
@@ -900,6 +924,7 @@ mod tests {
             cache_key_files: Vec::new(),
             cache_mode: chief::config::SuiteCacheMode::Copy,
             post_green_command: None,
+            cleanup_command: None,
             command_timeout_seconds: None,
             lint_command: Some("cargo clippy -- {target}".to_owned()),
             lint_fix_command: Some("cargo fmt -- {target}".to_owned()),
