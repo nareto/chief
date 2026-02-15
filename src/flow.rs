@@ -128,6 +128,61 @@ const SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY: &str = "single_prompt_retry_reason
 const SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES: &str = "convergence_changed_files";
 const SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY: &str =
     "single_prompt_retry_has_associated_test_suites";
+const TODO_CONTEXT_HASH_PAYLOAD_KEY: &str = "todo_context_hash";
+const EXECUTION_CONTEXT_HASH_PAYLOAD_KEY: &str = "execution_context_hash";
+
+#[derive(Debug, Serialize)]
+struct TodoContextFingerprint {
+    id: String,
+    todo: String,
+    expectations: String,
+    test_suites: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SuiteExecutionFingerprint {
+    name: String,
+    test_root: String,
+    target_type: crate::domain::TargetType,
+    default_target: Option<String>,
+    strip_root_from_target: bool,
+    test_command: String,
+    lint_command: Option<String>,
+    lint_fix_command: Option<String>,
+    post_green_command: Option<String>,
+    test_init: Option<String>,
+    test_setup: Option<String>,
+    command_timeout_seconds: Option<u64>,
+    env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionContextFingerprint {
+    flow: String,
+    required_stable_iterations: usize,
+    max_loop_iterations: usize,
+    agent_timeout_seconds: u64,
+    suite_command_timeout_seconds: u64,
+    todo_test_suites: Vec<String>,
+    suites: Vec<SuiteExecutionFingerprint>,
+}
+
+fn normalized_suite_names(names: &[String]) -> Vec<String> {
+    let mut normalized = names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn md5_hex_of_serializable<T: Serialize>(value: &T) -> String {
+    let encoded = serde_json::to_vec(value).unwrap_or_default();
+    format!("{:x}", md5::compute(encoded))
+}
 
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
@@ -289,14 +344,99 @@ impl<'a> FlowExecution<'a> {
             .collect()
     }
 
+    fn todo_context_hash(&self) -> String {
+        let fingerprint = TodoContextFingerprint {
+            id: self.todo.id.trim().to_owned(),
+            todo: self.todo.todo.trim().to_owned(),
+            expectations: self.todo.expectations.trim().to_owned(),
+            test_suites: normalized_suite_names(&self.todo.test_suites),
+        };
+        md5_hex_of_serializable(&fingerprint)
+    }
+
+    fn execution_context_hash(&self) -> String {
+        let todo_suite_names = normalized_suite_names(&self.todo.test_suites);
+        let configured_todo_suites = if todo_suite_names.is_empty() {
+            Vec::new()
+        } else {
+            let expected = todo_suite_names.iter().collect::<HashSet<_>>();
+            let mut suites = self
+                .all_suites
+                .iter()
+                .filter(|suite| expected.contains(&suite.name))
+                .cloned()
+                .collect::<Vec<_>>();
+            suites.sort_by(|left, right| left.name.cmp(&right.name));
+            suites
+        };
+        let suites = configured_todo_suites
+            .into_iter()
+            .map(|suite| SuiteExecutionFingerprint {
+                name: suite.name,
+                test_root: suite.test_root,
+                target_type: suite.target_type,
+                default_target: suite.default_target,
+                strip_root_from_target: suite.strip_root_from_target,
+                test_command: suite.test_command,
+                lint_command: suite.lint_command,
+                lint_fix_command: suite.lint_fix_command,
+                post_green_command: suite.post_green_command,
+                test_init: suite.test_init,
+                test_setup: suite.test_setup,
+                command_timeout_seconds: suite.command_timeout_seconds,
+                env: suite.env,
+            })
+            .collect::<Vec<_>>();
+        let fingerprint = ExecutionContextFingerprint {
+            flow: FlowKind::resolve_name(&self.chief_config.flow),
+            required_stable_iterations: self.chief_config.required_stable_iterations,
+            max_loop_iterations: self.chief_config.max_loop_iterations,
+            agent_timeout_seconds: self.chief_config.agent_timeout_seconds,
+            suite_command_timeout_seconds: self.chief_config.suite_command_timeout_seconds,
+            todo_test_suites: todo_suite_names,
+            suites,
+        };
+        md5_hex_of_serializable(&fingerprint)
+    }
+
+    fn event_matches_current_context(
+        event: &EventRecord,
+        expected_todo_hash: &str,
+        expected_exec_hash: &str,
+    ) -> bool {
+        let todo_hash = event
+            .payload
+            .get(TODO_CONTEXT_HASH_PAYLOAD_KEY)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if todo_hash != expected_todo_hash {
+            return false;
+        }
+
+        let exec_hash = event
+            .payload
+            .get(EXECUTION_CONTEXT_HASH_PAYLOAD_KEY)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        exec_hash == expected_exec_hash
+    }
+
     pub fn log_event(
         &self,
         level: &str,
         phase: Option<Phase>,
         event_type: EventType,
         msg: impl Into<String>,
-        payload: BTreeMap<String, Value>,
+        mut payload: BTreeMap<String, Value>,
     ) -> Result<()> {
+        payload.insert(
+            TODO_CONTEXT_HASH_PAYLOAD_KEY.to_owned(),
+            Value::String(self.todo_context_hash()),
+        );
+        payload.insert(
+            EXECUTION_CONTEXT_HASH_PAYLOAD_KEY.to_owned(),
+            Value::String(self.execution_context_hash()),
+        );
         let event = EventRecord {
             id: None,
             run_id: self.run_id.clone(),
@@ -330,11 +470,16 @@ impl<'a> FlowExecution<'a> {
             .iter()
             .map(|event_type| event_type.as_str())
             .collect::<HashSet<_>>();
+        let todo_hash = self.todo_context_hash();
+        let exec_hash = self.execution_context_hash();
 
         let mut filtered = events
             .into_iter()
             .filter(|event| event.todo_id.as_deref() == Some(&self.todo.id))
             .filter(|event| allowed.contains(event.event_type.as_str()))
+            .filter(|event| {
+                Self::event_matches_current_context(event, todo_hash.as_str(), exec_hash.as_str())
+            })
             .collect::<Vec<_>>();
 
         filtered.sort_by_key(|event| event.id);
@@ -516,6 +661,8 @@ impl<'a> FlowExecution<'a> {
             level: None,
             contains_text: None,
         })?;
+        let todo_hash = self.todo_context_hash();
+        let exec_hash = self.execution_context_hash();
 
         let mut filtered = Vec::new();
         for event in events {
@@ -529,6 +676,11 @@ impl<'a> FlowExecution<'a> {
                     .starts_with(Self::RETRY_CLEANUP_DISCARDED_MSG_PREFIX)
             {
                 break;
+            }
+
+            if !Self::event_matches_current_context(&event, todo_hash.as_str(), exec_hash.as_str())
+            {
+                continue;
             }
 
             filtered.push(event);
@@ -2186,8 +2338,18 @@ mod tests {
         level: &str,
         event_type: EventType,
         msg: &str,
-        payload: BTreeMap<String, Value>,
+        mut payload: BTreeMap<String, Value>,
+        todo_context_hash: &str,
+        execution_context_hash: &str,
     ) {
+        payload.insert(
+            super::TODO_CONTEXT_HASH_PAYLOAD_KEY.to_owned(),
+            Value::String(todo_context_hash.to_owned()),
+        );
+        payload.insert(
+            super::EXECUTION_CONTEXT_HASH_PAYLOAD_KEY.to_owned(),
+            Value::String(execution_context_hash.to_owned()),
+        );
         store
             .record_event(&crate::domain::EventRecord {
                 id: None,
@@ -2712,6 +2874,93 @@ mod tests {
     }
 
     #[test]
+    fn previous_steps_log_excludes_history_when_execution_context_hash_changes() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo = Todo {
+            id: "todo-1".to_owned(),
+            todo: "include command".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: vec!["backend".to_owned()],
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+        let old_suite = suite_named_with_test_command("backend", "cargo test");
+        let new_suite = suite_named_with_test_command("backend", "cargo test --all");
+        let old_suites = [old_suite];
+        let new_suites = [new_suite];
+
+        let old_execution = FlowExecution {
+            run_id: "run-old".to_owned(),
+            job_id: "job-old".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &old_suites,
+            todo: todo.clone(),
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let mut payload = BTreeMap::new();
+        payload.insert("command".to_owned(), Value::String("cargo test".to_owned()));
+        payload.insert(
+            "output".to_owned(),
+            Value::String("failing output".to_owned()),
+        );
+        payload.insert("exit_code".to_owned(), Value::from(1));
+        old_execution
+            .log_event(
+                "warning",
+                Some(Phase::Red),
+                EventType::TestRun,
+                "test failed",
+                payload,
+            )
+            .expect("old-context event should log");
+
+        let new_execution = FlowExecution {
+            run_id: "run-new".to_owned(),
+            job_id: "job-new".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &new_suites,
+            todo,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let log = new_execution
+            .previous_steps_log(Phase::Red, &[EventType::TestRun], 8)
+            .expect("previous_steps_log should succeed");
+        assert_eq!(
+            log, "No previous attempts recorded.",
+            "execution-context drift should suppress prior history injection"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
     fn single_prompt_failure_context_includes_failed_commands_and_output_tails() {
         let project_dir = temp_project_dir();
         let store = ProjectStore::new(&project_dir);
@@ -2858,6 +3107,120 @@ mod tests {
                 .sqlite_query
                 .contains("FROM events WHERE run_id='run-1' AND todo_id='todo-1' AND id="),
             "lint failure should include an event-specific sqlite query"
+        );
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn single_prompt_failure_context_excludes_history_when_todo_context_hash_changes() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let todo_old = Todo {
+            id: "todo-1".to_owned(),
+            todo: "old todo text".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+        let todo_new = Todo {
+            id: "todo-1".to_owned(),
+            todo: "new todo text".to_owned(),
+            expectations: String::new(),
+            priority: 1,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        };
+
+        let prompts = NoopPromptStore;
+        let agent = NoopAgent;
+        let git = NoopGitOps {
+            root: project_dir.clone(),
+        };
+        let chief_config = ChiefConfig::default();
+
+        let old_execution = FlowExecution {
+            run_id: "run-old".to_owned(),
+            job_id: "job-old".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo: todo_old,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        old_execution
+            .log_event(
+                "info",
+                Some(Phase::SinglePrompt),
+                EventType::AgentPrompt,
+                "Agent prompt (single_prompt)",
+                BTreeMap::new(),
+            )
+            .expect("old-context prompt event should log");
+        let mut failed_payload = BTreeMap::new();
+        failed_payload.insert("exit_code".to_owned(), Value::from(1));
+        failed_payload.insert(
+            "command".to_owned(),
+            Value::String("codex exec --json -".to_owned()),
+        );
+        failed_payload.insert(
+            "output".to_owned(),
+            Value::String("old-context failure".to_owned()),
+        );
+        old_execution
+            .log_event(
+                "warning",
+                Some(Phase::SinglePrompt),
+                EventType::AgentResponse,
+                "agent response failed",
+                failed_payload,
+            )
+            .expect("old-context failure event should log");
+
+        let new_execution = FlowExecution {
+            run_id: "run-new".to_owned(),
+            job_id: "job-new".to_owned(),
+            worker_index: 1,
+            project_dir: project_dir.clone(),
+            store: &store,
+            prompts: &prompts,
+            agent: &agent,
+            git: &git,
+            chief_config: &chief_config,
+            all_suites: &[],
+            todo: todo_new,
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+            prepared_suites: RefCell::new(BTreeSet::new()),
+        };
+
+        let context = new_execution
+            .latest_single_prompt_failure_context()
+            .expect("single prompt failure context should resolve");
+        assert!(
+            !context.failed_other,
+            "todo-context drift should suppress prior single_prompt failure history"
+        );
+        assert!(
+            context.other_failures.is_empty(),
+            "todo-context drift should suppress prior single_prompt failure details"
+        );
+        assert!(
+            !new_execution
+                .has_previous_single_prompt_attempt_since_last_retry_reset()
+                .expect("single prompt attempt check should succeed"),
+            "todo-context drift should reset first-attempt detection"
         );
 
         let _ = fs::remove_dir_all(&project_dir);
@@ -3099,7 +3462,8 @@ mod tests {
             cancel_signal: Arc::new(AtomicBool::new(false)),
             prepared_suites: RefCell::new(BTreeSet::new()),
         };
-
+        let todo_context_hash = execution.todo_context_hash();
+        let execution_context_hash = execution.execution_context_hash();
         let suite_payload = |suite: &str, command: &str, exit_code: i64, output: &str| {
             let mut payload = BTreeMap::new();
             payload.insert("suite".to_owned(), Value::String(suite.to_owned()));
@@ -3108,7 +3472,6 @@ mod tests {
             payload.insert("output".to_owned(), Value::String(output.to_owned()));
             payload
         };
-
         // Older run: both suites fail.
         record_single_prompt_event(
             &store,
@@ -3118,6 +3481,8 @@ mod tests {
             EventType::Lint,
             "Lint failed (backend)",
             suite_payload("backend", "lint-backend-old", 1, "lint backend old failed"),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         record_single_prompt_event(
             &store,
@@ -3132,6 +3497,8 @@ mod tests {
                 1,
                 "lint frontend old failed",
             ),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         record_single_prompt_event(
             &store,
@@ -3141,6 +3508,8 @@ mod tests {
             EventType::TestRun,
             "Test run failed (backend)",
             suite_payload("backend", "test-backend-old", 1, "test backend old failed"),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         record_single_prompt_event(
             &store,
@@ -3155,6 +3524,8 @@ mod tests {
                 1,
                 "test frontend old failed",
             ),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
 
         // Later run: backend now passes, frontend still fails.
@@ -3171,6 +3542,8 @@ mod tests {
                 0,
                 "lint backend resumed passed",
             ),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         record_single_prompt_event(
             &store,
@@ -3185,6 +3558,8 @@ mod tests {
                 1,
                 "lint frontend resumed failed",
             ),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         record_single_prompt_event(
             &store,
@@ -3199,6 +3574,8 @@ mod tests {
                 0,
                 "test backend resumed passed",
             ),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         record_single_prompt_event(
             &store,
@@ -3213,6 +3590,8 @@ mod tests {
                 1,
                 "test frontend resumed failed",
             ),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
 
         // Most recent run timed out before suite checks; timeout should not become failed_other.
@@ -3224,6 +3603,8 @@ mod tests {
             EventType::AgentPrompt,
             "Agent prompt (single_prompt)",
             BTreeMap::new(),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         let mut timeout_payload = BTreeMap::new();
         timeout_payload.insert("exit_code".to_owned(), Value::from(124));
@@ -3246,6 +3627,8 @@ mod tests {
             EventType::AgentResponse,
             "Agent response (single_prompt)",
             timeout_payload,
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
         let mut timeout_phase_failure_payload = BTreeMap::new();
         timeout_phase_failure_payload.insert("exit_code".to_owned(), Value::from(124));
@@ -3261,6 +3644,8 @@ mod tests {
             EventType::PhaseFailure,
             "single_prompt agent step failed",
             timeout_phase_failure_payload,
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
 
         let context = execution
@@ -3339,6 +3724,8 @@ mod tests {
             cancel_signal: Arc::new(AtomicBool::new(false)),
             prepared_suites: RefCell::new(BTreeSet::new()),
         };
+        let todo_context_hash = execution.todo_context_hash();
+        let execution_context_hash = execution.execution_context_hash();
 
         let mut old_test_payload = BTreeMap::new();
         old_test_payload.insert("suite".to_owned(), Value::String("frontend".to_owned()));
@@ -3359,6 +3746,8 @@ mod tests {
             EventType::TestRun,
             "Test run failed (frontend)",
             old_test_payload,
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
         );
 
         store
@@ -3627,6 +4016,8 @@ mod tests {
             cancel_signal: Arc::new(AtomicBool::new(false)),
             prepared_suites: RefCell::new(BTreeSet::new()),
         };
+        let todo_context_hash = execution.todo_context_hash();
+        let execution_context_hash = execution.execution_context_hash();
 
         let diff_payload = |paths: &[&str]| {
             let mut payload = BTreeMap::new();
@@ -3684,36 +4075,30 @@ mod tests {
             .expect("reset marker event should log");
 
         let newer_payload = diff_payload(&["backend/app/main.py", "frontend/src/app/page.tsx"]);
-        store
-            .record_event(&crate::domain::EventRecord {
-                id: None,
-                run_id: "run-resumed".to_owned(),
-                job_id: Some("job-resumed".to_owned()),
-                todo_id: Some("todo-1".to_owned()),
-                timestamp: chrono::Utc::now(),
-                level: "info".to_owned(),
-                phase: Some(Phase::SinglePrompt),
-                msg: "Iteration git change detection".to_owned(),
-                event_type: EventType::Diff,
-                payload: newer_payload,
-            })
-            .expect("newer diff event should log");
+        record_single_prompt_event(
+            &store,
+            "run-resumed",
+            "todo-1",
+            "info",
+            EventType::Diff,
+            "Iteration git change detection",
+            newer_payload,
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
+        );
 
         let latest_payload = diff_payload(&["backend/app/main.py", "backend/tests/test_api.py"]);
-        store
-            .record_event(&crate::domain::EventRecord {
-                id: None,
-                run_id: "run-current".to_owned(),
-                job_id: Some("job-current".to_owned()),
-                todo_id: Some("todo-1".to_owned()),
-                timestamp: chrono::Utc::now(),
-                level: "info".to_owned(),
-                phase: Some(Phase::SinglePrompt),
-                msg: "Iteration git change detection".to_owned(),
-                event_type: EventType::Diff,
-                payload: latest_payload,
-            })
-            .expect("latest diff event should log");
+        record_single_prompt_event(
+            &store,
+            "run-current",
+            "todo-1",
+            "info",
+            EventType::Diff,
+            "Iteration git change detection",
+            latest_payload,
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
+        );
 
         let other_todo_payload = diff_payload(&["backend/ignored_from_other_todo.py"]);
         store
@@ -3785,6 +4170,8 @@ mod tests {
             cancel_signal: Arc::new(AtomicBool::new(false)),
             prepared_suites: RefCell::new(BTreeSet::new()),
         };
+        let todo_context_hash = execution.todo_context_hash();
+        let execution_context_hash = execution.execution_context_hash();
 
         assert!(
             !execution
@@ -3793,20 +4180,17 @@ mod tests {
             "without history this should be treated as first attempt"
         );
 
-        store
-            .record_event(&crate::domain::EventRecord {
-                id: None,
-                run_id: "run-old".to_owned(),
-                job_id: Some("job-old".to_owned()),
-                todo_id: Some("todo-1".to_owned()),
-                timestamp: chrono::Utc::now(),
-                level: "info".to_owned(),
-                phase: Some(Phase::SinglePrompt),
-                msg: "Agent prompt (single_prompt)".to_owned(),
-                event_type: EventType::AgentPrompt,
-                payload: BTreeMap::new(),
-            })
-            .expect("old prompt event should log");
+        record_single_prompt_event(
+            &store,
+            "run-old",
+            "todo-1",
+            "info",
+            EventType::AgentPrompt,
+            "Agent prompt (single_prompt)",
+            BTreeMap::new(),
+            todo_context_hash.as_str(),
+            execution_context_hash.as_str(),
+        );
 
         assert!(
             execution
