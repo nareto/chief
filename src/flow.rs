@@ -1504,6 +1504,9 @@ impl TodoFlow for TddFlow {
 
     fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
         let suites = execution.selected_suites();
+        for suite in &suites {
+            execution.ensure_suite_prepared(suite, Phase::Red)?;
+        }
 
         if !suites.is_empty() {
             let mut red = RedPhaseStrategy::new(suites.clone());
@@ -1588,6 +1591,9 @@ impl TodoFlow for SinglePromptFlow {
 
     fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
         let candidate_suites = execution.selected_suites();
+        for suite in &candidate_suites {
+            execution.ensure_suite_prepared(suite, Phase::SinglePrompt)?;
+        }
 
         let mut strategy = SinglePromptPhaseStrategy::new(candidate_suites);
         self.loop_policy.run(&mut strategy, execution)?;
