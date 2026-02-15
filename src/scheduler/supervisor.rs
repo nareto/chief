@@ -1,4 +1,4 @@
-use super::{Scheduler, WorkerResult, worker};
+use super::{Scheduler, StopMode, WorkerResult, worker};
 use crate::domain::{JobRecord, JobStatus, RunExitStatus, Todo};
 use crate::flow::FlowKind;
 use crate::service::{ChiefEngine, ProjectContext};
@@ -92,6 +92,7 @@ impl Scheduler {
                 flow_kind,
                 model_override,
                 stop_requested,
+                stop_mode,
                 selection_lock,
                 merge_lock,
                 cancel_signal,
@@ -105,6 +106,7 @@ impl Scheduler {
                     state.flow_kind,
                     state.model_override.clone(),
                     state.stop_requested,
+                    state.stop_mode,
                     state.selection_lock.clone(),
                     state.merge_lock.clone(),
                     state.cancel_signal.clone(),
@@ -171,6 +173,11 @@ impl Scheduler {
             if workers.is_empty() {
                 let no_more_work = context.store.list_available_todos()?.is_empty();
                 if stop_requested {
+                    let stop_message = if stop_mode == StopMode::Pause {
+                        format!("Pause requested for {project_name}; active work drained")
+                    } else {
+                        format!("Stop requested for {project_name}; cancellation complete")
+                    };
                     context.log_project_event(
                         &run_id,
                         None,
@@ -178,7 +185,7 @@ impl Scheduler {
                         "info",
                         None,
                         crate::domain::EventType::Job,
-                        format!("Stop requested for {project_name}; cancellation complete"),
+                        stop_message,
                         std::collections::BTreeMap::new(),
                     )?;
                     break;
@@ -215,6 +222,7 @@ impl Scheduler {
                             if let Some(state) = states.get_mut(&project_name) {
                                 state.last_error = result.error.clone();
                                 state.stop_requested = true;
+                                state.stop_mode = StopMode::Stop;
                                 state.cancel_signal.store(true, Ordering::SeqCst);
                             }
                         }
@@ -225,6 +233,7 @@ impl Scheduler {
                         if let Some(state) = states.get_mut(&project_name) {
                             state.last_error = Some(format!("worker join error: {err}"));
                             state.stop_requested = true;
+                            state.stop_mode = StopMode::Stop;
                             state.cancel_signal.store(true, Ordering::SeqCst);
                         }
                     }
@@ -235,6 +244,7 @@ impl Scheduler {
                 let mut states = self.states.lock().await;
                 if let Some(state) = states.get_mut(&project_name) {
                     state.stop_requested = true;
+                    state.stop_mode = StopMode::Stop;
                 }
             }
         }
@@ -268,6 +278,7 @@ impl Scheduler {
             state.running = false;
             state.active_workers = 0;
             state.stop_requested = false;
+            state.stop_mode = StopMode::None;
             state.cancel_signal.store(false, Ordering::SeqCst);
         }
 
@@ -277,7 +288,7 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scheduler, WorkerInvocation, WorkerResult, WorkerRunner};
+    use super::{Scheduler, StopMode, WorkerInvocation, WorkerResult, WorkerRunner};
     use crate::domain::{JobStatus, Todo, TodoStatus};
     use crate::flow::FlowKind;
     use crate::service::{ProjectContext, ProjectRegistry};
@@ -414,6 +425,7 @@ mod tests {
             state.flow_kind = FlowKind::SinglePrompt;
             state.model_override = None;
             state.stop_requested = false;
+            state.stop_mode = StopMode::None;
             state.active_workers = 0;
             state.last_error = None;
             state.cancel_signal.store(false, Ordering::SeqCst);

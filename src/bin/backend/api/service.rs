@@ -19,7 +19,7 @@ use chief::flow::{
     suite_command_for_kind, terminate_process_tree,
 };
 use chief::git::GitOps;
-use chief::scheduler::Scheduler;
+use chief::scheduler::{Scheduler, StopMode};
 use chief::service::ChiefEngine;
 use chief::storage::{EventQuery, ProjectStore, ReadinessStatus};
 use chrono::Utc;
@@ -236,6 +236,16 @@ impl ApiService {
             .map_err(ApiError::internal)?;
         Ok(MessageResponse {
             message: format!("stop requested for project {project}"),
+        })
+    }
+
+    pub async fn pause_project(&self, project: &str) -> Result<MessageResponse, ApiError> {
+        self.scheduler
+            .pause_project(project)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(MessageResponse {
+            message: format!("pause requested for project {project}"),
         })
     }
 
@@ -513,6 +523,10 @@ impl ApiService {
                 .as_ref()
                 .map(|view| view.stop_requested)
                 .unwrap_or(false),
+            stop_mode: runtime
+                .as_ref()
+                .map(|view| view.stop_mode)
+                .unwrap_or(StopMode::None),
             active_agents: runtime
                 .as_ref()
                 .map(|view| view.active_workers)

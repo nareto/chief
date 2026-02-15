@@ -1,5 +1,6 @@
 use crate::config::ChiefConfig;
 use crate::domain::{AgentOutput, WaitState};
+use crate::flow::{configure_process_group, terminate_process_tree};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::io::{self, Read, Write};
@@ -133,6 +134,7 @@ fn run_command_backed_agent(
     process.stdin(Stdio::piped());
     process.stdout(Stdio::piped());
     process.stderr(Stdio::piped());
+    configure_process_group(&mut process);
 
     let mut child = process
         .spawn()
@@ -301,12 +303,11 @@ fn wait_with_timeout(
     timeout_seconds: Option<u64>,
     cancel_signal: Option<&AtomicBool>,
 ) -> Result<(Output, WaitState)> {
-    let Some(timeout_seconds) = timeout_seconds else {
-        let output = child.wait_with_output()?;
-        return Ok((output, WaitState::Completed));
-    };
-
-    if timeout_seconds == 0 {
+    let timeout = timeout_seconds
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs);
+    let should_poll = timeout.is_some() || cancel_signal.is_some();
+    if !should_poll {
         let output = child.wait_with_output()?;
         return Ok((output, WaitState::Completed));
     }
@@ -314,7 +315,6 @@ fn wait_with_timeout(
     let mut stdout_handle = child.stdout.take().map(spawn_reader_thread);
     let mut stderr_handle = child.stderr.take().map(spawn_reader_thread);
 
-    let timeout = Duration::from_secs(timeout_seconds);
     let started = Instant::now();
 
     loop {
@@ -331,7 +331,7 @@ fn wait_with_timeout(
             .map(|flag| flag.load(Ordering::SeqCst))
             .unwrap_or(false)
         {
-            let _ = child.kill();
+            terminate_process_tree(&mut child);
             let status = child.wait()?;
             return collect_output(
                 status,
@@ -341,8 +341,11 @@ fn wait_with_timeout(
             );
         }
 
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
+        if timeout
+            .map(|limit| started.elapsed() >= limit)
+            .unwrap_or(false)
+        {
+            terminate_process_tree(&mut child);
             let status = child.wait()?;
             return collect_output(
                 status,
@@ -509,6 +512,7 @@ mod tests {
         process
             .arg("-lc")
             .arg("dd if=/dev/zero bs=1024 count=512 2>/dev/null");
+        configure_process_group(&mut process);
         process.stdout(Stdio::piped());
         process.stderr(Stdio::piped());
         let child = process.spawn().expect("spawn dd");
@@ -518,5 +522,35 @@ mod tests {
         assert_eq!(state, WaitState::Completed);
         assert!(output.status.success());
         assert!(output.stdout.len() >= 512 * 1024);
+    }
+
+    #[test]
+    fn wait_with_timeout_honors_cancel_without_timeout() {
+        let mut process = Command::new("sh");
+        process.arg("-lc").arg("sleep 10");
+        configure_process_group(&mut process);
+        process.stdout(Stdio::piped());
+        process.stderr(Stdio::piped());
+        let child = process.spawn().expect("spawn sleep");
+
+        let cancel_signal = Arc::new(AtomicBool::new(false));
+        let trigger = cancel_signal.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            trigger.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let (output, state) =
+            wait_with_timeout(child, None, Some(cancel_signal.as_ref())).expect("cancelled wait");
+        assert_eq!(state, WaitState::Cancelled);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancelled wait should return quickly"
+        );
+        assert!(
+            !output.status.success(),
+            "cancelled process should not report success"
+        );
     }
 }
