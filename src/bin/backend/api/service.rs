@@ -22,7 +22,7 @@ use chief::git::{
     GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, git_output_has_transient_lock_contention_signature,
     run_git_command_with_retry,
 };
-use chief::scheduler::Scheduler;
+use chief::scheduler::{Scheduler, StopMode};
 use chief::service::ChiefEngine;
 use chief::storage::{EventQuery, ProjectStore, ReadinessStatus};
 use chrono::Utc;
