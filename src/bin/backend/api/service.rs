@@ -840,6 +840,73 @@ impl ApiService {
                 return Err(ApiError::internal(err));
             }
         };
+        let readiness_task = {
+            let service = self.clone();
+            let project_name = project.to_owned();
+            let store = context.store.clone();
+            let readiness_run_id_for_task = readiness_run_id.clone();
+            tokio::spawn(async move {
+                service
+                    .execute_and_persist_readiness_check(
+                        project_name,
+                        store,
+                        readiness_run_id_for_task,
+                        readiness_log,
+                        readiness_stream,
+                        command_plans,
+                        suite_count,
+                        command_count,
+                        cancel_signal,
+                    )
+                    .await
+            })
+        };
+
+        match readiness_task.await {
+            Ok(result) => result,
+            Err(err) => {
+                let summary = format!("Not ready: pre-run checks task failed ({err})");
+                let details = json!({
+                    "error": err.to_string(),
+                    "commands_total": command_count,
+                    "suite_count": suite_count,
+                });
+                let _ = context.store.set_readiness_result(
+                    ReadinessStatus::NotReady,
+                    &summary,
+                    &details,
+                );
+                finish_readiness_run(RunExitStatus::Failure);
+                Err(ApiError::internal(anyhow!(
+                    "pre-run checks task failed: {err}"
+                )))
+            }
+        }
+    }
+
+    async fn execute_and_persist_readiness_check(
+        &self,
+        project: String,
+        store: ProjectStore,
+        readiness_run_id: String,
+        readiness_log: ReadinessLogContext,
+        readiness_stream: ReadinessStreamContext,
+        command_plans: Vec<ReadinessCommandPlan>,
+        suite_count: usize,
+        command_count: usize,
+        cancel_signal: Arc<AtomicBool>,
+    ) -> Result<(), ApiError> {
+        let finish_readiness_run = |status: RunExitStatus| {
+            if let Err(err) = store.finish_run(&readiness_run_id, status) {
+                warn!(
+                    project = %project,
+                    run_id = %readiness_run_id,
+                    error = %err,
+                    "failed to finish pre-run checks event run"
+                );
+            }
+        };
+
         let execution = tokio::task::spawn_blocking({
             let cancel_signal = cancel_signal.clone();
             let readiness_stream = readiness_stream.clone();
@@ -852,7 +919,7 @@ impl ApiService {
             }
         })
         .await;
-        self.clear_readiness_cancel_signal(project, &cancel_signal)
+        self.clear_readiness_cancel_signal(&project, &cancel_signal)
             .await;
 
         let results = match execution {
@@ -873,11 +940,7 @@ impl ApiService {
                     "suite_count": suite_count,
                     "cancelled_by_user": cancelled_by_user,
                 });
-                let _ = context.store.set_readiness_result(
-                    ReadinessStatus::NotReady,
-                    &summary,
-                    &details,
-                );
+                let _ = store.set_readiness_result(ReadinessStatus::NotReady, &summary, &details);
                 let mut payload = readiness_payload("pre_run_checks_failed");
                 payload.insert(
                     "error".to_owned(),
@@ -916,11 +979,7 @@ impl ApiService {
                     "commands_total": command_count,
                     "suite_count": suite_count,
                 });
-                let _ = context.store.set_readiness_result(
-                    ReadinessStatus::NotReady,
-                    &summary,
-                    &details,
-                );
+                let _ = store.set_readiness_result(ReadinessStatus::NotReady, &summary, &details);
                 let mut payload = readiness_payload("pre_run_checks_failed");
                 payload.insert(
                     "error".to_owned(),
@@ -953,16 +1012,13 @@ impl ApiService {
             ReadinessStatus::NotReady
         };
 
-        if let Err(err) = context
-            .store
-            .set_readiness_result(final_status, &summary, &details)
-        {
+        if let Err(err) = store.set_readiness_result(final_status, &summary, &details) {
             finish_readiness_run(RunExitStatus::Failure);
             return Err(ApiError::internal(err));
         }
 
         info!(
-            project,
+            project = %project,
             suites = suite_count,
             commands = results.len(),
             failed_commands,
@@ -2811,6 +2867,101 @@ suites:
         assert!(
             readiness.summary.contains("Not ready"),
             "readiness summary should explain command failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_project_persists_pre_run_check_result_if_request_future_is_dropped() {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: pending-1
+    todo: Example pending todo
+    expectations: Example expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: single_prompt
+suites:
+  - name: smoke
+    language: rust
+    framework: cargo
+    test_root: .
+    test_command: "sleep 2""#,
+        );
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+
+        let service_for_start = service.clone();
+        let project_for_start = project_name.clone();
+        let start_handle = tokio::spawn(async move {
+            service_for_start
+                .start_project(
+                    project_for_start,
+                    StartProjectRequest {
+                        agents: Some(1),
+                        flow: None,
+                        model: None,
+                        start_anyway: None,
+                    },
+                )
+                .await
+        });
+
+        let mut observed_checking_state = false;
+        for _ in 0..50 {
+            let readiness = store
+                .get_readiness_state()
+                .expect("readiness state should be readable while checks run");
+            if readiness.status == ReadinessStatus::Checking {
+                observed_checking_state = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            observed_checking_state,
+            "expected pre-run checks to enter checking state before aborting request future"
+        );
+
+        start_handle.abort();
+        let _ = start_handle.await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(2600)).await;
+
+        let readiness = store
+            .get_readiness_state()
+            .expect("readiness state should be persisted even after request future drops");
+        assert_eq!(
+            readiness.status,
+            ReadinessStatus::Ready,
+            "pre-run checks should persist terminal status when start request future is dropped"
+        );
+        assert!(
+            readiness.checked_at.is_some(),
+            "pre-run checks should persist completion timestamp when request future is dropped"
         );
     }
 
