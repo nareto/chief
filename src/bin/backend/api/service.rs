@@ -18,8 +18,11 @@ use chief::flow::{
     FlowKind, SuiteCommandKind, configure_process_group, execute_suite_command, suite_command_cwd,
     suite_command_for_kind, terminate_process_tree,
 };
-use chief::git::GitOps;
-use chief::scheduler::{Scheduler, StopMode};
+use chief::git::{
+    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, git_output_has_transient_lock_contention_signature,
+    run_git_command_with_retry,
+};
+use chief::scheduler::Scheduler;
 use chief::service::ChiefEngine;
 use chief::storage::{EventQuery, ProjectStore, ReadinessStatus};
 use chrono::Utc;
@@ -1629,19 +1632,9 @@ fn readiness_chief_yaml_hash(details: &serde_json::Value) -> Option<&str> {
 
 fn git_list_tracked_files(project_dir: &Path, test_root: &str) -> Vec<String> {
     let output = if test_root.is_empty() || test_root == "." {
-        Command::new("git")
-            .arg("-c")
-            .arg("safe.directory=*")
-            .args(["ls-files", "--"])
-            .current_dir(project_dir)
-            .output()
+        run_git_command_with_retry(project_dir, &["ls-files", "--"])
     } else {
-        Command::new("git")
-            .arg("-c")
-            .arg("safe.directory=*")
-            .args(["ls-files", "--", test_root])
-            .current_dir(project_dir)
-            .output()
+        run_git_command_with_retry(project_dir, &["ls-files", "--", test_root])
     };
 
     let Ok(output) = output else {
@@ -2313,20 +2306,23 @@ fn stream_event_payload(event: &RunSuiteCheckStreamEvent) -> anyhow::Result<Vec<
 }
 
 fn run_git_capture(project_dir: &PathBuf, args: &[&str]) -> Result<String, ApiError> {
-    let output = Command::new("git")
-        .arg("-c")
-        .arg("safe.directory=*")
-        .args(args)
-        .current_dir(project_dir)
-        .output()
+    let output = run_git_command_with_retry(project_dir, args)
         .with_context(|| format!("failed to run git {}", args.join(" ")))
         .map_err(ApiError::internal)?;
 
     if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if git_output_has_transient_lock_contention_signature(&output) {
+            return Err(ApiError::bad_request(format!(
+                "transient lock/contention retry budget exhausted after {GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS} retries: git {} failed: {}",
+                args.join(" "),
+                detail
+            )));
+        }
         return Err(ApiError::bad_request(format!(
             "git {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            detail
         )));
     }
 
