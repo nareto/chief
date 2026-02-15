@@ -87,8 +87,9 @@ The backend manages multiple projects under one projects directory, plus optiona
 
 For each project, the scheduler supports configurable parallel coding agents:
 
-- default is `1` (no parallelism).
-- when `agents > 1`, each worker runs in a dedicated git worktree.
+- default is `1` (single worker).
+- each claimed todo runs in a dedicated git worktree at `../<project_name>__worktrees/<job_id>`.
+- `agents` controls how many workers can run in parallel.
 - todo selection is serialized (one selector at a time) to reduce conflicts.
 - for workers after the first, selector prompt (`prompts/todo_select.md`) includes:
   - available todos (not done, not in progress)

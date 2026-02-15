@@ -620,19 +620,85 @@ impl ChiefEngine {
             .context("failed to set job status running")
             .map_err(|err| self.classify_runtime_error(err))?;
 
+        let main_branch = self
+            .project
+            .git
+            .current_branch()
+            .unwrap_or_else(|_| "main".to_owned());
+        let worktree_root =
+            worktree_root_for_project(&self.project.project_dir, &self.project.name);
+        fs::create_dir_all(&worktree_root)
+            .context("failed to create worktree root directory")
+            .map_err(|err| self.classify_runtime_error(err))?;
+        let branch = format!("chief/{}/{}", self.project.name, job.id);
+        let work_dir = worktree_root.join(&job.id);
+        self.project
+            .git
+            .create_worktree(&branch, &work_dir)
+            .context("failed to create worker worktree")
+            .map_err(|err| self.classify_runtime_error(err))?;
+
+        let mut updated_job = job.clone();
+        updated_job.worktree_path = Some(work_dir.display().to_string());
+        if let Err(err) = self.project.store.upsert_job(&updated_job) {
+            self.log_state_update_error(
+                run_id,
+                Some(&job.id),
+                Some(&todo.id),
+                "failed to persist worker worktree path",
+                &err,
+            );
+        }
+        job = updated_job;
+
         match self.run_single_todo_with_retries(
             run_id,
             &job.id,
             1,
             todo.clone(),
             flow_kind,
-            self.project.project_dir.clone(),
+            work_dir.clone(),
             model_override,
             Arc::new(AtomicBool::new(false)),
             max_retries.max(1),
             |attempt, total, err| on_retry(attempt, total, err),
         ) {
             Ok(outcome) => {
+                if let Err(err) = self
+                    .project
+                    .git
+                    .merge_branch_into_main(&branch, &main_branch)
+                    .and_then(|_| self.project.git.remove_worktree(&work_dir, &branch))
+                {
+                    let err_for_status = err.to_string();
+                    if let Err(status_err) =
+                        self.project
+                            .store
+                            .update_todo_status(&todo.id, TodoStatus::Pending, None)
+                    {
+                        self.log_state_update_error(
+                            run_id,
+                            Some(&job.id),
+                            Some(&todo.id),
+                            "failed to mark todo pending after merge error",
+                            &status_err,
+                        );
+                    }
+                    if let Err(status_err) =
+                        self.project
+                            .set_job_status(job, JobStatus::Failed, Some(err_for_status.clone()))
+                    {
+                        self.log_state_update_error(
+                            run_id,
+                            None,
+                            Some(&todo.id),
+                            "failed to update job status to failed after merge error",
+                            &status_err,
+                        );
+                    }
+                    return Err(self.classify_runtime_error(err));
+                }
+
                 if let Some(commit_hash) = outcome.commit_hash.as_deref()
                     && let Err(err) = self.project.store.update_todo_status(
                         &todo.id,
@@ -671,6 +737,15 @@ impl ChiefEngine {
                         Some(&todo.id),
                         "failed to mark todo pending after worker failure",
                         &status_err,
+                    );
+                }
+                if let Err(remove_err) = self.project.git.remove_worktree(&work_dir, &branch) {
+                    self.log_state_update_error(
+                        run_id,
+                        Some(&job.id),
+                        Some(&todo.id),
+                        "failed to cleanup worker worktree",
+                        &remove_err,
                     );
                 }
                 if let Err(status_err) =
@@ -1070,6 +1145,11 @@ impl ChiefEngine {
             warn!("failed to record state-update error event: {log_err:#}");
         }
     }
+}
+
+fn worktree_root_for_project(project_dir: &Path, project_name: &str) -> PathBuf {
+    let parent_dir = project_dir.parent().unwrap_or(project_dir);
+    parent_dir.join(format!("{project_name}__worktrees"))
 }
 
 fn retry_transient_lock_contention_with_delay<T, F, H, S>(
