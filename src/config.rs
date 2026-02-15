@@ -98,6 +98,23 @@ fn default_flow() -> String {
     "single_prompt".to_owned()
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteCacheMode {
+    #[default]
+    Copy,
+    Symlink,
+}
+
+impl SuiteCacheMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Symlink => "symlink",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestSuiteConfig {
     pub name: String,
@@ -118,6 +135,12 @@ pub struct TestSuiteConfig {
     pub test_init: Option<String>,
     #[serde(default)]
     pub test_setup: Option<String>,
+    #[serde(default)]
+    pub cache_paths: Vec<String>,
+    #[serde(default)]
+    pub cache_key_files: Vec<String>,
+    #[serde(default)]
+    pub cache_mode: SuiteCacheMode,
     #[serde(default)]
     pub post_green_command: Option<String>,
     #[serde(default)]
@@ -242,5 +265,32 @@ mod tests {
         let yaml = "chief:\n  agent_timeout_seconds: 600\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.chief.agent_timeout_seconds, 600);
+    }
+
+    #[test]
+    fn parse_suite_cache_mode_defaults_to_copy() {
+        let yaml = r#"suites:
+  - name: backend
+    language: Rust
+    framework: cargo
+    test_root: .
+    test_command: cargo test
+    cache_paths: [target]"#;
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.suites[0].cache_mode, SuiteCacheMode::Copy);
+    }
+
+    #[test]
+    fn parse_suite_cache_mode_symlink() {
+        let yaml = r#"suites:
+  - name: backend
+    language: Rust
+    framework: cargo
+    test_root: .
+    test_command: cargo test
+    cache_paths: [target]
+    cache_mode: symlink"#;
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.suites[0].cache_mode, SuiteCacheMode::Symlink);
     }
 }

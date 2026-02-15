@@ -17,6 +17,7 @@ use crate::orchestrator::{
 };
 use crate::prompt::{FsPromptStore, PromptStore};
 use crate::storage::ProjectStore;
+use crate::worktree_cache;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::cell::RefCell;
@@ -640,6 +641,53 @@ impl ChiefEngine {
             .create_worktree(&branch, &work_dir)
             .context("failed to create worker worktree")
             .map_err(|err| self.classify_runtime_error(err))?;
+
+        match worktree_cache::file_content_md5(&self.project.config_path).and_then(
+            |chief_yaml_hash| {
+                worktree_cache::hydrate_suite_caches_into_worktree(
+                    &self.project.project_dir,
+                    &self.project.name,
+                    &self.project.chief_yaml.suites,
+                    &work_dir,
+                    &chief_yaml_hash,
+                )
+            },
+        ) {
+            Ok(cache_report) => {
+                if cache_report.linked_paths > 0 {
+                    self.log_runtime_event(
+                        run_id,
+                        Some(&job.id),
+                        Some(&todo.id),
+                        "info",
+                        None,
+                        EventType::Msg,
+                        "Hydrated suite dependency cache into worker worktree",
+                        payload_from_json(serde_json::json!({
+                            "linked_paths": cache_report.linked_paths,
+                            "skipped_existing_paths": cache_report.skipped_existing_paths,
+                            "missing_cache_paths": cache_report.missing_cache_paths,
+                            "suites_considered": cache_report.suites_considered,
+                            "invalid_paths": cache_report.invalid_paths,
+                        })),
+                    );
+                }
+            }
+            Err(err) => {
+                self.log_runtime_event(
+                    run_id,
+                    Some(&job.id),
+                    Some(&todo.id),
+                    "warning",
+                    None,
+                    EventType::Error,
+                    "Failed to hydrate suite dependency cache into worker worktree",
+                    payload_from_json(serde_json::json!({
+                        "error": err.to_string(),
+                    })),
+                );
+            }
+        }
 
         let mut updated_job = job.clone();
         updated_job.worktree_path = Some(work_dir.display().to_string());
