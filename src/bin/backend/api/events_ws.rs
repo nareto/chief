@@ -1,4 +1,5 @@
 use crate::api::error::ApiError;
+use crate::api::service::ReadinessStreamMessage;
 use crate::app::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
@@ -7,6 +8,7 @@ use chief::storage::ProjectStore;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::sync::Arc;
+use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::time::{Duration, sleep};
 use tracing::warn;
 
@@ -19,6 +21,8 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(500);
 enum EventsWsMessage {
     Snapshot { events: Vec<EventRecord> },
     Event { event: EventRecord },
+    ReadinessStreamReset,
+    ReadinessStreamChunk { text: String },
     Error { message: String },
 }
 
@@ -28,10 +32,26 @@ pub async fn events_ws(
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     let store = state.service.project_store_for_events(&project).await?;
-    Ok(ws.on_upgrade(move |socket| handle_events_socket(socket, project, store)))
+    let readiness_receiver = state.service.subscribe_readiness_stream();
+    let readiness_snapshot = state.service.readiness_stream_snapshot(&project);
+    Ok(ws.on_upgrade(move |socket| {
+        handle_events_socket(
+            socket,
+            project,
+            store,
+            readiness_receiver,
+            readiness_snapshot,
+        )
+    }))
 }
 
-async fn handle_events_socket(socket: WebSocket, project: String, store: ProjectStore) {
+async fn handle_events_socket(
+    socket: WebSocket,
+    project: String,
+    store: ProjectStore,
+    mut readiness_receiver: BroadcastReceiver<ReadinessStreamMessage>,
+    readiness_snapshot: Option<String>,
+) {
     let (mut sender, mut receiver) = socket.split();
 
     let mut last_id = match collect_snapshot(&store) {
@@ -56,6 +76,24 @@ async fn handle_events_socket(socket: WebSocket, project: String, store: Project
         }
     };
 
+    if let Some(snapshot) = readiness_snapshot {
+        if send_message(&mut sender, EventsWsMessage::ReadinessStreamReset)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if send_message(
+            &mut sender,
+            EventsWsMessage::ReadinessStreamChunk { text: snapshot },
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+    }
+
     'stream: loop {
         tokio::select! {
             maybe_message = receiver.next() => {
@@ -68,6 +106,40 @@ async fn handle_events_socket(socket: WebSocket, project: String, store: Project
                     Some(Ok(Message::Close(_))) | None => break 'stream,
                     Some(Ok(_)) => {}
                     Some(Err(_)) => break 'stream,
+                }
+            }
+            readiness_message = readiness_receiver.recv() => {
+                match readiness_message {
+                    Ok(ReadinessStreamMessage::Reset { project: stream_project }) => {
+                        if stream_project != project {
+                            continue;
+                        }
+                        if send_message(&mut sender, EventsWsMessage::ReadinessStreamReset)
+                            .await
+                            .is_err()
+                        {
+                            break 'stream;
+                        }
+                    }
+                    Ok(ReadinessStreamMessage::Chunk { project: stream_project, text }) => {
+                        if stream_project != project {
+                            continue;
+                        }
+                        if send_message(&mut sender, EventsWsMessage::ReadinessStreamChunk { text })
+                            .await
+                            .is_err()
+                        {
+                            break 'stream;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            project = %project,
+                            skipped,
+                            "events stream readiness channel lagged"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'stream,
                 }
             }
             _ = sleep(STREAM_POLL_INTERVAL) => {
