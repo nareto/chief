@@ -6,7 +6,7 @@ use crate::git::GitOps;
 use crate::orchestrator::{OrchestratorError, OrchestratorResult};
 use crate::service::{ChiefEngine, ProjectContext};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
@@ -111,7 +111,7 @@ where
     let mut branch_name = None::<String>;
 
     if use_worktree {
-        let worktree_root = context.project_dir.join(".chief-worktrees");
+        let worktree_root = worktree_root_for_project(&context.project_dir, &context.name);
         if let Err(err) = fs::create_dir_all(&worktree_root) {
             update_job(
                 &context,
@@ -359,6 +359,11 @@ where
             }
         }
     }
+}
+
+fn worktree_root_for_project(project_dir: &Path, project_name: &str) -> PathBuf {
+    let parent_dir = project_dir.parent().unwrap_or(project_dir);
+    parent_dir.join(format!("{project_name}__worktrees"))
 }
 
 fn report_state_update_error(

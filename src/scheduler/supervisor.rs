@@ -118,7 +118,7 @@ impl Scheduler {
                     break;
                 };
 
-                let use_worktree = desired_agents > 1;
+                let use_worktree = true;
                 let mut job = context.create_job(
                     &run_id,
                     spawn_count,
