@@ -8,6 +8,7 @@ pub struct StartProjectRequest {
     pub agents: Option<usize>,
     pub flow: Option<String>,
     pub model: Option<String>,
+    pub start_anyway: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +190,16 @@ pub struct StateResponse {
     pub dirty_files: Vec<String>,
     pub todos: TodoProgress,
     pub active_job: Option<ActiveJobResponse>,
+    pub readiness: ProjectReadinessResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectReadinessResponse {
+    pub status: String,
+    pub summary: String,
+    pub checking_started_at: Option<String>,
+    pub checked_at: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Serialize)]

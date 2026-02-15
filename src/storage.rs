@@ -62,6 +62,46 @@ pub struct EventQuery {
     pub contains_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadinessStatus {
+    Checking,
+    Ready,
+    NotReady,
+}
+
+impl ReadinessStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Checking => "checking",
+            Self::Ready => "ready",
+            Self::NotReady => "not_ready",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectReadinessState {
+    pub status: ReadinessStatus,
+    pub summary: String,
+    pub details: Value,
+    pub checking_started_at: Option<DateTime<Utc>>,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl ProjectReadinessState {
+    fn initial_not_checked() -> Self {
+        Self {
+            status: ReadinessStatus::NotReady,
+            summary: "Readiness check has not run yet.".to_owned(),
+            details: Value::Object(serde_json::Map::new()),
+            checking_started_at: None,
+            checked_at: None,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
 impl ProjectStore {
     pub fn new(project_dir: impl AsRef<Path>) -> Self {
         let project_dir = project_dir.as_ref().to_path_buf();
@@ -510,6 +550,76 @@ impl ProjectStore {
             .context("failed to list jobs")
     }
 
+    pub fn get_readiness_state(&self) -> Result<ProjectReadinessState> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT status, summary, details, checking_started_at, checked_at, updated_at
+             FROM readiness_state
+             WHERE id = 1
+             LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row([], parse_readiness_row)
+            .optional()
+            .context("failed to read readiness state")?;
+        Ok(row.unwrap_or_else(ProjectReadinessState::initial_not_checked))
+    }
+
+    pub fn set_readiness_checking(&self, summary: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO readiness_state (id, status, summary, details, checking_started_at, checked_at, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, NULL, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 status = excluded.status,
+                 summary = excluded.summary,
+                 details = excluded.details,
+                 checking_started_at = excluded.checking_started_at,
+                 checked_at = NULL,
+                 updated_at = excluded.updated_at",
+            params![
+                ReadinessStatus::Checking.as_str(),
+                summary.trim(),
+                "{}",
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_readiness_result(
+        &self,
+        status: ReadinessStatus,
+        summary: &str,
+        details: &Value,
+    ) -> Result<()> {
+        if status == ReadinessStatus::Checking {
+            return Err(anyhow!(
+                "readiness result status cannot be '{}'",
+                ReadinessStatus::Checking.as_str()
+            ));
+        }
+
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        let details_text =
+            serde_json::to_string(details).context("failed serializing readiness state details")?;
+        conn.execute(
+            "INSERT INTO readiness_state (id, status, summary, details, checking_started_at, checked_at, updated_at)
+             VALUES (1, ?1, ?2, ?3, NULL, ?4, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 status = excluded.status,
+                 summary = excluded.summary,
+                 details = excluded.details,
+                 checking_started_at = NULL,
+                 checked_at = excluded.checked_at,
+                 updated_at = excluded.updated_at",
+            params![status.as_str(), summary.trim(), details_text, now],
+        )?;
+        Ok(())
+    }
+
     pub fn record_event(&self, event: &EventRecord) -> Result<()> {
         let conn = self.conn()?;
         let payload = serde_json::to_string(&event.payload)?;
@@ -865,6 +975,15 @@ impl ProjectStore {
                 msg TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS readiness_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                status TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                details TEXT NOT NULL,
+                checking_started_at TEXT,
+                checked_at TEXT,
+                updated_at TEXT NOT NULL
             );",
         )
         .context("failed to initialize sqlite schema")?;
@@ -921,6 +1040,19 @@ impl ProjectStore {
                 "msg",
                 "event_type",
                 "payload",
+            ],
+        )?;
+        self.assert_table_columns(
+            conn,
+            "readiness_state",
+            &[
+                "id",
+                "status",
+                "summary",
+                "details",
+                "checking_started_at",
+                "checked_at",
+                "updated_at",
             ],
         )?;
         if self.table_has_any_foreign_key(conn, "events")? {
@@ -1002,6 +1134,49 @@ fn parse_job_status(value: &str) -> JobStatus {
         "cancelled" => JobStatus::Cancelled,
         _ => JobStatus::Queued,
     }
+}
+
+fn parse_readiness_status(value: &str) -> ReadinessStatus {
+    match value {
+        "checking" => ReadinessStatus::Checking,
+        "ready" => ReadinessStatus::Ready,
+        _ => ReadinessStatus::NotReady,
+    }
+}
+
+fn parse_readiness_row(row: &Row<'_>) -> rusqlite::Result<ProjectReadinessState> {
+    let status = row
+        .get::<_, Option<String>>(0)?
+        .map(|value| parse_readiness_status(&value))
+        .unwrap_or(ReadinessStatus::NotReady);
+    let summary = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+    let details_text = row.get::<_, Option<String>>(2)?;
+    let details = details_text
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let checking_started_at = row
+        .get::<_, Option<String>>(3)?
+        .as_deref()
+        .and_then(|value| parse_datetime(value).ok());
+    let checked_at = row
+        .get::<_, Option<String>>(4)?
+        .as_deref()
+        .and_then(|value| parse_datetime(value).ok());
+    let updated_at = row
+        .get::<_, Option<String>>(5)?
+        .as_deref()
+        .and_then(|value| parse_datetime(value).ok())
+        .unwrap_or_else(Utc::now);
+
+    Ok(ProjectReadinessState {
+        status,
+        summary,
+        details,
+        checking_started_at,
+        checked_at,
+        updated_at,
+    })
 }
 
 fn parse_event_row(row: &Row<'_>) -> rusqlite::Result<EventRecord> {
@@ -1094,10 +1269,11 @@ fn json_to_sql_value(value: Value) -> rusqlite::types::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectStore;
+    use super::{ProjectStore, ReadinessStatus};
     use crate::domain::{EventRecord, EventType, Todo, TodoStatus};
     use chrono::Utc;
     use rusqlite::{Connection, params};
+    use serde_json::json;
     use std::collections::{BTreeMap, HashSet};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1182,6 +1358,65 @@ mod tests {
             .find(|item| item.id == todo.id)
             .expect("todo should exist in file");
         assert_eq!(file_todo.status, TodoStatus::InProgress);
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn readiness_state_defaults_to_not_ready_before_any_check() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        let readiness = store
+            .get_readiness_state()
+            .expect("default readiness state should be readable");
+        assert_eq!(readiness.status, ReadinessStatus::NotReady);
+        assert_eq!(readiness.summary, "Readiness check has not run yet.");
+        assert!(readiness.checked_at.is_none());
+        assert!(readiness.checking_started_at.is_none());
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn readiness_state_transitions_from_checking_to_ready() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+
+        store
+            .set_readiness_checking("checking now")
+            .expect("setting readiness checking should succeed");
+        let checking = store
+            .get_readiness_state()
+            .expect("checking readiness state should be readable");
+        assert_eq!(checking.status, ReadinessStatus::Checking);
+        assert_eq!(checking.summary, "checking now");
+        assert!(checking.checking_started_at.is_some());
+        assert!(checking.checked_at.is_none());
+
+        store
+            .set_readiness_result(
+                ReadinessStatus::Ready,
+                "ready now",
+                &json!({ "commands_total": 3, "commands_failed": 0 }),
+            )
+            .expect("setting readiness result should succeed");
+        let ready = store
+            .get_readiness_state()
+            .expect("ready state should be readable");
+        assert_eq!(ready.status, ReadinessStatus::Ready);
+        assert_eq!(ready.summary, "ready now");
+        assert!(ready.checked_at.is_some());
+        assert!(ready.checking_started_at.is_none());
+        assert_eq!(
+            ready
+                .details
+                .get("commands_failed")
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
 
         let _ = fs::remove_dir_all(&project_dir);
     }
