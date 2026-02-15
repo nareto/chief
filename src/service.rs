@@ -634,7 +634,7 @@ impl ChiefEngine {
             .context("failed to create worktree root directory")
             .map_err(|err| self.classify_runtime_error(err))?;
         let branch = format!("chief/{}/{}", self.project.name, job.id);
-        let work_dir = worktree_root.join(&job.id);
+        let work_dir = worktree_root.join(worker_worktree_dir_name(&job.id));
         self.project
             .git
             .create_worktree(&branch, &work_dir)
@@ -1161,6 +1161,10 @@ fn worktree_root_for_project(project_dir: &Path, project_name: &str) -> PathBuf 
     parent_dir.join(format!("{project_name}__worktrees"))
 }
 
+fn worker_worktree_dir_name(job_id: &str) -> String {
+    format!("chief_{job_id}")
+}
+
 fn retry_transient_lock_contention_with_delay<T, F, H, S>(
     initial_error: anyhow::Error,
     mut operation: F,
@@ -1365,6 +1369,14 @@ mod tests {
         assert!(
             !context.store.db_path.exists(),
             "rejected start_run should not create chief.db"
+        );
+    }
+
+    #[test]
+    fn worker_worktree_dir_name_uses_chief_prefix() {
+        assert_eq!(
+            super::worker_worktree_dir_name("abc-123"),
+            "chief_abc-123".to_owned()
         );
     }
 

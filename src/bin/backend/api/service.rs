@@ -19,8 +19,8 @@ use chief::flow::{
     suite_command_for_kind, terminate_process_tree,
 };
 use chief::git::{
-    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, git_output_has_transient_lock_contention_signature,
-    run_git_command_with_retry,
+    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, ShellGitOps,
+    git_output_has_transient_lock_contention_signature, run_git_command_with_retry,
 };
 use chief::scheduler::{Scheduler, StopMode};
 use chief::service::ChiefEngine;
@@ -59,6 +59,12 @@ struct SuiteCheckPlan {
     cwd_display: String,
     env: BTreeMap<String, String>,
     timeout_seconds: u64,
+}
+
+struct SuiteCheckExecution {
+    plan: SuiteCheckPlan,
+    git: ShellGitOps,
+    worktree: TempWorktree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +109,12 @@ struct ReadinessCommandResult {
     exit_code: i32,
     blocking_failure: bool,
     output_tail: String,
+}
+
+#[derive(Debug, Clone)]
+struct TempWorktree {
+    branch: String,
+    path: PathBuf,
 }
 
 const RETRY_CLEANUP_DISCARDED_MSG_PREFIX: &str =
@@ -795,7 +807,9 @@ impl ApiService {
         context: &chief::service::ProjectContext,
         chief_yaml_hash: &str,
     ) -> Result<(), ApiError> {
-        let command_plans = build_readiness_command_plans(context);
+        let readiness_worktree =
+            create_temp_worktree(context, "pre-run-checks").map_err(ApiError::internal)?;
+        let command_plans = build_readiness_command_plans(context, &readiness_worktree.path);
         let suite_count = context.chief_yaml.suites.len();
         let command_count = command_plans.len();
         let checking_summary = if suite_count == 0 {
@@ -865,6 +879,15 @@ impl ApiService {
         let cancel_signal = match self.register_readiness_cancel_signal(project).await {
             Ok(signal) => signal,
             Err(err) => {
+                if let Err(cleanup_err) = cleanup_temp_worktree(&context.git, &readiness_worktree) {
+                    warn!(
+                        project,
+                        branch = %readiness_worktree.branch,
+                        worktree = %readiness_worktree.path.display(),
+                        error = %cleanup_err,
+                        "failed to cleanup pre-run checks worktree after cancel registration failure"
+                    );
+                }
                 finish_readiness_run(RunExitStatus::Failure);
                 return Err(ApiError::internal(err));
             }
@@ -875,6 +898,8 @@ impl ApiService {
             let store = context.store.clone();
             let readiness_run_id_for_task = readiness_run_id.clone();
             let chief_yaml_hash_for_task = chief_yaml_hash.to_owned();
+            let readiness_git = context.git.clone();
+            let readiness_worktree_for_task = readiness_worktree.clone();
             tokio::spawn(async move {
                 service
                     .execute_and_persist_readiness_check(
@@ -888,6 +913,8 @@ impl ApiService {
                         suite_count,
                         command_count,
                         cancel_signal,
+                        readiness_git,
+                        readiness_worktree_for_task,
                     )
                     .await
             })
@@ -896,6 +923,15 @@ impl ApiService {
         match readiness_task.await {
             Ok(result) => result,
             Err(err) => {
+                if let Err(cleanup_err) = cleanup_temp_worktree(&context.git, &readiness_worktree) {
+                    warn!(
+                        project,
+                        branch = %readiness_worktree.branch,
+                        worktree = %readiness_worktree.path.display(),
+                        error = %cleanup_err,
+                        "failed to cleanup pre-run checks worktree after task join failure"
+                    );
+                }
                 let summary = format!("Not ready: pre-run checks task failed ({err})");
                 let details = json!({
                     "error": err.to_string(),
@@ -928,6 +964,8 @@ impl ApiService {
         suite_count: usize,
         command_count: usize,
         cancel_signal: Arc<AtomicBool>,
+        readiness_git: ShellGitOps,
+        readiness_worktree: TempWorktree,
     ) -> Result<(), ApiError> {
         let finish_readiness_run = |status: RunExitStatus| {
             if let Err(err) = store.finish_run(&readiness_run_id, status) {
@@ -954,6 +992,35 @@ impl ApiService {
         .await;
         self.clear_readiness_cancel_signal(&project, &cancel_signal)
             .await;
+        if let Err(err) = cleanup_temp_worktree(&readiness_git, &readiness_worktree) {
+            warn!(
+                project = %project,
+                branch = %readiness_worktree.branch,
+                worktree = %readiness_worktree.path.display(),
+                error = %err,
+                "failed to cleanup pre-run checks worktree"
+            );
+            let cleanup_message = format!(
+                "Warning: failed to cleanup pre-run checks worktree {}: {}\n",
+                readiness_worktree.path.display(),
+                err
+            );
+            readiness_stream.push_text(cleanup_message.clone());
+            let mut payload = readiness_payload("pre_run_checks_worktree_cleanup_failed");
+            payload.insert(
+                "branch".to_owned(),
+                serde_json::Value::String(readiness_worktree.branch.clone()),
+            );
+            payload.insert(
+                "worktree".to_owned(),
+                serde_json::Value::String(readiness_worktree.path.display().to_string()),
+            );
+            payload.insert(
+                "error".to_owned(),
+                serde_json::Value::String(err.to_string()),
+            );
+            record_readiness_event(Some(&readiness_log), "warning", cleanup_message, payload);
+        }
 
         let results = match execution {
             Ok(Ok(results)) => results,
@@ -1133,15 +1200,22 @@ impl ApiService {
         project: &str,
         payload: RunSuiteCheckRequest,
     ) -> Result<RunSuiteCheckResponse, ApiError> {
-        let SuiteCheckPlan {
-            suite_name,
-            kind,
-            command,
-            cwd,
-            cwd_display,
-            env,
-            timeout_seconds,
-        } = self.prepare_suite_check_plan(project, &payload).await?;
+        let SuiteCheckExecution {
+            plan:
+                SuiteCheckPlan {
+                    suite_name,
+                    kind,
+                    command,
+                    cwd,
+                    cwd_display,
+                    env,
+                    timeout_seconds,
+                },
+            git,
+            worktree,
+        } = self
+            .prepare_suite_check_execution(project, &payload)
+            .await?;
         let kind_label = kind.as_str();
         info!(
             project,
@@ -1156,21 +1230,32 @@ impl ApiService {
         let output = tokio::task::spawn_blocking(move || {
             execute_suite_command(&command, &cwd, &env, &cancel_signal, Some(timeout_seconds))
         })
-        .await
-        .map_err(|err| {
-            error!(
-                project,
-                suite = %suite_name,
-                kind = %kind_label,
-                error = %err,
-                "suite command task join failed"
-            );
-            ApiError::internal(anyhow!("suite command task failed: {err}"))
-        })?;
+        .await;
 
-        let output = match output {
-            Ok(result) => result,
-            Err(err) => {
+        let response = match output {
+            Ok(Ok(output)) => {
+                info!(
+                    project,
+                    suite = %suite_name,
+                    kind = %kind_label,
+                    exit_code = output.exit_code,
+                    stdout_len = output.stdout.len(),
+                    stderr_len = output.stderr.len(),
+                    "suite check command finished"
+                );
+
+                Ok(RunSuiteCheckResponse {
+                    suite: suite_name,
+                    kind,
+                    command: output.command,
+                    cwd: cwd_display,
+                    exit_code: output.exit_code,
+                    output: output.merged_output,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                })
+            }
+            Ok(Err(err)) => {
                 error!(
                     project,
                     suite = %suite_name,
@@ -1178,30 +1263,33 @@ impl ApiService {
                     error = %err,
                     "suite command execution failed"
                 );
-                return Err(ApiError::internal(err));
+                Err(ApiError::internal(err))
+            }
+            Err(err) => {
+                error!(
+                    project,
+                    suite = %suite_name,
+                    kind = %kind_label,
+                    error = %err,
+                    "suite command task join failed"
+                );
+                Err(ApiError::internal(anyhow!(
+                    "suite command task failed: {err}"
+                )))
             }
         };
 
-        info!(
-            project,
-            suite = %suite_name,
-            kind = %kind_label,
-            exit_code = output.exit_code,
-            stdout_len = output.stdout.len(),
-            stderr_len = output.stderr.len(),
-            "suite check command finished"
-        );
+        if let Err(err) = cleanup_temp_worktree(&git, &worktree) {
+            warn!(
+                project,
+                branch = %worktree.branch,
+                worktree = %worktree.path.display(),
+                error = %err,
+                "failed to cleanup suite check worktree"
+            );
+        }
 
-        Ok(RunSuiteCheckResponse {
-            suite: suite_name,
-            kind,
-            command: output.command,
-            cwd: cwd_display,
-            exit_code: output.exit_code,
-            output: output.merged_output,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        response
     }
 
     pub async fn run_suite_check_stream(
@@ -1209,7 +1297,13 @@ impl ApiService {
         project: &str,
         payload: RunSuiteCheckRequest,
     ) -> Result<Response, ApiError> {
-        let plan = self.prepare_suite_check_plan(project, &payload).await?;
+        let SuiteCheckExecution {
+            plan,
+            git,
+            worktree,
+        } = self
+            .prepare_suite_check_execution(project, &payload)
+            .await?;
         info!(
             project,
             suite = %plan.suite_name,
@@ -1295,6 +1389,16 @@ impl ApiService {
                     );
                 }
             }
+
+            if let Err(err) = cleanup_temp_worktree(&git, &worktree) {
+                warn!(
+                    project = %project_name,
+                    branch = %worktree.branch,
+                    worktree = %worktree.path.display(),
+                    error = %err,
+                    "failed to cleanup suite check worktree"
+                );
+            }
         });
 
         let body_stream = stream::unfold(receiver, |mut receiver| async move {
@@ -1314,11 +1418,11 @@ impl ApiService {
         Ok((headers, Body::from_stream(body_stream)).into_response())
     }
 
-    async fn prepare_suite_check_plan(
+    async fn prepare_suite_check_execution(
         &self,
         project: &str,
         payload: &RunSuiteCheckRequest,
-    ) -> Result<SuiteCheckPlan, ApiError> {
+    ) -> Result<SuiteCheckExecution, ApiError> {
         let mut context = self.project_context(project).await?;
         context.refresh().map_err(ApiError::internal)?;
 
@@ -1354,20 +1458,25 @@ impl ApiService {
                 ))
             })?;
 
-        let cwd = suite_command_cwd(&context.project_dir, &suite);
+        let worktree = create_temp_worktree(&context, "suite-check").map_err(ApiError::internal)?;
+        let cwd = suite_command_cwd(&worktree.path, &suite);
         let cwd_display = cwd.display().to_string();
 
-        Ok(SuiteCheckPlan {
-            suite_name: suite.name,
-            kind: payload.kind,
-            command,
-            cwd,
-            cwd_display,
-            env: suite.env,
-            timeout_seconds: suite
-                .command_timeout_seconds
-                .unwrap_or(context.chief_yaml.chief.suite_command_timeout_seconds)
-                .max(1),
+        Ok(SuiteCheckExecution {
+            plan: SuiteCheckPlan {
+                suite_name: suite.name,
+                kind: payload.kind,
+                command,
+                cwd,
+                cwd_display,
+                env: suite.env,
+                timeout_seconds: suite
+                    .command_timeout_seconds
+                    .unwrap_or(context.chief_yaml.chief.suite_command_timeout_seconds)
+                    .max(1),
+            },
+            git: context.git.clone(),
+            worktree,
         })
     }
 
@@ -1461,12 +1570,13 @@ impl ApiService {
 
 fn build_readiness_command_plans(
     context: &chief::service::ProjectContext,
+    project_dir: &Path,
 ) -> Vec<ReadinessCommandPlan> {
     let mut plans = Vec::new();
     let default_timeout = context.chief_yaml.chief.suite_command_timeout_seconds;
 
     for suite in &context.chief_yaml.suites {
-        let mut target_candidates = collect_readiness_targets(&context.project_dir, suite);
+        let mut target_candidates = collect_readiness_targets(project_dir, suite);
         if let Some(default_target) = normalized_default_target(suite)
             && !target_candidates.contains(&default_target)
         {
@@ -1476,7 +1586,7 @@ fn build_readiness_command_plans(
             .command_timeout_seconds
             .unwrap_or(default_timeout)
             .max(1);
-        let cwd = suite_command_cwd(&context.project_dir, suite);
+        let cwd = suite_command_cwd(project_dir, suite);
         let cwd_display = cwd.display().to_string();
 
         if let Some(command_template) = suite
@@ -1557,6 +1667,55 @@ fn build_readiness_command_plans(
     }
 
     plans
+}
+
+fn create_temp_worktree(
+    context: &chief::service::ProjectContext,
+    purpose: &str,
+) -> anyhow::Result<TempWorktree> {
+    let worktree_root = temp_worktree_root_for_project(&context.project_dir, &context.name);
+    fs::create_dir_all(&worktree_root).with_context(|| {
+        format!(
+            "failed to create temporary worktree root at {}",
+            worktree_root.display()
+        )
+    })?;
+
+    let token = Uuid::new_v4().simple().to_string();
+    let purpose_branch = purpose.trim().replace('_', "-");
+    let purpose_path = purpose.trim().replace('-', "_");
+    let branch = format!("chief/{}/{}-{}", context.name, purpose_branch, token);
+    let path = worktree_root.join(format!("chief_{}_{}", purpose_path, token));
+    context
+        .git
+        .create_worktree(&branch, &path)
+        .with_context(|| {
+            format!(
+                "failed to create readiness worktree {} for branch {}",
+                path.display(),
+                branch
+            )
+        })?;
+
+    Ok(TempWorktree { branch, path })
+}
+
+fn cleanup_temp_worktree(
+    git: &ShellGitOps,
+    readiness_worktree: &TempWorktree,
+) -> anyhow::Result<()> {
+    git.remove_worktree(&readiness_worktree.path, &readiness_worktree.branch)
+        .with_context(|| {
+            format!(
+                "failed to remove readiness worktree {}",
+                readiness_worktree.path.display()
+            )
+        })
+}
+
+fn temp_worktree_root_for_project(project_dir: &Path, project_name: &str) -> PathBuf {
+    let parent_dir = project_dir.parent().unwrap_or(project_dir);
+    parent_dir.join(format!("{project_name}__worktrees"))
 }
 
 fn normalized_default_target(suite: &TestSuiteConfig) -> Option<String> {
@@ -2483,11 +2642,12 @@ mod tests {
         resolve_last_done_todo_committed_at,
     };
     use crate::api::error::ApiError;
-    use crate::api::types::{StartProjectRequest, UpdateChiefYamlRequest};
+    use crate::api::types::{RunSuiteCheckRequest, StartProjectRequest, UpdateChiefYamlRequest};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use chief::domain::{EventType, Todo, TodoStatus};
+    use chief::flow::SuiteCommandKind;
     use chief::git::GitOps;
     use chief::scheduler::Scheduler;
     use chief::service::ProjectRegistry;
@@ -2920,6 +3080,199 @@ suites:
             readiness.summary.contains("Not ready"),
             "readiness summary should explain command failures"
         );
+    }
+
+    #[tokio::test]
+    async fn start_project_pre_run_checks_use_clean_worktree_without_untracked_files() {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: pending-1
+    todo: Example pending todo
+    expectations: Example expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: single_prompt
+suites:
+  - name: smoke
+    language: rust
+    framework: cargo
+    test_root: .
+    test_init: "test -f .runtime-only.env"
+    test_command: "echo ok""#,
+        );
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+        fs::write(project_dir.join(".runtime-only.env"), "TOKEN=dev\n")
+            .expect("failed to write runtime-only env file");
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+
+        let err = service
+            .start_project(
+                project_name.clone(),
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: None,
+                    model: None,
+                    start_anyway: None,
+                },
+            )
+            .await
+            .expect_err("start_project should fail because untracked file is absent in worktree");
+
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "pre-run checks should fail when test_init depends on untracked files"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        let message = payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.contains("test_init"),
+            "error message should identify the failing test_init check: {message}"
+        );
+
+        let readiness = store
+            .get_readiness_state()
+            .expect("readiness state should be persisted");
+        assert_eq!(
+            readiness.status,
+            ReadinessStatus::NotReady,
+            "readiness should persist the worktree validation failure"
+        );
+        let commands = readiness
+            .details
+            .get("commands")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            commands.iter().any(|command| {
+                command.get("kind").and_then(serde_json::Value::as_str) == Some("test_init")
+                    && command.get("failed").and_then(serde_json::Value::as_bool) == Some(true)
+            }),
+            "readiness details should include the failed test_init command"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_suite_check_uses_clean_worktree_without_untracked_files() {
+        let workspace = TempDir::new("workspace");
+        let project_name = format!("project-{}", Uuid::new_v4());
+        let project_dir = workspace.path.join(&project_name);
+        fs::create_dir_all(&project_dir).expect("failed to create project directory");
+
+        init_git_repo(&project_dir);
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        write_todos(
+            &project_dir,
+            r#"todos:
+  - id: pending-1
+    todo: Example pending todo
+    expectations: Example expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: single_prompt
+suites:
+  - name: smoke
+    language: rust
+    framework: cargo
+    test_root: .
+    test_command: "test -f .runtime-only.env""#,
+        );
+
+        run_git(&project_dir, &["add", "--all"]);
+        run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
+        fs::write(project_dir.join(".runtime-only.env"), "TOKEN=dev\n")
+            .expect("failed to write runtime-only env file");
+
+        store
+            .reset_db_from_todos_file()
+            .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+
+        let registry = ProjectRegistry::discover(&workspace.path, &[])
+            .expect("project discovery should succeed");
+        let scheduler = Scheduler::new(registry, 4);
+        let service = ApiService::new(scheduler, 1);
+
+        let response = service
+            .run_suite_check(
+                &project_name,
+                RunSuiteCheckRequest {
+                    suite: "smoke".to_owned(),
+                    kind: SuiteCommandKind::Test,
+                    target: None,
+                },
+            )
+            .await
+            .expect("suite check should execute");
+
+        assert_ne!(
+            response.exit_code, 0,
+            "suite check should fail because untracked file is absent in clean worktree"
+        );
+        assert!(
+            response.cwd.contains("chief_suite_check_"),
+            "suite check should execute in chief_-prefixed temp worktree, got: {}",
+            response.cwd
+        );
+
+        let worktree_root = project_dir
+            .parent()
+            .unwrap_or(project_dir.as_path())
+            .join(format!("{project_name}__worktrees"));
+        if worktree_root.exists() {
+            let has_suite_check_dirs = fs::read_dir(&worktree_root)
+                .expect("worktree root should be readable")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .map(|name| name.starts_with("chief_suite_check_"))
+                        .unwrap_or(false)
+                });
+            assert!(
+                !has_suite_check_dirs,
+                "suite check temp worktree should be cleaned up"
+            );
+        }
     }
 
     #[tokio::test]

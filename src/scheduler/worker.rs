@@ -144,7 +144,7 @@ where
         }
 
         let branch = format!("chief/{}/{}", context.name, job.id);
-        let worktree_path = worktree_root.join(&job.id);
+        let worktree_path = worktree_root.join(worker_worktree_dir_name(&job.id));
 
         if let Err(err) = context.git.create_worktree(&branch, &worktree_path) {
             update_job(
@@ -366,6 +366,10 @@ fn worktree_root_for_project(project_dir: &Path, project_name: &str) -> PathBuf 
     parent_dir.join(format!("{project_name}__worktrees"))
 }
 
+fn worker_worktree_dir_name(job_id: &str) -> String {
+    format!("chief_{job_id}")
+}
+
 fn report_state_update_error(
     context: &ProjectContext,
     run_id: &str,
@@ -501,6 +505,14 @@ mod tests {
             done_at_commit: None,
         }
         .normalize()
+    }
+
+    #[test]
+    fn worker_worktree_dir_name_uses_chief_prefix() {
+        assert_eq!(
+            super::worker_worktree_dir_name("abc-123"),
+            "chief_abc-123".to_owned()
+        );
     }
 
     #[test]
