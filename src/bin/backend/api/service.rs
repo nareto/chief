@@ -35,7 +35,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{broadcast, mpsc as tokio_mpsc};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -44,6 +44,8 @@ pub struct ApiService {
     scheduler: Scheduler,
     default_agents_per_project: usize,
     readiness_cancel_signals: Arc<tokio::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    readiness_stream_sender: broadcast::Sender<ReadinessStreamMessage>,
+    readiness_stream_snapshots: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 struct SuiteCheckPlan {
@@ -102,8 +104,9 @@ struct ReadinessCommandResult {
 
 const RETRY_CLEANUP_DISCARDED_MSG_PREFIX: &str =
     "Retry cleanup: discarded local git changes before loop";
-const READINESS_UNCHECKED_SUMMARY: &str = "Readiness check has not run yet.";
-const READINESS_EVENT_SOURCE: &str = "readiness_check";
+const READINESS_UNCHECKED_SUMMARY: &str = "Pre-run checks have not run yet.";
+const READINESS_EVENT_SOURCE: &str = "pre_run_checks";
+const READINESS_STREAM_MAX_BUFFER_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 struct ReadinessLogContext {
@@ -111,12 +114,57 @@ struct ReadinessLogContext {
     store: ProjectStore,
 }
 
+#[derive(Debug, Clone)]
+pub enum ReadinessStreamMessage {
+    Reset { project: String },
+    Chunk { project: String, text: String },
+}
+
+#[derive(Debug, Clone)]
+struct ReadinessStreamContext {
+    project: String,
+    sender: broadcast::Sender<ReadinessStreamMessage>,
+    snapshots: Arc<std::sync::Mutex<HashMap<String, String>>>,
+}
+
+impl ReadinessStreamContext {
+    fn reset(&self) {
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            snapshots.insert(self.project.clone(), String::new());
+        }
+        let _ = self.sender.send(ReadinessStreamMessage::Reset {
+            project: self.project.clone(),
+        });
+    }
+
+    fn push_text(&self, text: impl AsRef<str>) {
+        let text = text.as_ref();
+        if text.is_empty() {
+            return;
+        }
+
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            let entry = snapshots.entry(self.project.clone()).or_default();
+            entry.push_str(text);
+            trim_leading_bytes(entry, READINESS_STREAM_MAX_BUFFER_BYTES);
+        }
+
+        let _ = self.sender.send(ReadinessStreamMessage::Chunk {
+            project: self.project.clone(),
+            text: text.to_owned(),
+        });
+    }
+}
+
 impl ApiService {
     pub fn new(scheduler: Scheduler, default_agents_per_project: usize) -> Self {
+        let (readiness_stream_sender, _) = broadcast::channel(1024);
         Self {
             scheduler,
             default_agents_per_project: default_agents_per_project.max(1),
             readiness_cancel_signals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            readiness_stream_sender,
+            readiness_stream_snapshots: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -200,19 +248,19 @@ impl ApiService {
 
         let Some(signal) = signal else {
             return Err(ApiError::unprocessable(
-                "no readiness check is currently running for this project",
+                "no pre-run checks are currently running for this project",
             ));
         };
 
         signal.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = context.store.set_readiness_result(
             ReadinessStatus::NotReady,
-            "Not ready: readiness check cancelled by user.",
+            "Not ready: pre-run checks cancelled by user.",
             &json!({ "cancelled_by_user": true }),
         );
 
         Ok(MessageResponse {
-            message: format!("requested readiness-check stop for project {project}"),
+            message: format!("requested pre-run checks stop for project {project}"),
         })
     }
 
@@ -722,9 +770,9 @@ impl ApiService {
         let suite_count = context.chief_yaml.suites.len();
         let command_count = command_plans.len();
         let checking_summary = if suite_count == 0 {
-            "Checking project readiness (no suites configured)".to_owned()
+            "Running pre-run checks (no suites configured)".to_owned()
         } else {
-            format!("Checking project readiness across {suite_count} suite(s)")
+            format!("Running pre-run checks across {suite_count} suite(s)")
         };
 
         context
@@ -732,7 +780,7 @@ impl ApiService {
             .set_readiness_checking(&checking_summary)
             .map_err(ApiError::internal)?;
 
-        let readiness_run_id = format!("readiness-check-{}", Uuid::new_v4());
+        let readiness_run_id = format!("pre-run-checks-{}", Uuid::new_v4());
         context
             .store
             .start_run(&readiness_run_id)
@@ -741,7 +789,17 @@ impl ApiService {
             run_id: readiness_run_id.clone(),
             store: context.store.clone(),
         };
-        let mut started_payload = readiness_payload("check_started");
+        let readiness_stream = ReadinessStreamContext {
+            project: project.to_owned(),
+            sender: self.readiness_stream_sender.clone(),
+            snapshots: self.readiness_stream_snapshots.clone(),
+        };
+        readiness_stream.reset();
+
+        let started_message = format!("Started pre-run checks for {suite_count} suite(s).\n");
+        readiness_stream.push_text(&started_message);
+
+        let mut started_payload = readiness_payload("pre_run_checks_started");
         started_payload.insert(
             "suite_count".to_owned(),
             serde_json::Value::from(suite_count as u64),
@@ -753,7 +811,7 @@ impl ApiService {
         record_readiness_event(
             Some(&readiness_log),
             "info",
-            format!("Starting readiness check across {suite_count} suite(s).\n"),
+            started_message,
             started_payload,
         );
 
@@ -761,7 +819,7 @@ impl ApiService {
             project,
             suites = suite_count,
             commands = command_count,
-            "running project readiness check before start"
+            "running project pre-run checks before start"
         );
 
         let finish_readiness_run = |status: RunExitStatus| {
@@ -770,7 +828,7 @@ impl ApiService {
                     project,
                     run_id = %readiness_run_id,
                     error = %err,
-                    "failed to finish readiness event run"
+                    "failed to finish pre-run checks event run"
                 );
             }
         };
@@ -784,9 +842,13 @@ impl ApiService {
         };
         let execution = tokio::task::spawn_blocking({
             let cancel_signal = cancel_signal.clone();
-            let readiness_log = readiness_log.clone();
+            let readiness_stream = readiness_stream.clone();
             move || {
-                execute_readiness_command_plans(command_plans, cancel_signal, Some(readiness_log))
+                execute_readiness_command_plans(
+                    command_plans,
+                    cancel_signal,
+                    Some(readiness_stream),
+                )
             }
         })
         .await;
@@ -801,9 +863,9 @@ impl ApiService {
                     .to_ascii_lowercase()
                     .contains("cancelled by user");
                 let summary = if cancelled_by_user {
-                    "Not ready: readiness check cancelled by user.".to_owned()
+                    "Not ready: pre-run checks cancelled by user.".to_owned()
                 } else {
-                    format!("Not ready: readiness check execution failed ({err})")
+                    format!("Not ready: pre-run checks execution failed ({err})")
                 };
                 let details = json!({
                     "error": err.to_string(),
@@ -816,7 +878,7 @@ impl ApiService {
                     &summary,
                     &details,
                 );
-                let mut payload = readiness_payload("check_failed");
+                let mut payload = readiness_payload("pre_run_checks_failed");
                 payload.insert(
                     "error".to_owned(),
                     serde_json::Value::String(err.to_string()),
@@ -825,6 +887,11 @@ impl ApiService {
                     "cancelled_by_user".to_owned(),
                     serde_json::Value::Bool(cancelled_by_user),
                 );
+                let failure_message = if cancelled_by_user {
+                    "Pre-run checks cancelled by user.\n".to_owned()
+                } else {
+                    format!("Pre-run checks failed: {err}\n")
+                };
                 record_readiness_event(
                     Some(&readiness_log),
                     if cancelled_by_user {
@@ -832,13 +899,10 @@ impl ApiService {
                     } else {
                         "error"
                     },
-                    if cancelled_by_user {
-                        "Readiness check cancelled by user.\n".to_owned()
-                    } else {
-                        format!("Readiness check failed: {err}\n")
-                    },
+                    failure_message.clone(),
                     payload,
                 );
+                readiness_stream.push_text(failure_message);
                 finish_readiness_run(RunExitStatus::Failure);
                 if cancelled_by_user {
                     return Err(ApiError::unprocessable(summary));
@@ -846,7 +910,7 @@ impl ApiService {
                 return Err(ApiError::internal(err));
             }
             Err(err) => {
-                let summary = format!("Not ready: readiness check task failed ({err})");
+                let summary = format!("Not ready: pre-run checks task failed ({err})");
                 let details = json!({
                     "error": err.to_string(),
                     "commands_total": command_count,
@@ -857,20 +921,22 @@ impl ApiService {
                     &summary,
                     &details,
                 );
-                let mut payload = readiness_payload("check_failed");
+                let mut payload = readiness_payload("pre_run_checks_failed");
                 payload.insert(
                     "error".to_owned(),
                     serde_json::Value::String(err.to_string()),
                 );
+                let failure_message = format!("Pre-run checks task failed: {err}\n");
                 record_readiness_event(
                     Some(&readiness_log),
                     "error",
-                    format!("Readiness check task failed: {err}\n"),
+                    failure_message.clone(),
                     payload,
                 );
+                readiness_stream.push_text(failure_message);
                 finish_readiness_run(RunExitStatus::Failure);
                 return Err(ApiError::internal(anyhow!(
-                    "readiness check task failed: {err}"
+                    "pre-run checks task failed: {err}"
                 )));
             }
         };
@@ -901,11 +967,11 @@ impl ApiService {
             commands = results.len(),
             failed_commands,
             status = final_status.as_str(),
-            "project readiness check finished"
+            "project pre-run checks finished"
         );
 
         if final_status == ReadinessStatus::Ready {
-            let mut payload = readiness_payload("check_completed");
+            let mut payload = readiness_payload("pre_run_checks_completed");
             payload.insert(
                 "status".to_owned(),
                 serde_json::Value::String("ready".to_owned()),
@@ -924,6 +990,7 @@ impl ApiService {
                 format!("{summary}\n"),
                 payload,
             );
+            readiness_stream.push_text(format!("{summary}\n"));
             finish_readiness_run(RunExitStatus::Success);
             return Ok(());
         }
@@ -941,7 +1008,7 @@ impl ApiService {
             })
             .unwrap_or_default();
 
-        let mut payload = readiness_payload("check_completed");
+        let mut payload = readiness_payload("pre_run_checks_completed");
         payload.insert(
             "status".to_owned(),
             serde_json::Value::String("not_ready".to_owned()),
@@ -960,6 +1027,7 @@ impl ApiService {
             format!("{summary}\n"),
             payload,
         );
+        readiness_stream.push_text(format!("{summary}\n"));
         finish_readiness_run(RunExitStatus::Failure);
 
         Err(ApiError::unprocessable(if first_failure.is_empty() {
@@ -1252,6 +1320,18 @@ impl ApiService {
     ) -> Result<chief::storage::ProjectStore, ApiError> {
         let context = self.project_context(project).await?;
         Ok(context.store)
+    }
+
+    pub fn subscribe_readiness_stream(&self) -> broadcast::Receiver<ReadinessStreamMessage> {
+        self.readiness_stream_sender.subscribe()
+    }
+
+    pub fn readiness_stream_snapshot(&self, project: &str) -> Option<String> {
+        self.readiness_stream_snapshots
+            .lock()
+            .ok()
+            .and_then(|snapshots| snapshots.get(project).cloned())
+            .filter(|snapshot| !snapshot.is_empty())
     }
 
     async fn register_readiness_cancel_signal(
@@ -1557,51 +1637,27 @@ fn suite_kind_for_readiness(kind: ReadinessCommandKind) -> SuiteCommandKind {
 fn execute_readiness_command_plans(
     plans: Vec<ReadinessCommandPlan>,
     cancel_signal: Arc<AtomicBool>,
-    log_context: Option<ReadinessLogContext>,
+    stream_context: Option<ReadinessStreamContext>,
 ) -> anyhow::Result<Vec<ReadinessCommandResult>> {
     let mut results = Vec::with_capacity(plans.len());
 
     for plan in plans {
         if cancel_signal.load(std::sync::atomic::Ordering::SeqCst) {
-            let payload = readiness_payload("check_cancelled");
-            record_readiness_event(
-                log_context.as_ref(),
-                "warning",
-                "Readiness check cancelled by user.\n",
-                payload,
-            );
-            return Err(anyhow!("readiness check cancelled by user"));
+            if let Some(stream_context) = stream_context.as_ref() {
+                stream_context.push_text("Pre-run checks cancelled by user.\n");
+            }
+            return Err(anyhow!("pre-run checks cancelled by user"));
         }
 
         if !plan.cwd.exists() {
-            let mut payload = readiness_payload("command_failed_precheck");
-            payload.insert(
-                "suite".to_owned(),
-                serde_json::Value::String(plan.suite_name.clone()),
-            );
-            payload.insert(
-                "kind".to_owned(),
-                serde_json::Value::String(plan.kind.as_str().to_owned()),
-            );
-            payload.insert(
-                "command".to_owned(),
-                serde_json::Value::String(plan.command_template.clone()),
-            );
-            payload.insert(
-                "cwd".to_owned(),
-                serde_json::Value::String(plan.cwd_display.clone()),
-            );
-            record_readiness_event(
-                log_context.as_ref(),
-                "error",
-                format!(
-                    "[readiness:{}:{}] working directory does not exist: {}\n",
+            if let Some(stream_context) = stream_context.as_ref() {
+                stream_context.push_text(format!(
+                    "[pre-run-checks:{}:{}] working directory does not exist: {}\n",
                     plan.suite_name,
                     plan.kind.as_str(),
                     plan.cwd.display()
-                ),
-                payload,
-            );
+                ));
+            }
             results.push(ReadinessCommandResult {
                 suite_name: plan.suite_name,
                 kind: plan.kind,
@@ -1616,34 +1672,14 @@ fn execute_readiness_command_plans(
         }
 
         if !plan.cwd.is_dir() {
-            let mut payload = readiness_payload("command_failed_precheck");
-            payload.insert(
-                "suite".to_owned(),
-                serde_json::Value::String(plan.suite_name.clone()),
-            );
-            payload.insert(
-                "kind".to_owned(),
-                serde_json::Value::String(plan.kind.as_str().to_owned()),
-            );
-            payload.insert(
-                "command".to_owned(),
-                serde_json::Value::String(plan.command_template.clone()),
-            );
-            payload.insert(
-                "cwd".to_owned(),
-                serde_json::Value::String(plan.cwd_display.clone()),
-            );
-            record_readiness_event(
-                log_context.as_ref(),
-                "error",
-                format!(
-                    "[readiness:{}:{}] working directory is not a directory: {}\n",
+            if let Some(stream_context) = stream_context.as_ref() {
+                stream_context.push_text(format!(
+                    "[pre-run-checks:{}:{}] working directory is not a directory: {}\n",
                     plan.suite_name,
                     plan.kind.as_str(),
                     plan.cwd.display()
-                ),
-                payload,
-            );
+                ));
+            }
             results.push(ReadinessCommandResult {
                 suite_name: plan.suite_name,
                 kind: plan.kind,
@@ -1666,49 +1702,25 @@ fn execute_readiness_command_plans(
                 plan.command_template.clone(),
                 None,
                 &cancel_signal,
-                log_context.as_ref(),
+                stream_context.as_ref(),
             ));
             if cancel_signal.load(std::sync::atomic::Ordering::SeqCst) {
-                let payload = readiness_payload("check_cancelled");
-                record_readiness_event(
-                    log_context.as_ref(),
-                    "warning",
-                    "Readiness check cancelled by user.\n",
-                    payload,
-                );
-                return Err(anyhow!("readiness check cancelled by user"));
+                if let Some(stream_context) = stream_context.as_ref() {
+                    stream_context.push_text("Pre-run checks cancelled by user.\n");
+                }
+                return Err(anyhow!("pre-run checks cancelled by user"));
             }
             continue;
         }
 
         if plan.target_candidates.is_empty() {
-            let mut payload = readiness_payload("command_failed_precheck");
-            payload.insert(
-                "suite".to_owned(),
-                serde_json::Value::String(plan.suite_name.clone()),
-            );
-            payload.insert(
-                "kind".to_owned(),
-                serde_json::Value::String(plan.kind.as_str().to_owned()),
-            );
-            payload.insert(
-                "command".to_owned(),
-                serde_json::Value::String(plan.command_template.clone()),
-            );
-            payload.insert(
-                "cwd".to_owned(),
-                serde_json::Value::String(plan.cwd_display.clone()),
-            );
-            record_readiness_event(
-                log_context.as_ref(),
-                "error",
-                format!(
-                    "[readiness:{}:{}] command uses {{target}}, but no file_patterns target matched and default_target is not set\n",
+            if let Some(stream_context) = stream_context.as_ref() {
+                stream_context.push_text(format!(
+                    "[pre-run-checks:{}:{}] command uses {{target}}, but no file_patterns target matched and default_target is not set\n",
                     plan.suite_name,
                     plan.kind.as_str()
-                ),
-                payload,
-            );
+                ));
+            }
             results.push(ReadinessCommandResult {
                 suite_name: plan.suite_name,
                 kind: plan.kind,
@@ -1725,14 +1737,10 @@ fn execute_readiness_command_plans(
         let mut selected: Option<ReadinessCommandResult> = None;
         for target in &plan.target_candidates {
             if cancel_signal.load(std::sync::atomic::Ordering::SeqCst) {
-                let payload = readiness_payload("check_cancelled");
-                record_readiness_event(
-                    log_context.as_ref(),
-                    "warning",
-                    "Readiness check cancelled by user.\n",
-                    payload,
-                );
-                return Err(anyhow!("readiness check cancelled by user"));
+                if let Some(stream_context) = stream_context.as_ref() {
+                    stream_context.push_text("Pre-run checks cancelled by user.\n");
+                }
+                return Err(anyhow!("pre-run checks cancelled by user"));
             }
             let command = replace_target_placeholder(&plan.command_template, target);
             let attempt = run_readiness_command_attempt(
@@ -1740,7 +1748,7 @@ fn execute_readiness_command_plans(
                 command,
                 Some(target.clone()),
                 &cancel_signal,
-                log_context.as_ref(),
+                stream_context.as_ref(),
             );
             let runnable = !attempt.blocking_failure;
             selected = Some(attempt);
@@ -1751,14 +1759,10 @@ fn execute_readiness_command_plans(
         if let Some(result) = selected {
             results.push(result);
             if cancel_signal.load(std::sync::atomic::Ordering::SeqCst) {
-                let payload = readiness_payload("check_cancelled");
-                record_readiness_event(
-                    log_context.as_ref(),
-                    "warning",
-                    "Readiness check cancelled by user.\n",
-                    payload,
-                );
-                return Err(anyhow!("readiness check cancelled by user"));
+                if let Some(stream_context) = stream_context.as_ref() {
+                    stream_context.push_text("Pre-run checks cancelled by user.\n");
+                }
+                return Err(anyhow!("pre-run checks cancelled by user"));
             }
         }
     }
@@ -1771,40 +1775,17 @@ fn run_readiness_command_attempt(
     command: String,
     target: Option<String>,
     cancel_signal: &Arc<AtomicBool>,
-    log_context: Option<&ReadinessLogContext>,
+    stream_context: Option<&ReadinessStreamContext>,
 ) -> ReadinessCommandResult {
-    let mut started_payload = readiness_payload("command_started");
-    started_payload.insert(
-        "suite".to_owned(),
-        serde_json::Value::String(plan.suite_name.clone()),
-    );
-    started_payload.insert(
-        "kind".to_owned(),
-        serde_json::Value::String(plan.kind.as_str().to_owned()),
-    );
-    started_payload.insert(
-        "command".to_owned(),
-        serde_json::Value::String(command.clone()),
-    );
-    started_payload.insert(
-        "cwd".to_owned(),
-        serde_json::Value::String(plan.cwd_display.clone()),
-    );
-    if let Some(target) = target.clone() {
-        started_payload.insert("target".to_owned(), serde_json::Value::String(target));
-    }
-    record_readiness_event(
-        log_context,
-        "info",
-        format!(
-            "[readiness:{}:{}]$ {} (cwd: {})\n",
+    if let Some(stream_context) = stream_context {
+        stream_context.push_text(format!(
+            "[pre-run-checks:{}:{}]$ {} (cwd: {})\n",
             plan.suite_name,
             plan.kind.as_str(),
             command,
             plan.cwd_display
-        ),
-        started_payload,
-    );
+        ));
+    }
 
     let out = execute_suite_command_streaming(
         &plan.suite_name,
@@ -1815,64 +1796,25 @@ fn run_readiness_command_attempt(
         &plan.env,
         plan.timeout_seconds,
         Some(cancel_signal),
-        |stream, text| {
-            let mut chunk_payload = readiness_payload("chunk");
-            chunk_payload.insert(
-                "suite".to_owned(),
-                serde_json::Value::String(plan.suite_name.clone()),
-            );
-            chunk_payload.insert(
-                "kind".to_owned(),
-                serde_json::Value::String(plan.kind.as_str().to_owned()),
-            );
-            chunk_payload.insert(
-                "stream".to_owned(),
-                serde_json::Value::String(suite_stream_label(stream).to_owned()),
-            );
-            record_readiness_event(
-                log_context,
-                match stream {
-                    SuiteCheckOutputStream::Stdout => "info",
-                    SuiteCheckOutputStream::Stderr => "warning",
-                },
-                text.to_owned(),
-                chunk_payload,
-            );
+        |_stream, text| {
+            if let Some(stream_context) = stream_context {
+                stream_context.push_text(text);
+            }
         },
     );
 
     match out {
         Ok(out) => {
             let blocking_failure = readiness_exit_code_is_blocking(plan.kind, out.exit_code);
-            let mut completed_payload = readiness_payload("command_completed");
-            completed_payload.insert(
-                "suite".to_owned(),
-                serde_json::Value::String(plan.suite_name.clone()),
-            );
-            completed_payload.insert(
-                "kind".to_owned(),
-                serde_json::Value::String(plan.kind.as_str().to_owned()),
-            );
-            completed_payload.insert(
-                "exit_code".to_owned(),
-                serde_json::Value::from(out.exit_code),
-            );
-            completed_payload.insert(
-                "blocking_failure".to_owned(),
-                serde_json::Value::Bool(blocking_failure),
-            );
-            record_readiness_event(
-                log_context,
-                if blocking_failure { "warning" } else { "info" },
-                format!(
-                    "[readiness:{}:{}] exit={}{}\n",
+            if let Some(stream_context) = stream_context {
+                stream_context.push_text(format!(
+                    "[pre-run-checks:{}:{}] exit={}{}\n",
                     plan.suite_name,
                     plan.kind.as_str(),
                     out.exit_code,
                     if blocking_failure { " (blocking)" } else { "" }
-                ),
-                completed_payload,
-            );
+                ));
+            }
             ReadinessCommandResult {
                 suite_name: plan.suite_name.clone(),
                 kind: plan.kind,
@@ -1885,30 +1827,14 @@ fn run_readiness_command_attempt(
             }
         }
         Err(err) => {
-            let mut failed_payload = readiness_payload("command_failed");
-            failed_payload.insert(
-                "suite".to_owned(),
-                serde_json::Value::String(plan.suite_name.clone()),
-            );
-            failed_payload.insert(
-                "kind".to_owned(),
-                serde_json::Value::String(plan.kind.as_str().to_owned()),
-            );
-            failed_payload.insert(
-                "error".to_owned(),
-                serde_json::Value::String(err.to_string()),
-            );
-            record_readiness_event(
-                log_context,
-                "error",
-                format!(
-                    "[readiness:{}:{}] failed: {}\n",
+            if let Some(stream_context) = stream_context {
+                stream_context.push_text(format!(
+                    "[pre-run-checks:{}:{}] failed: {}\n",
                     plan.suite_name,
                     plan.kind.as_str(),
                     err
-                ),
-                failed_payload,
-            );
+                ));
+            }
             ReadinessCommandResult {
                 suite_name: plan.suite_name.clone(),
                 kind: plan.kind,
@@ -1951,7 +1877,7 @@ fn readiness_output_tail(output: &str) -> String {
 
 fn build_readiness_summary(results: &[ReadinessCommandResult], suite_count: usize) -> String {
     if suite_count == 0 {
-        return "Ready: no suites configured, so readiness check skipped command execution."
+        return "Ready: no suites configured, so pre-run checks skipped command execution."
             .to_owned();
     }
 
@@ -2007,6 +1933,19 @@ fn build_readiness_details(
             }))
             .collect::<Vec<_>>()
     })
+}
+
+fn trim_leading_bytes(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+
+    let bytes_to_trim = text.len().saturating_sub(max_bytes);
+    let split_at = text
+        .char_indices()
+        .find_map(|(index, _)| (index >= bytes_to_trim).then_some(index))
+        .unwrap_or(text.len());
+    text.drain(..split_at);
 }
 
 enum SuiteStreamChunk {
@@ -2783,7 +2722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_project_blocks_when_readiness_check_detects_broken_suite_command() {
+    async fn start_project_blocks_when_pre_run_checks_detect_broken_suite_command() {
         let workspace = TempDir::new("workspace");
         let project_name = format!("project-{}", Uuid::new_v4());
         let project_dir = workspace.path.join(&project_name);
@@ -2839,13 +2778,13 @@ suites:
                 },
             )
             .await
-            .expect_err("start_project should fail when readiness check is not ready");
+            .expect_err("start_project should fail when pre-run checks are not ready");
 
         let response = err.into_response();
         assert_eq!(
             response.status(),
             StatusCode::UNPROCESSABLE_ENTITY,
-            "readiness check failures should block start with HTTP 422"
+            "pre-run checks failures should block start with HTTP 422"
         );
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -2867,7 +2806,7 @@ suites:
         assert_eq!(readiness.status, ReadinessStatus::NotReady);
         assert!(
             readiness.checked_at.is_some(),
-            "readiness check should persist completion time"
+            "pre-run checks should persist completion time"
         );
         assert!(
             readiness.summary.contains("Not ready"),
