@@ -1,6 +1,10 @@
 use crate::domain::{
     EventRecord, EventType, JobRecord, JobStatus, Phase, RunExitStatus, Todo, TodoFile, TodoStatus,
 };
+use crate::git::{
+    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, git_output_has_transient_lock_contention_signature,
+    run_git_command_with_retry,
+};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -10,7 +14,6 @@ use std::error::Error as StdError;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct DbResetRequiredError {
@@ -852,7 +855,7 @@ impl ProjectStore {
         let stdout = String::from_utf8_lossy(&commit_output.stdout)
             .trim()
             .to_owned();
-        Err(anyhow!(
+        let commit_failure = format!(
             "git commit failed for {}: {}{}{}",
             relative_todos,
             stderr,
@@ -862,16 +865,17 @@ impl ProjectStore {
                 ""
             },
             stdout,
-        ))
+        );
+        if git_output_has_transient_lock_contention_signature(&commit_output) {
+            return Err(anyhow!(
+                "transient lock/contention retry budget exhausted after {GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS} retries: {commit_failure}"
+            ));
+        }
+        Err(anyhow!(commit_failure))
     }
 
     fn run_git_command(&self, args: &[&str]) -> Result<std::process::Output> {
-        Command::new("git")
-            .arg("-c")
-            .arg("safe.directory=*")
-            .args(args)
-            .current_dir(&self.project_dir)
-            .output()
+        run_git_command_with_retry(&self.project_dir, args)
             .with_context(|| format!("failed to run git {}", args.join(" ")))
     }
 
@@ -1271,6 +1275,7 @@ fn json_to_sql_value(value: Value) -> rusqlite::types::Value {
 mod tests {
     use super::{ProjectStore, ReadinessStatus};
     use crate::domain::{EventRecord, EventType, Todo, TodoStatus};
+    use crate::git::GIT_TRANSIENT_LOCK_RETRY_DELAY;
     use chrono::Utc;
     use rusqlite::{Connection, params};
     use serde_json::json;
@@ -1278,6 +1283,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::thread;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn temp_project_dir() -> PathBuf {
@@ -1915,6 +1922,53 @@ mod tests {
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>();
         assert_eq!(changed_files, vec!["todos.yaml"]);
+
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn append_todo_auto_commit_retries_transient_index_lock() {
+        let project_dir = temp_project_dir();
+        let store = ProjectStore::new(&project_dir);
+        store.init().expect("store init should succeed");
+        init_git_repo(&project_dir);
+
+        let before = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
+            .parse::<usize>()
+            .expect("commit count should parse");
+        let index_lock = project_dir.join(".git").join("index.lock");
+        fs::write(&index_lock, "lock").expect("failed to seed index.lock");
+        let lock_to_clear = index_lock.clone();
+        let clear_lock = thread::spawn(move || {
+            thread::sleep(
+                GIT_TRANSIENT_LOCK_RETRY_DELAY
+                    .checked_sub(Duration::from_millis(5))
+                    .unwrap_or(GIT_TRANSIENT_LOCK_RETRY_DELAY),
+            );
+            let _ = fs::remove_file(lock_to_clear);
+        });
+
+        store
+            .append_todo(
+                Todo {
+                    id: String::new(),
+                    todo: "auto commit lock retry".to_owned(),
+                    expectations: "retries should recover".to_owned(),
+                    priority: 4,
+                    test_suites: Vec::new(),
+                    status: TodoStatus::Pending,
+                    done_at_commit: None,
+                }
+                .normalize(),
+            )
+            .expect("append_todo should succeed after transient lock retry");
+
+        clear_lock.join().expect("lock clear thread should join");
+
+        let after = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
+            .parse::<usize>()
+            .expect("commit count should parse");
+        assert_eq!(after, before + 1, "append_todo should still commit once");
 
         let _ = fs::remove_dir_all(&project_dir);
     }

@@ -7,7 +7,11 @@ use crate::domain::{
     payload_from_json,
 };
 use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
-use crate::git::{GitOps, ShellGitOps};
+use crate::git::{
+    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, ShellGitOps,
+    git_output_has_transient_lock_contention_signature, has_transient_lock_contention_signature,
+    run_git_command_with_retry,
+};
 use crate::orchestrator::{
     OrchestratorError, OrchestratorResult, retry_with_policy_and_hook_and_delay,
 };
@@ -20,7 +24,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -684,10 +687,11 @@ impl ChiefEngine {
                             &status_err,
                         );
                     }
-                    if let Err(status_err) =
-                        self.project
-                            .set_job_status(job, JobStatus::Failed, Some(err_for_status.clone()))
-                    {
+                    if let Err(status_err) = self.project.set_job_status(
+                        job,
+                        JobStatus::Failed,
+                        Some(err_for_status.clone()),
+                    ) {
                         self.log_state_update_error(
                             run_id,
                             None,
@@ -1100,19 +1104,23 @@ impl ChiefEngine {
     }
 
     fn run_git_command(&self, cwd: &Path, args: &[&str]) -> Result<()> {
-        let output = Command::new("git")
-            .arg("-c")
-            .arg("safe.directory=*")
-            .args(args)
-            .current_dir(cwd)
-            .output()
+        let output = run_git_command_with_retry(cwd, args)
             .with_context(|| format!("failed to run git {}", args.join(" ")))?;
         if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            if git_output_has_transient_lock_contention_signature(&output) {
+                return Err(anyhow!(
+                    "transient lock/contention retry budget exhausted after {GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS} retries: git {} failed in {}: {}",
+                    args.join(" "),
+                    cwd.display(),
+                    detail
+                ));
+            }
             return Err(anyhow!(
                 "git {} failed in {}: {}",
                 args.join(" "),
                 cwd.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                detail
             ));
         }
         Ok(())
@@ -1218,14 +1226,6 @@ fn is_transient_lock_contention_error(err: &anyhow::Error) -> bool {
     }
 
     false
-}
-
-fn has_transient_lock_contention_signature(message: &str) -> bool {
-    let text = message.to_ascii_lowercase();
-    let has_index_lock_path = text.contains(".git/index.lock") || text.contains(".git\\index.lock");
-    (text.contains("unable to create") && has_index_lock_path)
-        || text.contains("another git process seems to be running")
-        || text.contains("resource busy")
 }
 
 fn is_known_unrecoverable_error(err: &anyhow::Error) -> bool {
