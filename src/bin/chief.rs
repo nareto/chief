@@ -1,10 +1,14 @@
+#[allow(dead_code)]
+mod api;
+
 use anyhow::{Context, Result, bail};
 use chief::config::TestSuiteConfig;
 use chief::flow::{
     FlowKind, SuiteCommandKind, execute_suite_command, suite_command_cwd, suite_command_for_kind,
 };
 use chief::orchestrator::OrchestratorError;
-use chief::service::{ChiefEngine, ProjectContext};
+use chief::scheduler::Scheduler;
+use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry};
 use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
 use clap::{Args, Parser, Subcommand};
 use std::fs::{self, OpenOptions};
@@ -39,6 +43,8 @@ enum Commands {
     Init(InitArgs),
     /// Remove completed todos that have a commit hash.
     CleanDone,
+    /// Run project pre-run checks (same readiness checks used by backend/frontend start).
+    Check(CheckArgs),
     /// Print recent project events.
     TailEvents(TailEventsArgs),
     /// Run suite-level commands from chief.yaml for a specific suite.
@@ -57,6 +63,13 @@ struct TailEventsArgs {
     /// Maximum number of most-recent events to print.
     #[arg(long, short = 'n', default_value_t = 50)]
     limit: usize,
+}
+
+#[derive(Debug, Args)]
+struct CheckArgs {
+    /// Force executing checks even when cached readiness is still valid.
+    #[arg(long, default_value_t = false)]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -174,6 +187,7 @@ fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
     match command {
         Commands::Init(args) => run_init(cli, args),
         Commands::CleanDone => run_clean_done(cli),
+        Commands::Check(args) => run_check(cli, args),
         Commands::TailEvents(args) => run_tail_events(cli, args),
         Commands::Suite(args) => run_suite_command(cli, args),
     }
@@ -367,6 +381,69 @@ fn run_tail_events(cli: &Cli, args: &TailEventsArgs) -> Result<()> {
         }
         println!();
     }
+    Ok(())
+}
+
+fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
+    let project_dir = if cli.project_dir.is_absolute() {
+        cli.project_dir.clone()
+    } else {
+        std::env::current_dir()
+            .context("failed resolving current directory for --project-dir")?
+            .join(&cli.project_dir)
+    };
+
+    if !project_dir.exists() {
+        bail!(
+            "project directory does not exist: {}",
+            project_dir.display()
+        );
+    }
+    if !project_dir.is_dir() {
+        bail!("project path is not a directory: {}", project_dir.display());
+    }
+
+    let context = ProjectContext::load(&project_dir)?;
+    let project_name = context.name.clone();
+    let projects_dir = project_dir.clone();
+    let registry = ProjectRegistry::discover(&projects_dir, std::slice::from_ref(&project_dir))
+        .with_context(|| {
+            format!(
+                "failed discovering project registry for {}",
+                project_dir.display()
+            )
+        })?;
+    let scheduler = Scheduler::new(registry, 1);
+    let service = api::service::ApiService::new(scheduler, 1);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to initialize async runtime for `chief check`")?;
+
+    let result = runtime
+        .block_on(service.run_readiness_check(&project_name, args.force))
+        .map_err(anyhow::Error::new)?;
+
+    println!("project: {project_name}");
+    println!("status: {}", result.readiness.status);
+    println!("summary: {}", result.readiness.summary);
+    println!(
+        "executed: {}",
+        if result.ran { "yes" } else { "no (cached)" }
+    );
+    if let Some(checked_at) = result.readiness.checked_at {
+        println!("checked_at: {checked_at}");
+    }
+    if let Some(checking_started_at) = result.readiness.checking_started_at {
+        println!("checking_started_at: {checking_started_at}");
+    }
+    println!("updated_at: {}", result.readiness.updated_at);
+
+    if result.readiness.status != "ready" {
+        bail!("{}", result.readiness.summary);
+    }
+
     Ok(())
 }
 
@@ -839,6 +916,17 @@ mod tests {
             }
             _ => panic!("expected lint suite command"),
         }
+    }
+
+    #[test]
+    fn parse_check_with_force_flag() {
+        let cli = Cli::try_parse_from(["chief", "check", "--force"])
+            .expect("check command with --force should parse");
+
+        let Some(Commands::Check(args)) = cli.command else {
+            panic!("expected check command");
+        };
+        assert!(args.force, "check --force should set force=true");
     }
 
     #[test]

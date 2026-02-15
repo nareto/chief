@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Response};
 use chief::storage::db_reset_required_from_anyhow;
 use serde::Serialize;
 use serde_json::Value;
+use std::fmt;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -110,6 +111,18 @@ impl From<anyhow::Error> for ApiError {
         Self::internal(value)
     }
 }
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(code) = &self.code {
+            write!(f, "{} ({code})", self.message)
+        } else {
+            write!(f, "{}", self.message)
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
