@@ -28,6 +28,11 @@ suites:
     lint_command: cargo clippy
     # lint_fix_command: cargo fmt
     post_green_command: cargo test
+    # Optional worktree dependency cache (snapshotted during successful pre-run checks)
+    # and re-hydrated into each fresh todo worktree.
+    # cache_paths: [target]
+    # cache_key_files: [Cargo.lock]
+    # cache_mode: copy # optional: copy (default) or symlink
     # command_timeout_seconds: 1800 # optional per-suite override (seconds)
     env: {}
     strip_root_from_target: true
@@ -47,6 +52,9 @@ suites:
 #     lint_command: ruff check {target}
 #     lint_fix_command: ruff check --fix {target}
 #     post_green_command: pytest -q
+#     cache_paths: [.venv]
+#     cache_key_files: [poetry.lock, requirements-dev.txt]
+#     cache_mode: copy
 #     command_timeout_seconds: 1800 # optional per-suite override (seconds)
 #     env: {}
 #     strip_root_from_target: true
@@ -66,6 +74,9 @@ suites:
 #     lint_command: npm run lint
 #     lint_fix_command: npm run lint -- --fix
 #     post_green_command: npm run build
+#     cache_paths: [node_modules]
+#     cache_key_files: [package-lock.json, pnpm-lock.yaml, yarn.lock]
+#     cache_mode: copy
 #     command_timeout_seconds: 1800 # optional per-suite override (seconds)
 #     env:
 #       NODE_ENV: test

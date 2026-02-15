@@ -5,6 +5,7 @@ use crate::flow::{FlowKind, TodoOutcome};
 use crate::git::GitOps;
 use crate::orchestrator::{OrchestratorError, OrchestratorResult};
 use crate::service::{ChiefEngine, ProjectContext};
+use crate::worktree_cache;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -179,6 +180,62 @@ where
 
         work_dir = worktree_path.clone();
         branch_name = Some(branch);
+
+        match worktree_cache::file_content_md5(&context.config_path).and_then(|chief_yaml_hash| {
+            worktree_cache::hydrate_suite_caches_into_worktree(
+                &context.project_dir,
+                &context.name,
+                &context.chief_yaml.suites,
+                &worktree_path,
+                &chief_yaml_hash,
+            )
+        }) {
+            Ok(cache_report) => {
+                if cache_report.linked_paths > 0 {
+                    let mut payload = std::collections::BTreeMap::new();
+                    payload.insert(
+                        "linked_paths".to_owned(),
+                        serde_json::Value::from(cache_report.linked_paths as u64),
+                    );
+                    payload.insert(
+                        "skipped_existing_paths".to_owned(),
+                        serde_json::Value::from(cache_report.skipped_existing_paths as u64),
+                    );
+                    payload.insert(
+                        "missing_cache_paths".to_owned(),
+                        serde_json::Value::from(cache_report.missing_cache_paths as u64),
+                    );
+                    payload.insert(
+                        "suites_considered".to_owned(),
+                        serde_json::Value::from(cache_report.suites_considered as u64),
+                    );
+                    payload.insert(
+                        "invalid_paths".to_owned(),
+                        serde_json::Value::from(cache_report.invalid_paths as u64),
+                    );
+                    let _ = context.log_project_event(
+                        &run_id,
+                        Some(job.id.clone()),
+                        Some(todo.id.clone()),
+                        "info",
+                        None,
+                        EventType::Msg,
+                        "Hydrated suite dependency cache into worker worktree",
+                        payload,
+                    );
+                }
+            }
+            Err(err) => {
+                report_state_update_error(
+                    &context,
+                    &run_id,
+                    Some(&job.id),
+                    Some(&todo.id),
+                    "failed to hydrate suite dependency cache into worker worktree",
+                    &err,
+                );
+            }
+        }
 
         let mut updated_job = job.clone();
         updated_job.worktree_path = Some(worktree_path.display().to_string());
