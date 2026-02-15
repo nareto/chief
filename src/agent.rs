@@ -11,14 +11,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentRequest {
     pub prompt: String,
     pub cwd: PathBuf,
     pub timeout_seconds: Option<u64>,
     pub disallowed_paths: Vec<String>,
     pub cancel_signal: Option<Arc<AtomicBool>>,
+    pub on_chunk: Option<AgentChunkCallback>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentOutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl AgentOutputStream {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+pub type AgentChunkCallback = Arc<dyn Fn(AgentOutputStream, &str) + Send + Sync + 'static>;
 
 pub trait CodingAgent: Send + Sync {
     fn name(&self) -> &str;
@@ -150,6 +168,7 @@ fn run_command_backed_agent(
         child,
         request.timeout_seconds,
         request.cancel_signal.as_deref(),
+        request.on_chunk.clone(),
     )
     .context("failed while waiting for agent output")?;
 
@@ -302,18 +321,25 @@ fn wait_with_timeout(
     mut child: Child,
     timeout_seconds: Option<u64>,
     cancel_signal: Option<&AtomicBool>,
+    on_chunk: Option<AgentChunkCallback>,
 ) -> Result<(Output, WaitState)> {
     let timeout = timeout_seconds
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs);
-    let should_poll = timeout.is_some() || cancel_signal.is_some();
+    let should_poll = timeout.is_some() || cancel_signal.is_some() || on_chunk.is_some();
     if !should_poll {
         let output = child.wait_with_output()?;
         return Ok((output, WaitState::Completed));
     }
 
-    let mut stdout_handle = child.stdout.take().map(spawn_reader_thread);
-    let mut stderr_handle = child.stderr.take().map(spawn_reader_thread);
+    let mut stdout_handle = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_reader_thread(stdout, AgentOutputStream::Stdout, on_chunk.clone()));
+    let mut stderr_handle = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_reader_thread(stderr, AgentOutputStream::Stderr, on_chunk));
 
     let started = Instant::now();
 
@@ -377,13 +403,28 @@ fn collect_output(
     ))
 }
 
-fn spawn_reader_thread<R>(mut reader: R) -> JoinHandle<io::Result<Vec<u8>>>
+fn spawn_reader_thread<R>(
+    mut reader: R,
+    stream: AgentOutputStream,
+    on_chunk: Option<AgentChunkCallback>,
+) -> JoinHandle<io::Result<Vec<u8>>>
 where
     R: Read + Send + 'static,
 {
     std::thread::spawn(move || {
         let mut output = Vec::new();
-        reader.read_to_end(&mut output)?;
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&chunk[..read]);
+            if let Some(callback) = on_chunk.as_ref() {
+                let text = String::from_utf8_lossy(&chunk[..read]).into_owned();
+                callback(stream, &text);
+            }
+        }
         Ok(output)
     })
 }
@@ -517,8 +558,8 @@ mod tests {
         process.stderr(Stdio::piped());
         let child = process.spawn().expect("spawn dd");
 
-        let (output, state) =
-            wait_with_timeout(child, Some(5), None).expect("wait_with_timeout should succeed");
+        let (output, state) = wait_with_timeout(child, Some(5), None, None)
+            .expect("wait_with_timeout should succeed");
         assert_eq!(state, WaitState::Completed);
         assert!(output.status.success());
         assert!(output.stdout.len() >= 512 * 1024);
@@ -541,8 +582,8 @@ mod tests {
         });
 
         let started = Instant::now();
-        let (output, state) =
-            wait_with_timeout(child, None, Some(cancel_signal.as_ref())).expect("cancelled wait");
+        let (output, state) = wait_with_timeout(child, None, Some(cancel_signal.as_ref()), None)
+            .expect("cancelled wait");
         assert_eq!(state, WaitState::Cancelled);
         assert!(
             started.elapsed() < Duration::from_secs(5),

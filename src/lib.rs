@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_stream;
 pub mod config;
 pub mod domain;
 pub mod flow;
