@@ -1,4 +1,5 @@
 use crate::agent::{AgentCancelledError, AgentRequest, CodingAgent};
+use crate::agent_stream;
 use crate::config::{ChiefConfig, TestSuiteConfig};
 use crate::domain::{
     AgentOutput, EventRecord, EventType, LoopDecision, Phase, Todo, WaitState, payload_from_json,
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -805,26 +807,64 @@ impl<'a> FlowExecution<'a> {
     ) -> Result<AgentOutput> {
         self.ensure_not_cancelled()?;
 
-        self.log_event(
+        let query_id = Uuid::new_v4().to_string();
+        let project_name = self
+            .store
+            .project_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("project")
+            .to_owned();
+        let todo_id = self.todo.id.clone();
+
+        agent_stream::start_query(
+            &project_name,
+            &query_id,
+            &self.run_id,
+            &self.job_id,
+            &todo_id,
+            phase.as_str(),
+        );
+
+        if let Err(err) = self.log_event(
             "info",
             Some(phase),
             EventType::AgentPrompt,
             format!("Agent prompt ({})", phase.as_str()),
-            payload_from_json(json!({ "prompt": prompt })),
-        )?;
+            payload_from_json(json!({
+                "prompt": prompt,
+                "agent_query_id": query_id,
+            })),
+        ) {
+            agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
+            return Err(err);
+        }
 
         let before_files = self
             .git
             .changed_files(&self.project_dir)
             .unwrap_or_default();
 
-        let out = self.agent.run(AgentRequest {
+        let stream_project = project_name.clone();
+        let stream_query_id = query_id.clone();
+        let out = match self.agent.run(AgentRequest {
             prompt,
             cwd: self.project_dir.clone(),
             timeout_seconds: Some(self.chief_config.agent_timeout_seconds),
             disallowed_paths,
             cancel_signal: Some(self.cancel_signal.clone()),
-        })?;
+            on_chunk: Some(Arc::new(move |stream, text| {
+                agent_stream::push_chunk(&stream_project, &stream_query_id, stream, text);
+            })),
+        }) {
+            Ok(out) => out,
+            Err(err) => {
+                agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
+                return Err(err);
+            }
+        };
+
+        agent_stream::complete_query(&project_name, &query_id, Some(out.exit_code), None);
 
         self.log_event(
             if out.exit_code == 0 {
@@ -841,6 +881,7 @@ impl<'a> FlowExecution<'a> {
                 "output": out.merged_output,
                 "stdout": out.stdout,
                 "stderr": out.stderr,
+                "agent_query_id": query_id,
             })),
         )?;
 

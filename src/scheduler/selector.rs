@@ -38,6 +38,7 @@ pub(super) async fn select_todo_id(
                 timeout_seconds: Some(timeout_seconds),
                 disallowed_paths: Vec::new(),
                 cancel_signal: Some(cancel_signal),
+                on_chunk: None,
             })
         }
     })

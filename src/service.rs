@@ -987,6 +987,7 @@ impl ChiefEngine {
                 timeout_seconds: Some(self.project.chief_yaml.chief.agent_timeout_seconds),
                 disallowed_paths: Vec::new(),
                 cancel_signal: None,
+                on_chunk: None,
             }) {
                 Ok(response) => response,
                 Err(err) => {

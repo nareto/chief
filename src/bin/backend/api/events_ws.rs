@@ -3,6 +3,7 @@ use crate::api::service::ReadinessStreamMessage;
 use crate::app::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
+use chief::agent_stream::{self, AgentQueryStreamMessage, AgentQueryStreamSnapshot};
 use chief::domain::EventRecord;
 use chief::storage::ProjectStore;
 use futures_util::{SinkExt, StreamExt};
@@ -19,11 +20,35 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum EventsWsMessage {
-    Snapshot { events: Vec<EventRecord> },
-    Event { event: EventRecord },
+    Snapshot {
+        events: Vec<EventRecord>,
+    },
+    Event {
+        event: EventRecord,
+    },
     ReadinessStreamReset,
-    ReadinessStreamChunk { text: String },
-    Error { message: String },
+    ReadinessStreamChunk {
+        text: String,
+    },
+    AgentQueryStreamStarted {
+        query_id: String,
+        run_id: String,
+        job_id: String,
+        todo_id: String,
+        phase: String,
+    },
+    AgentQueryStreamChunk {
+        query_id: String,
+        text: String,
+    },
+    AgentQueryStreamCompleted {
+        query_id: String,
+        exit_code: Option<i32>,
+        error: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub async fn events_ws(
@@ -34,6 +59,8 @@ pub async fn events_ws(
     let store = state.service.project_store_for_events(&project).await?;
     let readiness_receiver = state.service.subscribe_readiness_stream();
     let readiness_snapshot = state.service.readiness_stream_snapshot(&project);
+    let agent_query_receiver = agent_stream::subscribe();
+    let agent_query_snapshots = agent_stream::snapshot_for_project(&project);
     Ok(ws.on_upgrade(move |socket| {
         handle_events_socket(
             socket,
@@ -41,6 +68,8 @@ pub async fn events_ws(
             store,
             readiness_receiver,
             readiness_snapshot,
+            agent_query_receiver,
+            agent_query_snapshots,
         )
     }))
 }
@@ -51,6 +80,8 @@ async fn handle_events_socket(
     store: ProjectStore,
     mut readiness_receiver: BroadcastReceiver<ReadinessStreamMessage>,
     readiness_snapshot: Option<String>,
+    mut agent_query_receiver: BroadcastReceiver<AgentQueryStreamMessage>,
+    agent_query_snapshots: Vec<AgentQueryStreamSnapshot>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -86,6 +117,40 @@ async fn handle_events_socket(
         if send_message(
             &mut sender,
             EventsWsMessage::ReadinessStreamChunk { text: snapshot },
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+    }
+
+    for snapshot in agent_query_snapshots {
+        if send_message(
+            &mut sender,
+            EventsWsMessage::AgentQueryStreamStarted {
+                query_id: snapshot.query_id.clone(),
+                run_id: snapshot.run_id,
+                job_id: snapshot.job_id,
+                todo_id: snapshot.todo_id,
+                phase: snapshot.phase,
+            },
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+
+        if snapshot.output.is_empty() {
+            continue;
+        }
+        if send_message(
+            &mut sender,
+            EventsWsMessage::AgentQueryStreamChunk {
+                query_id: snapshot.query_id,
+                text: snapshot.output,
+            },
         )
         .await
         .is_err()
@@ -137,6 +202,90 @@ async fn handle_events_socket(
                             project = %project,
                             skipped,
                             "events stream readiness channel lagged"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'stream,
+                }
+            }
+            agent_query_message = agent_query_receiver.recv() => {
+                match agent_query_message {
+                    Ok(AgentQueryStreamMessage::Started {
+                        project: stream_project,
+                        query_id,
+                        run_id,
+                        job_id,
+                        todo_id,
+                        phase,
+                    }) => {
+                        if stream_project != project {
+                            continue;
+                        }
+                        if send_message(
+                            &mut sender,
+                            EventsWsMessage::AgentQueryStreamStarted {
+                                query_id,
+                                run_id,
+                                job_id,
+                                todo_id,
+                                phase,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break 'stream;
+                        }
+                    }
+                    Ok(AgentQueryStreamMessage::Chunk {
+                        project: stream_project,
+                        query_id,
+                        stream: _,
+                        text,
+                    }) => {
+                        if stream_project != project {
+                            continue;
+                        }
+                        if send_message(
+                            &mut sender,
+                            EventsWsMessage::AgentQueryStreamChunk {
+                                query_id,
+                                text,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break 'stream;
+                        }
+                    }
+                    Ok(AgentQueryStreamMessage::Completed {
+                        project: stream_project,
+                        query_id,
+                        exit_code,
+                        error,
+                    }) => {
+                        if stream_project != project {
+                            continue;
+                        }
+                        if send_message(
+                            &mut sender,
+                            EventsWsMessage::AgentQueryStreamCompleted {
+                                query_id,
+                                exit_code,
+                                error,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break 'stream;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            project = %project,
+                            skipped,
+                            "events stream agent-query channel lagged"
                         );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'stream,
