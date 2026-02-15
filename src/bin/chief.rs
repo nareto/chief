@@ -421,20 +421,48 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
         .build()
         .context("failed to initialize async runtime for `chief check`")?;
 
-    let result = runtime
-        .block_on(service.run_readiness_check(&project_name, args.force))
-        .map_err(anyhow::Error::new)?;
+    let result = runtime.block_on(async {
+        use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-    if result.ran {
-        if let Some(stream_output) = service.readiness_stream_snapshot(&project_name) {
-            if !stream_output.trim().is_empty() {
-                print!("{stream_output}");
-                if !stream_output.ends_with('\n') {
-                    println!();
+        let mut readiness_receiver = service.subscribe_readiness_stream();
+        let readiness_check = service.run_readiness_check(&project_name, args.force);
+        tokio::pin!(readiness_check);
+
+        loop {
+            tokio::select! {
+                readiness_result = &mut readiness_check => {
+                    // Drain any trailing chunks queued right before completion.
+                    loop {
+                        match readiness_receiver.try_recv() {
+                            Ok(api::service::ReadinessStreamMessage::Chunk { project: stream_project, text })
+                                if stream_project == project_name =>
+                            {
+                                print!("{text}");
+                                let _ = io::stdout().flush();
+                            }
+                            Ok(_) => {}
+                            Err(TryRecvError::Lagged(_)) => continue,
+                            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                        }
+                    }
+                    break readiness_result.map_err(anyhow::Error::new);
+                }
+                readiness_message = readiness_receiver.recv() => {
+                    match readiness_message {
+                        Ok(api::service::ReadinessStreamMessage::Chunk { project: stream_project, text })
+                            if stream_project == project_name =>
+                        {
+                            print!("{text}");
+                            let _ = io::stdout().flush();
+                        }
+                        Ok(_) => {}
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => {}
+                    }
                 }
             }
         }
-    }
+    })?;
 
     println!("project: {project_name}");
     println!("status: {}", result.readiness.status);
