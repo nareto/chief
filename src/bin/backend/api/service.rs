@@ -24,7 +24,7 @@ use chief::git::{
 };
 use chief::scheduler::{Scheduler, StopMode};
 use chief::service::ChiefEngine;
-use chief::storage::{EventQuery, ProjectStore, ReadinessStatus};
+use chief::storage::{EventQuery, ProjectReadinessState, ProjectStore, ReadinessStatus};
 use chrono::Utc;
 use futures_util::stream;
 use serde_json::json;
@@ -49,6 +49,13 @@ pub struct ApiService {
     readiness_cancel_signals: Arc<tokio::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
     readiness_stream_sender: broadcast::Sender<ReadinessStreamMessage>,
     readiness_stream_snapshots: Arc<std::sync::Mutex<HashMap<String, String>>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct ReadinessCheckResult {
+    pub readiness: ProjectReadinessResponse,
+    pub ran: bool,
 }
 
 struct SuiteCheckPlan {
@@ -227,17 +234,9 @@ impl ApiService {
 
         let start_anyway = payload.start_anyway.unwrap_or(false);
         if !start_anyway {
-            let should_run = should_run_readiness_check(&context.store, &chief_yaml_hash)
-                .map_err(ApiError::internal)?;
-            if should_run {
-                self.run_and_persist_readiness_check(&project, &context, &chief_yaml_hash)
-                    .await?;
-            } else {
-                info!(
-                    project,
-                    "skipping pre-run checks because previous checks succeeded and chief.yaml is unchanged"
-                );
-            }
+            let _ = self
+                .ensure_project_readiness(&project, &context, &chief_yaml_hash, false)
+                .await?;
         }
 
         self.scheduler
@@ -297,6 +296,35 @@ impl ApiService {
 
         Ok(MessageResponse {
             message: format!("requested pre-run checks stop for project {project}"),
+        })
+    }
+
+    #[allow(dead_code)]
+    pub async fn run_readiness_check(
+        &self,
+        project: &str,
+        force: bool,
+    ) -> Result<ReadinessCheckResult, ApiError> {
+        let mut context = self.project_context(project).await?;
+        if !context.config_path.is_file() {
+            return Err(ApiError::chief_yaml_missing(
+                context.config_path.display().to_string(),
+            ));
+        }
+        context.refresh().map_err(ApiError::internal)?;
+        let chief_yaml_hash =
+            chief_yaml_content_hash(&context.config_path).map_err(ApiError::internal)?;
+        let ran = self
+            .ensure_project_readiness(project, &context, &chief_yaml_hash, force)
+            .await?;
+        let readiness = context
+            .store
+            .get_readiness_state()
+            .map_err(ApiError::internal)?;
+
+        Ok(ReadinessCheckResult {
+            readiness: project_readiness_response(readiness),
+            ran,
         })
     }
 
@@ -580,19 +608,7 @@ impl ApiService {
                 total: todos.len(),
             },
             active_job,
-            readiness: ProjectReadinessResponse {
-                status: readiness.status.as_str().to_owned(),
-                summary: if readiness.summary.trim().is_empty() {
-                    READINESS_UNCHECKED_SUMMARY.to_owned()
-                } else {
-                    readiness.summary
-                },
-                checking_started_at: readiness
-                    .checking_started_at
-                    .map(|value| value.to_rfc3339()),
-                checked_at: readiness.checked_at.map(|value| value.to_rfc3339()),
-                updated_at: readiness.updated_at.to_rfc3339(),
-            },
+            readiness: project_readiness_response(readiness),
         })
     }
 
@@ -1565,6 +1581,45 @@ impl ApiService {
             .get_project_context(project)
             .await
             .map_err(ApiError::classify_store_error)
+    }
+
+    async fn ensure_project_readiness(
+        &self,
+        project: &str,
+        context: &chief::service::ProjectContext,
+        chief_yaml_hash: &str,
+        force: bool,
+    ) -> Result<bool, ApiError> {
+        let should_run = force
+            || should_run_readiness_check(&context.store, chief_yaml_hash)
+                .map_err(ApiError::internal)?;
+        if should_run {
+            self.run_and_persist_readiness_check(project, context, chief_yaml_hash)
+                .await?;
+            return Ok(true);
+        }
+
+        info!(
+            project,
+            "skipping pre-run checks because previous checks succeeded and chief.yaml is unchanged"
+        );
+        Ok(false)
+    }
+}
+
+fn project_readiness_response(readiness: ProjectReadinessState) -> ProjectReadinessResponse {
+    ProjectReadinessResponse {
+        status: readiness.status.as_str().to_owned(),
+        summary: if readiness.summary.trim().is_empty() {
+            READINESS_UNCHECKED_SUMMARY.to_owned()
+        } else {
+            readiness.summary
+        },
+        checking_started_at: readiness
+            .checking_started_at
+            .map(|value| value.to_rfc3339()),
+        checked_at: readiness.checked_at.map(|value| value.to_rfc3339()),
+        updated_at: readiness.updated_at.to_rfc3339(),
     }
 }
 
