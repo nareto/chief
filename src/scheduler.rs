@@ -15,6 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopMode {
+    None,
+    Pause,
+    Stop,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectRuntimeView {
     pub name: String,
@@ -25,6 +33,7 @@ pub struct ProjectRuntimeView {
     pub flow_name: String,
     pub model_override: Option<String>,
     pub stop_requested: bool,
+    pub stop_mode: StopMode,
     pub last_error: Option<String>,
 }
 
@@ -44,6 +53,7 @@ struct ProjectRuntime {
     active_workers: usize,
     running: bool,
     stop_requested: bool,
+    stop_mode: StopMode,
     flow_kind: FlowKind,
     model_override: Option<String>,
     last_error: Option<String>,
@@ -59,6 +69,7 @@ impl ProjectRuntime {
             active_workers: 0,
             running: false,
             stop_requested: false,
+            stop_mode: StopMode::None,
             flow_kind: FlowKind::SinglePrompt,
             model_override: None,
             last_error: None,
@@ -112,6 +123,7 @@ impl Scheduler {
                         .unwrap_or(configured_flow_name),
                     model_override: runtime.and_then(|v| v.model_override.clone()),
                     stop_requested: runtime.map(|v| v.stop_requested).unwrap_or(false),
+                    stop_mode: runtime.map(|v| v.stop_mode).unwrap_or(StopMode::None),
                     last_error: runtime.and_then(|v| v.last_error.clone()),
                 }
             })
@@ -144,6 +156,7 @@ impl Scheduler {
             state.flow_kind = flow_kind;
             state.model_override = model_override.clone();
             state.stop_requested = false;
+            state.stop_mode = StopMode::None;
             state.cancel_signal.store(false, Ordering::SeqCst);
             state.last_error = None;
             if state.running {
@@ -168,9 +181,70 @@ impl Scheduler {
                         state.last_error = Some(err.to_string());
                         state.running = false;
                         state.active_workers = 0;
+                        state.stop_requested = false;
+                        state.stop_mode = StopMode::None;
+                        state.cancel_signal.store(false, Ordering::SeqCst);
                     }
                 }
             });
+        }
+
+        Ok(())
+    }
+
+    pub async fn pause_project(&self, project_name: &str) -> Result<()> {
+        let should_log_pause_request = {
+            let mut states = self.states.lock().await;
+            let Some(state) = states.get_mut(project_name) else {
+                return Err(anyhow!("project '{project_name}' is not running"));
+            };
+            if state.stop_mode == StopMode::Stop {
+                false
+            } else {
+                let should_log = state.stop_mode != StopMode::Pause;
+                state.stop_requested = true;
+                state.stop_mode = StopMode::Pause;
+                should_log
+            }
+        };
+
+        if !should_log_pause_request {
+            return Ok(());
+        }
+
+        let context = self.get_project_context(project_name).await?;
+        let run_id = context
+            .store
+            .list_jobs(200)?
+            .into_iter()
+            .find(|job| {
+                matches!(
+                    job.status,
+                    JobStatus::Queued
+                        | JobStatus::Selecting
+                        | JobStatus::Running
+                        | JobStatus::Merging
+                )
+            })
+            .map(|job| job.run_id);
+
+        if let Some(run_id) = run_id
+            && let Err(err) = context.log_project_event(
+                &run_id,
+                None,
+                None,
+                "info",
+                None,
+                EventType::Job,
+                format!("Pause requested for {project_name}; draining active work now"),
+                BTreeMap::new(),
+            )
+        {
+            warn!(
+                project = %project_name,
+                error = %err,
+                "failed to log immediate pause-requested event"
+            );
         }
 
         Ok(())
@@ -182,8 +256,9 @@ impl Scheduler {
             let Some(state) = states.get_mut(project_name) else {
                 return Err(anyhow!("project '{project_name}' is not running"));
             };
-            let should_log = !state.stop_requested;
+            let should_log = state.stop_mode != StopMode::Stop;
             state.stop_requested = true;
+            state.stop_mode = StopMode::Stop;
             state.cancel_signal.store(true, Ordering::SeqCst);
             should_log
         };

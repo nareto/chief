@@ -13,6 +13,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/projects/{project}/start",
             post(handlers::start_project),
         )
+        .route(
+            "/api/projects/{project}/pause",
+            post(handlers::pause_project),
+        )
         .route("/api/projects/{project}/stop", post(handlers::stop_project))
         .route(
             "/api/projects/{project}/readiness/stop",

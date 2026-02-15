@@ -1,6 +1,6 @@
 use chief::domain::{EventRecord, JobRecord, Todo};
 use chief::flow::SuiteCommandKind;
-use chief::scheduler::ProjectRuntimeView;
+use chief::scheduler::{ProjectRuntimeView, StopMode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +178,7 @@ pub struct StateResponse {
     pub project: String,
     pub running: bool,
     pub stop_requested: bool,
+    pub stop_mode: StopMode,
     pub active_agents: usize,
     pub desired_agents: usize,
     pub flow_name: String,
