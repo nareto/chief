@@ -1,6 +1,10 @@
 #[path = "../backend/api/error.rs"]
 pub mod error;
+#[path = "../backend/api/query_utils.rs"]
+pub mod query_utils;
 #[path = "../backend/api/service.rs"]
 pub mod service;
+#[path = "../backend/api/streaming.rs"]
+pub mod streaming;
 #[path = "../backend/api/types.rs"]
 pub mod types;
