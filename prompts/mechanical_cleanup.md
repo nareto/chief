@@ -2,6 +2,8 @@ Your task is to review the whole codebase and clean it up, without changing obse
 
 Do not do any major refactoring, but rather limit yourself to mechanical fixes:
 
+- security naivety: no input validation, secrets like API keys hard-coded
+- reinventing the wheel: custom code that could be done with the standard library
 - style clashing: e.g. snake_case and camelCase
 - dead code: unused imports, unreachable branches, functions or variables that are never used
 - inconsistent error handling: mixing try/catch with returning errors, silently swallowing exceptions
