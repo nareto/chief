@@ -47,7 +47,7 @@ use crate::api::streaming::{
     execute_suite_command_streaming, send_stream_event_async, send_stream_event_blocking,
 };
 
-#[path = "service/readiness.rs"]
+#[path = "service/readiness/mod.rs"]
 mod readiness;
 #[path = "service/suite_checks.rs"]
 mod suite_checks;
