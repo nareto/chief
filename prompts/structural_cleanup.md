@@ -2,17 +2,17 @@ Your task is to review the whole codebase and refactor as needed, without changi
 
 Look out for structural fixes: break up oversized files, extract cohesive modules and subsystems, rename for clarity, eliminate duplication across module boundaries, and simplify tangled code paths. More examples of stuff to fix: 
     - unhealthy length: functions, classes or files that are too long and should be broken up into multiple parts. Approximate target (not hard rules): files at most ~500 lines, functions at most ~80 lines
-    - security naivety: no input validation, secrets like API keys hard-coded
     - spaghetti code: unclear, intricated codepaths
+    - bad folder structure: no folder hierarchy, no grouping of sub-systems
     - codebase fragmentation: mix of different, overlapping patterns or styles 
     - code duplication
     - library fragmentation: use of multiple libraries that offer similar feature sets in different places of the codebase
-    - reinventing the wheel: custom code that could be done with the standard library
     - boilerplate overload: excessive use of design patterns where they aren't needed
     - project structure clash: conflicting patterns for directory and modules structure or file naming
     - mock data leftovers: hard-coded variables, unfinished "TODO" comments
 
 The result should in principle adhere to best clean code principles (but do not obsess over this):
+- Clean and meaningful folder structure and file names
 - Meaningful names that accurately represent the actual role in the code logic
 - SRP: single responsibility
 - DRY: avoid duplication
