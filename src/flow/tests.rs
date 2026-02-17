@@ -1,8 +1,10 @@
+use super::strategies::SinglePromptPhaseStrategy;
 use super::{
-    build_flow, AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy,
-    SinglePromptPhaseStrategy, TestSuiteConfig, SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+    AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy,
+    SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
     SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
     SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES, SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY,
+    TestSuiteConfig, build_flow,
 };
 use crate::agent::{AgentRequest, CodingAgent};
 use crate::config::ChiefConfig;
@@ -10,7 +12,7 @@ use crate::domain::{AgentOutput, EventType, LoopDecision, Phase, Todo, TodoStatu
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1618,13 +1620,13 @@ fn single_prompt_changed_files_retry_without_associated_suites_is_not_failure_co
         .latest_single_prompt_failure_context()
         .expect("single prompt failure context should resolve");
     assert!(
-            !context.failed_other,
-            "changed-files convergence retry should not count as failed_other when todo has no associated suites"
-        );
+        !context.failed_other,
+        "changed-files convergence retry should not count as failed_other when todo has no associated suites"
+    );
     assert!(
-            context.other_failures.is_empty(),
-            "changed-files convergence retry should be excluded from other_failures when todo has no associated suites"
-        );
+        context.other_failures.is_empty(),
+        "changed-files convergence retry should be excluded from other_failures when todo has no associated suites"
+    );
 
     let events = execution
         .todo_events_since_last_retry_reset(100)
@@ -1712,14 +1714,14 @@ fn single_prompt_changed_files_retry_with_associated_suites_remains_failure_cont
         .latest_single_prompt_failure_context()
         .expect("single prompt failure context should resolve");
     assert!(
-            context.failed_other,
-            "changed-files convergence retry should remain failed_other when todo has associated suites"
-        );
+        context.failed_other,
+        "changed-files convergence retry should remain failed_other when todo has associated suites"
+    );
     assert_eq!(
-            context.other_failures.len(),
-            1,
-            "changed-files convergence retry should be included in other_failures when todo has associated suites"
-        );
+        context.other_failures.len(),
+        1,
+        "changed-files convergence retry should be included in other_failures when todo has associated suites"
+    );
     assert_eq!(
         context.other_failures[0].event_type,
         EventType::PhaseFailure.as_str()
