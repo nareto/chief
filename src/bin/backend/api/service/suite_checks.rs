@@ -17,6 +17,63 @@ struct SuiteCheckExecution {
     worktree: TempWorktree,
 }
 
+fn log_cleanup_result(
+    project: &str,
+    suite_name: &str,
+    kind_label: &str,
+    cleanup_result: anyhow::Result<Option<chief::domain::AgentOutput>>,
+    after_command_failure: bool,
+) {
+    let finished_msg = if after_command_failure {
+        "suite cleanup command finished after command failure"
+    } else {
+        "suite cleanup command finished"
+    };
+    let failed_msg = if after_command_failure {
+        "suite cleanup command failed after command failure"
+    } else {
+        "suite cleanup command failed"
+    };
+    let execution_failed_msg = if after_command_failure {
+        "suite cleanup command execution failed after command failure"
+    } else {
+        "suite cleanup command execution failed"
+    };
+
+    match cleanup_result {
+        Ok(Some(cleanup_out)) => {
+            if cleanup_out.exit_code == 0 {
+                info!(
+                    project,
+                    suite = %suite_name,
+                    kind = %kind_label,
+                    command = %cleanup_out.command,
+                    "{finished_msg}"
+                );
+            } else {
+                warn!(
+                    project,
+                    suite = %suite_name,
+                    kind = %kind_label,
+                    command = %cleanup_out.command,
+                    exit_code = cleanup_out.exit_code,
+                    "{failed_msg}"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            warn!(
+                project,
+                suite = %suite_name,
+                kind = %kind_label,
+                error = %err,
+                "{execution_failed_msg}"
+            );
+        }
+    }
+}
+
 impl ApiService {
     pub async fn run_suite_check(
         &self,
@@ -70,38 +127,7 @@ impl ApiService {
 
         let response = match output {
             Ok((Ok(output), cleanup_result)) => {
-                match cleanup_result {
-                    Ok(Some(cleanup_out)) => {
-                        if cleanup_out.exit_code == 0 {
-                            info!(
-                                project,
-                                suite = %suite_name,
-                                kind = %kind_label,
-                                command = %cleanup_out.command,
-                                "suite cleanup command finished"
-                            );
-                        } else {
-                            warn!(
-                                project,
-                                suite = %suite_name,
-                                kind = %kind_label,
-                                command = %cleanup_out.command,
-                                exit_code = cleanup_out.exit_code,
-                                "suite cleanup command failed"
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        warn!(
-                            project,
-                            suite = %suite_name,
-                            kind = %kind_label,
-                            error = %err,
-                            "suite cleanup command execution failed"
-                        );
-                    }
-                }
+                log_cleanup_result(project, &suite_name, kind_label, cleanup_result, false);
                 info!(
                     project,
                     suite = %suite_name,
@@ -124,38 +150,7 @@ impl ApiService {
                 })
             }
             Ok((Err(err), cleanup_result)) => {
-                match cleanup_result {
-                    Ok(Some(cleanup_out)) => {
-                        if cleanup_out.exit_code == 0 {
-                            info!(
-                                project,
-                                suite = %suite_name,
-                                kind = %kind_label,
-                                command = %cleanup_out.command,
-                                "suite cleanup command finished after command failure"
-                            );
-                        } else {
-                            warn!(
-                                project,
-                                suite = %suite_name,
-                                kind = %kind_label,
-                                command = %cleanup_out.command,
-                                exit_code = cleanup_out.exit_code,
-                                "suite cleanup command failed after command failure"
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(cleanup_err) => {
-                        warn!(
-                            project,
-                            suite = %suite_name,
-                            kind = %kind_label,
-                            error = %cleanup_err,
-                            "suite cleanup command execution failed after command failure"
-                        );
-                    }
-                }
+                log_cleanup_result(project, &suite_name, kind_label, cleanup_result, true);
                 error!(
                     project,
                     suite = %suite_name,
@@ -273,38 +268,13 @@ impl ApiService {
 
             match command_result {
                 Ok(result) => {
-                    match cleanup_result {
-                        Ok(Some(cleanup_out)) => {
-                            if cleanup_out.exit_code == 0 {
-                                info!(
-                                    project = %project_name,
-                                    suite = %suite_name,
-                                    kind = %kind_label,
-                                    command = %cleanup_out.command,
-                                    "suite cleanup command finished"
-                                );
-                            } else {
-                                warn!(
-                                    project = %project_name,
-                                    suite = %suite_name,
-                                    kind = %kind_label,
-                                    command = %cleanup_out.command,
-                                    exit_code = cleanup_out.exit_code,
-                                    "suite cleanup command failed"
-                                );
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            warn!(
-                                project = %project_name,
-                                suite = %suite_name,
-                                kind = %kind_label,
-                                error = %err,
-                                "suite cleanup command execution failed"
-                            );
-                        }
-                    }
+                    log_cleanup_result(
+                        &project_name,
+                        &suite_name,
+                        &kind_label,
+                        cleanup_result,
+                        false,
+                    );
                     info!(
                         project = %project_name,
                         suite = %result.suite,
@@ -320,38 +290,13 @@ impl ApiService {
                     );
                 }
                 Err(err) => {
-                    match cleanup_result {
-                        Ok(Some(cleanup_out)) => {
-                            if cleanup_out.exit_code == 0 {
-                                info!(
-                                    project = %project_name,
-                                    suite = %suite_name,
-                                    kind = %kind_label,
-                                    command = %cleanup_out.command,
-                                    "suite cleanup command finished after command failure"
-                                );
-                            } else {
-                                warn!(
-                                    project = %project_name,
-                                    suite = %suite_name,
-                                    kind = %kind_label,
-                                    command = %cleanup_out.command,
-                                    exit_code = cleanup_out.exit_code,
-                                    "suite cleanup command failed after command failure"
-                                );
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(cleanup_err) => {
-                            warn!(
-                                project = %project_name,
-                                suite = %suite_name,
-                                kind = %kind_label,
-                                error = %cleanup_err,
-                                "suite cleanup command execution failed after command failure"
-                            );
-                        }
-                    }
+                    log_cleanup_result(
+                        &project_name,
+                        &suite_name,
+                        &kind_label,
+                        cleanup_result,
+                        true,
+                    );
                     error!(
                         project = %project_name,
                         suite = %suite_name,
