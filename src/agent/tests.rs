@@ -1,0 +1,133 @@
+
+use super::*;
+
+#[test]
+fn codex_command_uses_full_permissions_without_sandbox() {
+    let agent = CodexAgent {
+        model: None,
+        model_reasoning_effort: None,
+        extra_args: Vec::new(),
+    };
+
+    let command = agent.build_command(&["src".to_owned()]);
+    assert!(
+        command
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+        "codex command should include no-sandbox full-permissions flag: {command:?}"
+    );
+    assert!(
+        !command
+            .iter()
+            .any(|arg| arg.contains("sandbox_disallow_path")),
+        "codex command should not include sandbox disallow path when full-permissions mode is enabled: {command:?}"
+    );
+}
+
+#[test]
+fn claude_command_uses_full_permissions_mode() {
+    let agent = ClaudeAgent {
+        model: None,
+        extra_args: Vec::new(),
+    };
+
+    let command = agent.build_command(&["src".to_owned()]);
+    assert!(
+        command
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"),
+        "claude command should include full-permissions flag: {command:?}"
+    );
+    assert!(
+        !command.iter().any(|arg| arg == "--disallowedTools"),
+        "claude command should not include tool-level write restrictions in full-permissions mode: {command:?}"
+    );
+}
+
+#[test]
+fn claude_command_includes_model_from_config() {
+    let config = ChiefConfig {
+        model: Some("opus".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = ClaudeAgent::from_config(&config, None);
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--model", "opus"]),
+        "claude command should include configured model: {command:?}"
+    );
+}
+
+#[test]
+fn claude_command_prefers_runtime_model_override() {
+    let config = ChiefConfig {
+        model: Some("opus".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = ClaudeAgent::from_config(&config, Some("sonnet".to_owned()));
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--model", "sonnet"]),
+        "claude command should include runtime model override: {command:?}"
+    );
+    assert!(
+        !command
+            .windows(2)
+            .any(|window| window == ["--model", "opus"]),
+        "claude command should not include config model when runtime override is present: {command:?}"
+    );
+}
+
+#[test]
+fn wait_with_timeout_handles_large_stdout_without_false_timeout() {
+    let mut process = Command::new("sh");
+    process
+        .arg("-lc")
+        .arg("dd if=/dev/zero bs=1024 count=512 2>/dev/null");
+    configure_process_group(&mut process);
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    let child = process.spawn().expect("spawn dd");
+
+    let (output, state) =
+        wait_with_timeout(child, Some(5), None, None).expect("wait_with_timeout should succeed");
+    assert_eq!(state, WaitState::Completed);
+    assert!(output.status.success());
+    assert!(output.stdout.len() >= 512 * 1024);
+}
+
+#[test]
+fn wait_with_timeout_honors_cancel_without_timeout() {
+    let mut process = Command::new("sh");
+    process.arg("-lc").arg("sleep 10");
+    configure_process_group(&mut process);
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    let child = process.spawn().expect("spawn sleep");
+
+    let cancel_signal = Arc::new(AtomicBool::new(false));
+    let trigger = cancel_signal.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        trigger.store(true, Ordering::SeqCst);
+    });
+
+    let started = Instant::now();
+    let (output, state) =
+        wait_with_timeout(child, None, Some(cancel_signal.as_ref()), None).expect("cancelled wait");
+    assert_eq!(state, WaitState::Cancelled);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "cancelled wait should return quickly"
+    );
+    assert!(
+        !output.status.success(),
+        "cancelled process should not report success"
+    );
+}

@@ -1,0 +1,174 @@
+use super::*;
+
+impl<'a> FlowExecution<'a> {
+    pub fn run_agent(
+        &self,
+        phase: Phase,
+        prompt: String,
+        disallowed_paths: Vec<String>,
+    ) -> Result<AgentOutput> {
+        self.ensure_not_cancelled()?;
+
+        let query_id = Uuid::new_v4().to_string();
+        let project_name = self
+            .store
+            .project_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("project")
+            .to_owned();
+        let todo_id = self.todo.id.clone();
+
+        agent_stream::start_query(
+            &project_name,
+            &query_id,
+            &self.run_id,
+            &self.job_id,
+            &todo_id,
+            phase.as_str(),
+        );
+
+        if let Err(err) = self.log_event(
+            "info",
+            Some(phase),
+            EventType::AgentPrompt,
+            format!("Agent prompt ({})", phase.as_str()),
+            payload_from_json(json!({
+                "prompt": prompt,
+                "agent_query_id": query_id,
+            })),
+        ) {
+            agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
+            return Err(err);
+        }
+
+        let before_files = self
+            .git
+            .changed_files(&self.project_dir)
+            .unwrap_or_default();
+
+        let stream_project = project_name.clone();
+        let stream_query_id = query_id.clone();
+        let out = match self.agent.run(AgentRequest {
+            prompt,
+            cwd: self.project_dir.clone(),
+            timeout_seconds: Some(self.chief_config.agent_timeout_seconds),
+            disallowed_paths,
+            cancel_signal: Some(self.cancel_signal.clone()),
+            on_chunk: Some(Arc::new(move |stream, text| {
+                agent_stream::push_chunk(&stream_project, &stream_query_id, stream, text);
+            })),
+        }) {
+            Ok(out) => out,
+            Err(err) => {
+                agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
+                return Err(err);
+            }
+        };
+
+        agent_stream::complete_query(&project_name, &query_id, Some(out.exit_code), None);
+
+        self.log_event(
+            if out.exit_code == 0 {
+                "info"
+            } else {
+                "warning"
+            },
+            Some(phase),
+            EventType::AgentResponse,
+            format!("Agent response ({})", phase.as_str()),
+            payload_from_json(json!({
+                "exit_code": out.exit_code,
+                "command": out.command,
+                "output": out.merged_output,
+                "stdout": out.stdout,
+                "stderr": out.stderr,
+                "agent_query_id": query_id,
+            })),
+        )?;
+
+        let after_files = self
+            .git
+            .changed_files(&self.project_dir)
+            .unwrap_or_default();
+        let new_files = after_files
+            .iter()
+            .filter(|file| !before_files.contains(file))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let diff_summary = self
+            .git
+            .diff_summary_for_files(&self.project_dir, &new_files)
+            .unwrap_or_default();
+
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::Diff,
+            "Diff after agent run",
+            payload_from_json(json!({
+                "files": new_files,
+                "summary": diff_summary,
+            })),
+        )?;
+
+        Ok(out)
+    }
+
+    pub(in crate::flow) fn run_agent_with_git_changes(
+        &self,
+        phase: Phase,
+        prompt: String,
+        disallowed_paths: Vec<String>,
+    ) -> Result<AgentRunWithGitChanges> {
+        let before = self.working_tree_snapshot()?;
+        let output = self.run_agent(phase, prompt, disallowed_paths)?;
+        let after = self.working_tree_snapshot()?;
+        let touched_files = changed_paths_between_snapshots(&before, &after);
+        let had_git_changes = !touched_files.is_empty();
+
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::Diff,
+            "Iteration git change detection",
+            payload_from_json(json!({
+                "touched_files": &touched_files,
+                "had_git_changes": had_git_changes,
+            })),
+        )?;
+
+        Ok(AgentRunWithGitChanges {
+            output,
+            touched_files,
+            had_git_changes,
+        })
+    }
+
+    fn working_tree_snapshot(&self) -> Result<BTreeMap<String, String>> {
+        let files = self.git.changed_files(&self.project_dir)?;
+        let mut snapshot = BTreeMap::new();
+        for file in files {
+            let path = self.project_dir.join(&file);
+            let signature = if path.is_file() {
+                let content = fs::read(&path)
+                    .with_context(|| format!("failed reading changed file {}", path.display()))?;
+                format!("file:{:x}", md5::compute(content))
+            } else if path.is_dir() {
+                "dir".to_owned()
+            } else {
+                "missing".to_owned()
+            };
+            snapshot.insert(file, signature);
+        }
+        Ok(snapshot)
+    }
+
+    pub(super) fn ensure_not_cancelled(&self) -> Result<()> {
+        if self.cancel_signal.load(Ordering::SeqCst) {
+            return Err(anyhow!(AgentCancelledError));
+        }
+        Ok(())
+    }
+}
