@@ -506,22 +506,7 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<Option<AgentOutput>> {
-        self.ensure_suite_prepared(suite, phase)?;
-        let Some(cmd) = suite_command_for_kind(suite, SuiteCommandKind::Lint, None) else {
-            return Ok(None);
-        };
-        let cwd = suite_command_cwd(&self.project_dir, suite);
-        let timeout_seconds = self.suite_command_timeout_seconds(suite);
-        self.log_suite_command_started(
-            phase,
-            suite,
-            SuiteCommandKind::Lint,
-            &cmd,
-            &cwd,
-            timeout_seconds,
-        )?;
-        let out = self.run_suite_command(&cmd, &cwd, &suite.env, timeout_seconds)?;
-        Ok(Some(out))
+        self.run_optional_suite_command(suite, phase, SuiteCommandKind::Lint)
     }
 
     pub fn run_post_green_suite(
@@ -529,20 +514,22 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<Option<AgentOutput>> {
+        self.run_optional_suite_command(suite, phase, SuiteCommandKind::PostGreen)
+    }
+
+    fn run_optional_suite_command(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+        kind: SuiteCommandKind,
+    ) -> Result<Option<AgentOutput>> {
         self.ensure_suite_prepared(suite, phase)?;
-        let Some(command) = suite_command_for_kind(suite, SuiteCommandKind::PostGreen, None) else {
+        let Some(command) = suite_command_for_kind(suite, kind, None) else {
             return Ok(None);
         };
         let cwd = suite_command_cwd(&self.project_dir, suite);
         let timeout_seconds = self.suite_command_timeout_seconds(suite);
-        self.log_suite_command_started(
-            phase,
-            suite,
-            SuiteCommandKind::PostGreen,
-            &command,
-            &cwd,
-            timeout_seconds,
-        )?;
+        self.log_suite_command_started(phase, suite, kind, &command, &cwd, timeout_seconds)?;
         let out = self.run_suite_command(&command, &cwd, &suite.env, timeout_seconds)?;
         Ok(Some(out))
     }
