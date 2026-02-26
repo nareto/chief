@@ -147,6 +147,7 @@ chief init --chief-root /path/to/chief
 ```
 
 `init` is idempotent: existing files/symlinks are left unchanged and only missing ones are created.
+It creates `chief.yaml` plus `chief.example.yaml`/`todos.example.yaml` symlinks, and does not create `todos.yaml`.
 
 Common options:
 

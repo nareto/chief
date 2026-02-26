@@ -314,6 +314,14 @@ fn init_writes_full_default_chief_yaml_block() {
         fs::read_to_string(temp.path.join("chief.yaml")).expect("chief.yaml should be readable");
     assert_eq!(chief_yaml, init_files::INIT_CHIEF_YAML_CONTENT);
     assert!(
+        !chief_yaml.contains("\n  max_retries:"),
+        "init default chief.yaml should not include max_retries"
+    );
+    assert!(
+        !temp.path.join("todos.yaml").exists(),
+        "init should not create todos.yaml"
+    );
+    assert!(
         !chief_yaml.contains("\nsuites:"),
         "init default chief.yaml should only contain global chief options"
     );
