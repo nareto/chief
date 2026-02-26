@@ -8,10 +8,9 @@ pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] =
     ["chief.db", "chief.example.yaml", "todos.example.yaml"];
 pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   flow: loop_file
-  # flow: single_prompt # uncomment to run queued todos.yaml workflow instead
+  # flow: single_prompt # uncomment to run queued workflow using todos.yaml
   agent: codex
   agent_extra_args: []
-  max_retries: 2
   max_loop_iterations: 20
   required_stable_iterations: 2
   agent_timeout_seconds: 2700
@@ -50,7 +49,6 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
     let chief_example_link = project_dir.join("chief.example.yaml");
     let todos_example_link = project_dir.join("todos.example.yaml");
     let chief_yaml_path = project_dir.join("chief.yaml");
-    let todos_yaml_path = project_dir.join("todos.yaml");
 
     let mut created = 0usize;
     let mut skipped = 0usize;
@@ -73,11 +71,6 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
     }
 
     if write_file_if_missing(&chief_yaml_path, INIT_CHIEF_YAML_CONTENT)? {
-        created += 1;
-    } else {
-        skipped += 1;
-    }
-    if write_file_if_missing(&todos_yaml_path, "todos: []\n")? {
         created += 1;
     } else {
         skipped += 1;
