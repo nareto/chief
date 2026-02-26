@@ -20,7 +20,12 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+const LOOP_FILE_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(150);
+const LOOP_FILE_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
@@ -424,6 +429,12 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         .with_context(|| format!("failed to read loop_file input {}", file_path.display()))?;
 
     context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();
+    println!(
+        "loop_file: started {} (showing progress every {}s)",
+        file_path.display(),
+        LOOP_FILE_PROGRESS_HEARTBEAT_INTERVAL.as_secs()
+    );
+    let progress_reporter = LoopFileProgressReporter::start();
 
     let synthetic_todo = Todo {
         id: Todo::compute_id(
@@ -464,8 +475,11 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         cli.model.clone(),
         Arc::new(AtomicBool::new(false)),
         1,
-        |_attempt, _total, _err| {},
+        |attempt, total, err| {
+            println!("loop_file: retry {attempt}/{total} failed: {err:#}");
+        },
     );
+    drop(progress_reporter);
 
     match result {
         Ok(outcome) => {
@@ -491,6 +505,52 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
             let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
             let _ = engine.finish_run(&run_id, run_exit_status);
             Err(err.into_error()).context("loop_file execution failed")
+        }
+    }
+}
+
+struct LoopFileProgressReporter {
+    stop_signal: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl LoopFileProgressReporter {
+    fn start() -> Self {
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let stop_signal_thread = Arc::clone(&stop_signal);
+        let worker = std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut last_heartbeat_at = started;
+
+            loop {
+                if stop_signal_thread.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let now = Instant::now();
+                if now.duration_since(last_heartbeat_at) >= LOOP_FILE_PROGRESS_HEARTBEAT_INTERVAL {
+                    println!(
+                        "loop_file: still running (elapsed {}s)",
+                        now.duration_since(started).as_secs()
+                    );
+                    last_heartbeat_at = now;
+                }
+                std::thread::sleep(LOOP_FILE_PROGRESS_POLL_INTERVAL);
+            }
+        });
+
+        Self {
+            stop_signal,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for LoopFileProgressReporter {
+    fn drop(&mut self) {
+        self.stop_signal.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }

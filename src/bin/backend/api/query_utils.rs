@@ -144,8 +144,11 @@ pub(crate) fn parse_phase(value: &str) -> Result<Phase, ApiError> {
         "red" => Ok(Phase::Red),
         "green" => Ok(Phase::Green),
         "single_prompt" => Ok(Phase::SinglePrompt),
+        "loop_file" => Ok(Phase::LoopFile),
         "post_green" => Ok(Phase::PostGreen),
         "exit" => Ok(Phase::Exit),
-        other => Err(ApiError::unprocessable(format!("unsupported phase '{other}'"))),
+        other => Err(ApiError::unprocessable(format!(
+            "unsupported phase '{other}'"
+        ))),
     }
 }

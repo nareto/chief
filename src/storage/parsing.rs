@@ -1,6 +1,6 @@
 use super::{ProjectReadinessState, ReadinessStatus};
 use crate::domain::{EventRecord, EventType, JobStatus, Phase, Todo, TodoStatus};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::Row;
 use serde_json::Value;
@@ -119,6 +119,7 @@ fn parse_phase(value: &str) -> Phase {
         "red" => Phase::Red,
         "green" => Phase::Green,
         "single_prompt" => Phase::SinglePrompt,
+        "loop_file" => Phase::LoopFile,
         "post_green" => Phase::PostGreen,
         "exit" => Phase::Exit,
         _ => Phase::Start,

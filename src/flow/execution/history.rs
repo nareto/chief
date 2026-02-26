@@ -1,6 +1,10 @@
 use super::*;
 
 impl<'a> FlowExecution<'a> {
+    fn is_prompt_family_phase(phase: Option<Phase>) -> bool {
+        matches!(phase, Some(Phase::SinglePrompt | Phase::LoopFile))
+    }
+
     pub fn log_event(
         &self,
         level: &str,
@@ -125,7 +129,7 @@ impl<'a> FlowExecution<'a> {
         let mut include_other_failures = true;
 
         for event in events {
-            if event.phase != Some(Phase::SinglePrompt) {
+            if !Self::is_prompt_family_phase(event.phase) {
                 continue;
             }
 
@@ -233,7 +237,7 @@ impl<'a> FlowExecution<'a> {
     ) -> Result<bool> {
         let events = self.todo_events_since_last_retry_reset(1_000)?;
         Ok(events.into_iter().any(|event| {
-            event.phase == Some(Phase::SinglePrompt) && event.event_type == EventType::AgentPrompt
+            Self::is_prompt_family_phase(event.phase) && event.event_type == EventType::AgentPrompt
         }))
     }
 

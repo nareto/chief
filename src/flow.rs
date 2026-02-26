@@ -292,7 +292,8 @@ fn is_agent_timeout_response_event(event: &EventRecord) -> bool {
     }
 
     event.event_type == EventType::PhaseFailure
-        && event.msg == "single_prompt agent step failed"
+        && (event.msg == "single_prompt agent step failed"
+            || event.msg == "loop_file agent step failed")
         && event_exit_code(event) == Some(124)
 }
 
