@@ -206,7 +206,7 @@ impl TodoFlow for LoopFileFlow {
     fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
         let candidate_suites = execution.selected_suites();
         for suite in &candidate_suites {
-            execution.ensure_suite_prepared(suite, Phase::SinglePrompt)?;
+            execution.ensure_suite_prepared(suite, Phase::LoopFile)?;
         }
 
         let mut strategy = LoopFilePhaseStrategy::new(candidate_suites);
@@ -215,7 +215,7 @@ impl TodoFlow for LoopFileFlow {
 
         execution.log_event(
             "info",
-            Some(Phase::SinglePrompt),
+            Some(Phase::LoopFile),
             EventType::PhaseChange,
             "LOOP_FILE loop done; preparing commit",
             BTreeMap::new(),

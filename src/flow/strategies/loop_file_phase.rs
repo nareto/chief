@@ -82,7 +82,7 @@ impl LoopFilePhaseStrategy {
 
 impl PhaseStrategy for LoopFilePhaseStrategy {
     fn phase(&self) -> Phase {
-        Phase::SinglePrompt
+        Phase::LoopFile
     }
 
     fn attempt_fix(&mut self, execution: &mut FlowExecution<'_>) -> Result<AgentOutput> {
@@ -109,7 +109,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             }),
         )?;
 
-        let run = execution.run_agent_with_git_changes(Phase::SinglePrompt, prompt, Vec::new())?;
+        let run = execution.run_agent_with_git_changes(Phase::LoopFile, prompt, Vec::new())?;
         let output = run.output.clone();
         self.last_agent_run = Some(run);
         self.attempts += 1;
@@ -139,13 +139,13 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
         if suites_for_checks.is_empty() {
             execution.log_event(
                 "info",
-                Some(Phase::SinglePrompt),
+                Some(Phase::LoopFile),
                 EventType::PhaseChange,
                 "loop_file: no todo-associated suites; skipping lint+test commands",
                 BTreeMap::new(),
             )?;
         } else {
-            let all_pass = run_test_and_lint(execution, &suites_for_checks, Phase::SinglePrompt)?;
+            let all_pass = run_test_and_lint(execution, &suites_for_checks, Phase::LoopFile)?;
             if !all_pass {
                 return Ok(LoopDecision::Retry);
             }
@@ -154,7 +154,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
         if run.output.exit_code != 0 {
             execution.log_event(
                 "warning",
-                Some(Phase::SinglePrompt),
+                Some(Phase::LoopFile),
                 EventType::PhaseFailure,
                 "loop_file agent step failed",
                 payload_from_json(json!({
@@ -169,7 +169,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             let has_associated_test_suites = !execution.todo.test_suites.is_empty();
             execution.log_event(
                 "warning",
-                Some(Phase::SinglePrompt),
+                Some(Phase::LoopFile),
                 EventType::PhaseFailure,
                 SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
                 payload_from_json(json!({
@@ -183,7 +183,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
 
         execution.log_event(
             "info",
-            Some(Phase::SinglePrompt),
+            Some(Phase::LoopFile),
             EventType::PhaseChange,
             "loop_file iteration had no git file changes",
             BTreeMap::new(),
