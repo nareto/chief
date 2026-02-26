@@ -1,5 +1,5 @@
 use super::*;
-use chief::config::{ChiefConfig, TestSuiteConfig};
+use chief::config::TestSuiteConfig;
 use chief::domain::TargetType;
 use std::path::PathBuf;
 use std::process::Command;
@@ -45,6 +45,7 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
         flow: None,
         model: None,
         max_retries: None,
+        file: None,
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: None,
@@ -67,8 +68,8 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
 }
 
 #[test]
-fn run_rejects_loop_file_flow_outside_loop_file_command() {
-    let temp = TempDir::new("run-loop-file-rejected");
+fn run_requires_file_when_loop_file_flow_is_selected() {
+    let temp = TempDir::new("run-loop-file-missing-file");
     init_git_repo(&temp.path);
     fs::write(temp.path.join("chief.yaml"), "chief:\n  flow: loop_file\n")
         .expect("chief.yaml should be written");
@@ -78,16 +79,17 @@ fn run_rejects_loop_file_flow_outside_loop_file_command() {
         flow: None,
         model: None,
         max_retries: None,
+        file: None,
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: None,
     };
 
-    let err = run(&cli).expect_err("run should reject loop_file outside dedicated command");
+    let err = run(&cli).expect_err("run should require --file when loop_file flow is selected");
     let rendered = err.to_string();
     assert!(
-        rendered.contains("CLI-only"),
-        "error should direct users to chief loop_file command: {rendered}"
+        rendered.contains("requires --file"),
+        "error should direct users to provide --file: {rendered}"
     );
 }
 
@@ -235,6 +237,13 @@ fn parse_check_with_force_flag() {
 }
 
 #[test]
+fn parse_root_file_option() {
+    let cli = Cli::try_parse_from(["chief", "--file", "plan.md"])
+        .expect("root --file option should parse");
+    assert_eq!(cli.file, Some(PathBuf::from("plan.md")));
+}
+
+#[test]
 fn parse_loop_file_command() {
     let cli = Cli::try_parse_from(["chief", "loop_file", "--file", "plan.md"])
         .expect("loop_file command should parse");
@@ -256,6 +265,7 @@ fn loop_file_fails_when_input_file_is_missing() {
         flow: None,
         model: None,
         max_retries: None,
+        file: None,
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::LoopFile(LoopFileArgs {
@@ -286,6 +296,7 @@ fn init_writes_full_default_chief_yaml_block() {
         flow: None,
         model: None,
         max_retries: None,
+        file: None,
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
@@ -309,50 +320,32 @@ fn init_writes_full_default_chief_yaml_block() {
 }
 
 #[test]
-fn chief_yaml_sets_max_loop_iterations_detects_presence() {
-    let temp = TempDir::new("max-loop-detection");
-    let config_path = temp.path.join("chief.yaml");
-
-    fs::write(&config_path, "chief:\n  flow: single_prompt\n").expect("config should be written");
-    assert!(
-        !chief_yaml_sets_max_loop_iterations(&config_path).expect("detection should work"),
-        "missing max_loop_iterations should return false"
-    );
-
+fn run_rejects_file_option_for_non_loop_file_flows() {
+    let temp = TempDir::new("run-file-option-invalid-flow");
+    init_git_repo(&temp.path);
     fs::write(
-        &config_path,
-        "chief:\n  flow: single_prompt\n  max_loop_iterations: 11\n",
+        temp.path.join("chief.yaml"),
+        "chief:\n  flow: single_prompt\n",
     )
-    .expect("config should be written");
-    assert!(
-        chief_yaml_sets_max_loop_iterations(&config_path).expect("detection should work"),
-        "explicit max_loop_iterations should return true"
-    );
+    .expect("chief.yaml should be written");
+    fs::write(temp.path.join("todos.yaml"), "todos: []\n").expect("todos.yaml should be written");
 
-    fs::write(&config_path, "chief:\n  max_loop: 7\n").expect("config should be written");
-    assert!(
-        chief_yaml_sets_max_loop_iterations(&config_path).expect("detection should work"),
-        "legacy max_loop alias should return true"
-    );
-}
-
-#[test]
-fn effective_loop_file_max_iterations_uses_20_unless_explicitly_configured() {
-    let default_config = ChiefConfig::default();
-    assert_eq!(
-        effective_loop_file_max_iterations(&default_config, false),
-        20,
-        "loop_file should default to 20 iterations when max_loop is not explicitly configured"
-    );
-
-    let explicit_config = ChiefConfig {
-        max_loop_iterations: 9,
-        ..ChiefConfig::default()
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        flow: Some("single_prompt".to_owned()),
+        model: None,
+        max_retries: None,
+        file: Some(PathBuf::from("plan.md")),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: None,
     };
-    assert_eq!(
-        effective_loop_file_max_iterations(&explicit_config, true),
-        9,
-        "explicit max_loop_iterations value should take precedence for loop_file"
+
+    let err = run(&cli).expect_err("run should reject --file when flow is not loop_file");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("only supported"),
+        "error should explain that --file is flow-specific: {rendered}"
     );
 }
 
