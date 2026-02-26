@@ -9,6 +9,7 @@ mod suite_commands;
 mod tests;
 
 use anyhow::{Context, Result, bail};
+use chief::domain::{JobStatus, RunExitStatus, Todo, TodoStatus};
 use chief::flow::FlowKind;
 use chief::orchestrator::OrchestratorError;
 use chief::scheduler::Scheduler;
@@ -18,6 +19,8 @@ use clap::{Args, Parser, Subcommand};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
@@ -51,6 +54,9 @@ enum Commands {
     TailEvents(TailEventsArgs),
     /// Run suite-level commands from chief.yaml for a specific suite.
     Suite(SuiteArgs),
+    /// Execute one loop_file flow run from a markdown file (CLI-only).
+    #[command(name = "loop_file", alias = "loop-file")]
+    LoopFile(LoopFileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -120,6 +126,13 @@ struct SuiteRunNoTargetArgs {
     suite: String,
 }
 
+#[derive(Debug, Args)]
+struct LoopFileArgs {
+    /// Markdown file path to load as the loop_file task body.
+    #[arg(long)]
+    file: PathBuf,
+}
+
 fn main() {
     if let Err(err) = run_with_db_reset_prompt() {
         eprintln!("error: {err:#}");
@@ -159,6 +172,7 @@ fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
         Commands::Check(args) => run_check(cli, args),
         Commands::TailEvents(args) => run_tail_events(cli, args),
         Commands::Suite(args) => suite_commands::run_suite_command(cli, args),
+        Commands::LoopFile(args) => run_loop_file(cli, args),
     }
 }
 
@@ -188,6 +202,9 @@ fn run(cli: &Cli) -> Result<()> {
     let flow_kind: FlowKind = flow_input
         .parse()
         .with_context(|| format!("invalid flow '{flow_input}'"))?;
+    if matches!(flow_kind, FlowKind::LoopFile) {
+        bail!("flow 'loop_file' is CLI-only; use `chief loop_file --file <path>`");
+    }
 
     let requirements_text = load_requirements_text(&cli.requirements, &cli.requirements_file)?;
     if !requirements_text.trim().is_empty() {
@@ -382,6 +399,125 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
+    let mut context = ProjectContext::load(&cli.project_dir)?;
+    let file_path = if args.file.is_absolute() {
+        args.file.clone()
+    } else {
+        context.project_dir.join(&args.file)
+    };
+    let file_contents = fs::read_to_string(&file_path)
+        .with_context(|| format!("failed to read loop_file input {}", file_path.display()))?;
+
+    let max_loop_explicit = chief_yaml_sets_max_loop_iterations(&context.config_path)?;
+    context.chief_yaml.chief.max_loop_iterations =
+        effective_loop_file_max_iterations(&context.chief_yaml.chief, max_loop_explicit);
+    context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();
+
+    let synthetic_todo = Todo {
+        id: Todo::compute_id(
+            &format!("loop_file:{}", file_path.display()),
+            file_contents.as_str(),
+        ),
+        todo: format!("loop_file: {}", file_path.display()),
+        expectations: file_contents,
+        priority: 1,
+        test_suites: context
+            .chief_yaml
+            .suites
+            .iter()
+            .map(|suite| suite.name.clone())
+            .collect(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let engine = ChiefEngine::new(context.clone());
+    let run_id = engine.start_run()?;
+    let mut job = context.create_job(
+        &run_id,
+        1,
+        FlowKind::LoopFile,
+        Some(synthetic_todo.id.clone()),
+        None,
+    )?;
+    job = context.set_job_status(job, JobStatus::Running, None)?;
+
+    let result = engine.run_single_todo_with_retries(
+        &run_id,
+        &job.id,
+        1,
+        synthetic_todo,
+        FlowKind::LoopFile,
+        context.project_dir.clone(),
+        cli.model.clone(),
+        Arc::new(AtomicBool::new(false)),
+        1,
+        |_attempt, _total, _err| {},
+    );
+
+    match result {
+        Ok(outcome) => {
+            context.set_job_status(job, JobStatus::Completed, None)?;
+            engine.finish_run(&run_id, RunExitStatus::Success)?;
+            println!(
+                "completed loop_file {}{}",
+                outcome.todo_id,
+                outcome
+                    .commit_hash
+                    .as_deref()
+                    .map(|hash| format!(" @ {hash}"))
+                    .unwrap_or_default()
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let run_exit_status = if err.is_unrecoverable() {
+                RunExitStatus::UnrecoverableFailure
+            } else {
+                RunExitStatus::Failure
+            };
+            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
+            let _ = engine.finish_run(&run_id, run_exit_status);
+            Err(err.into_error()).context("loop_file execution failed")
+        }
+    }
+}
+
+fn chief_yaml_sets_max_loop_iterations(config_path: &Path) -> Result<bool> {
+    let yaml = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    if yaml.trim().is_empty() {
+        return Ok(false);
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml)
+        .with_context(|| format!("failed to parse YAML {}", config_path.display()))?;
+
+    let Some(chief) = value
+        .as_mapping()
+        .and_then(|root| root.get(serde_yaml::Value::String("chief".to_owned())))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(false);
+    };
+
+    Ok(chief.keys().any(|key| {
+        key.as_str()
+            .is_some_and(|field| field == "max_loop_iterations" || field == "max_loop")
+    }))
+}
+
+fn effective_loop_file_max_iterations(
+    chief_config: &chief::config::ChiefConfig,
+    max_loop_explicit: bool,
+) -> usize {
+    if max_loop_explicit {
+        chief_config.max_loop_iterations.max(1)
+    } else {
+        20
+    }
 }
 
 fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String> {

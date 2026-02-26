@@ -352,6 +352,53 @@
     }
 
     #[tokio::test]
+    async fn start_project_rejects_loop_file_flow_as_cli_only() {
+        let (_workspace, service, project, project_dir) = setup_service(
+            r#"todos:
+  - id: pending-1
+    todo: Example pending todo
+    expectations: Example expectations
+    priority: 1
+    test_suites: []
+    status: pending"#,
+        );
+        write_chief_yaml(
+            &project_dir,
+            r#"chief:
+  flow: single_prompt"#,
+        );
+
+        let err = service
+            .start_project(
+                project,
+                StartProjectRequest {
+                    agents: Some(1),
+                    flow: Some("loop_file".to_owned()),
+                    model: None,
+                    start_anyway: Some(true),
+                },
+            )
+            .await
+            .expect_err("start_project should reject loop_file flow");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        let message = payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.contains("CLI-only"),
+            "loop_file rejection should clearly direct to CLI: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn start_project_blocks_when_pre_run_checks_detect_broken_suite_command() {
         let workspace = TempDir::new("workspace");
         let project_name = format!("project-{}", Uuid::new_v4());

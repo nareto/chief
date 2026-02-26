@@ -1,11 +1,11 @@
 chief:
-  flow: single_prompt # set to tdd to use the legacy red/green/post-green workflow
+  flow: single_prompt # available: single_prompt, tdd (legacy), loop_file (CLI-only via `chief loop_file --file <path>`)
   agent: codex
   # model: gpt-5
   # model_reasoning_effort: high
   agent_extra_args: []
   max_retries: 2
-  max_loop_iterations: 6 # max inner phase-loop iterations per todo attempt before failing
+  max_loop_iterations: 6 # shared inner-loop cap used by all flows (single_prompt, tdd phases, loop_file)
   required_stable_iterations: 2 # convergence loops require this many consecutive stable iterations
   agent_timeout_seconds: 2700 # set to 0 for no timeout
   suite_command_timeout_seconds: 1800

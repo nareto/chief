@@ -30,6 +30,7 @@ fn parses_known_flow_kinds() {
         FlowKind::from_str("single_prompt").unwrap(),
         FlowKind::SinglePrompt
     );
+    assert_eq!(FlowKind::from_str("loop_file").unwrap(), FlowKind::LoopFile);
     assert_eq!(FlowKind::from_str(" TDD ").unwrap(), FlowKind::Tdd);
 }
 
@@ -47,9 +48,11 @@ fn rejects_unknown_flow_kind() {
 fn build_flow_matches_kind() {
     let tdd = build_flow(FlowKind::Tdd, 6, 2);
     let single_prompt = build_flow(FlowKind::SinglePrompt, 6, 2);
+    let loop_file = build_flow(FlowKind::LoopFile, 20, 2);
 
     assert_eq!(tdd.name(), "tdd");
     assert_eq!(single_prompt.name(), "single_prompt");
+    assert_eq!(loop_file.name(), "loop_file");
 }
 
 fn temp_project_dir() -> PathBuf {
@@ -2238,6 +2241,89 @@ fn lint_fix_command_still_fails_when_recheck_fails() {
     assert!(
         !all_ok,
         "lint should still fail when re-check fails after fix"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn run_test_and_lint_reloads_chief_yaml_suite_commands_between_iterations() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let marker_file = project_dir.join("reload-suite-command.log");
+    let first_command = format!("printf first >> {}", marker_file.display());
+    let second_command = format!("printf second >> {}", marker_file.display());
+
+    fs::write(
+        project_dir.join("chief.yaml"),
+        format!(
+            "chief:\n  suite_command_timeout_seconds: 1800\nsuites:\n  - name: backend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{first_command}\"\n"
+        ),
+    )
+    .expect("initial chief.yaml should be written");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "reload suite command".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: vec!["backend".to_owned()],
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = NoopPromptStore;
+    let agent = NoopAgent;
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+    let initial_suite = suite_named_with_test_command("backend", "printf stale >> does-not-matter");
+
+    let execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let first_ok = super::run_test_and_lint(
+        &execution,
+        std::slice::from_ref(&initial_suite),
+        Phase::SinglePrompt,
+    )
+    .expect("first lint+test run should complete");
+    assert!(first_ok, "first lint+test run should pass");
+
+    fs::write(
+        project_dir.join("chief.yaml"),
+        format!(
+            "chief:\n  suite_command_timeout_seconds: 1800\nsuites:\n  - name: backend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{second_command}\"\n"
+        ),
+    )
+    .expect("updated chief.yaml should be written");
+
+    let second_ok = super::run_test_and_lint(&execution, &[initial_suite], Phase::SinglePrompt)
+        .expect("second lint+test run should complete");
+    assert!(second_ok, "second lint+test run should pass");
+
+    let marker_contents =
+        fs::read_to_string(&marker_file).expect("suite command marker should exist");
+    assert_eq!(
+        marker_contents, "firstsecond",
+        "suite commands should be reloaded from chief.yaml between check iterations"
     );
 
     let _ = fs::remove_dir_all(&project_dir);

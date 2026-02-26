@@ -19,11 +19,25 @@ impl<'a> FlowExecution<'a> {
     }
 
     pub fn run_test_suite(&self, suite: &TestSuiteConfig, phase: Phase) -> Result<AgentOutput> {
-        self.ensure_suite_prepared(suite, phase)?;
+        self.run_test_suite_with_global_timeout(
+            suite,
+            phase,
+            self.chief_config.suite_command_timeout_seconds,
+        )
+    }
+
+    pub(in crate::flow) fn run_test_suite_with_global_timeout(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+        global_timeout_seconds: u64,
+    ) -> Result<AgentOutput> {
+        self.ensure_suite_prepared_with_global_timeout(suite, phase, global_timeout_seconds)?;
         let cmd = suite_command_for_kind(suite, SuiteCommandKind::Test, None)
             .unwrap_or_else(|| suite.test_command.clone());
         let cwd = suite_command_cwd(&self.project_dir, suite);
-        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        let timeout_seconds =
+            self.suite_command_timeout_seconds_with_global(suite, global_timeout_seconds);
         self.log_suite_command_started(
             phase,
             suite,
@@ -92,7 +106,25 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<Option<AgentOutput>> {
-        self.run_optional_suite_command(suite, phase, SuiteCommandKind::Lint)
+        self.run_lint_suite_with_global_timeout(
+            suite,
+            phase,
+            self.chief_config.suite_command_timeout_seconds,
+        )
+    }
+
+    pub(in crate::flow) fn run_lint_suite_with_global_timeout(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+        global_timeout_seconds: u64,
+    ) -> Result<Option<AgentOutput>> {
+        self.run_optional_suite_command_with_global_timeout(
+            suite,
+            phase,
+            SuiteCommandKind::Lint,
+            global_timeout_seconds,
+        )
     }
 
     pub fn run_post_green_suite(
@@ -100,30 +132,41 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<Option<AgentOutput>> {
-        self.run_optional_suite_command(suite, phase, SuiteCommandKind::PostGreen)
+        self.run_optional_suite_command_with_global_timeout(
+            suite,
+            phase,
+            SuiteCommandKind::PostGreen,
+            self.chief_config.suite_command_timeout_seconds,
+        )
     }
 
-    fn run_optional_suite_command(
+    fn run_optional_suite_command_with_global_timeout(
         &self,
         suite: &TestSuiteConfig,
         phase: Phase,
         kind: SuiteCommandKind,
+        global_timeout_seconds: u64,
     ) -> Result<Option<AgentOutput>> {
-        self.ensure_suite_prepared(suite, phase)?;
+        self.ensure_suite_prepared_with_global_timeout(suite, phase, global_timeout_seconds)?;
         let Some(command) = suite_command_for_kind(suite, kind, None) else {
             return Ok(None);
         };
         let cwd = suite_command_cwd(&self.project_dir, suite);
-        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        let timeout_seconds =
+            self.suite_command_timeout_seconds_with_global(suite, global_timeout_seconds);
         self.log_suite_command_started(phase, suite, kind, &command, &cwd, timeout_seconds)?;
         let out = self.run_suite_command(&command, &cwd, &suite.env, timeout_seconds)?;
         Ok(Some(out))
     }
 
-    pub(in crate::flow) fn suite_command_timeout_seconds(&self, suite: &TestSuiteConfig) -> u64 {
+    pub(in crate::flow) fn suite_command_timeout_seconds_with_global(
+        &self,
+        suite: &TestSuiteConfig,
+        global_timeout_seconds: u64,
+    ) -> u64 {
         suite
             .command_timeout_seconds
-            .unwrap_or(self.chief_config.suite_command_timeout_seconds)
+            .unwrap_or(global_timeout_seconds)
             .max(1)
     }
 
@@ -132,12 +175,37 @@ impl<'a> FlowExecution<'a> {
         suite: &TestSuiteConfig,
         phase: Phase,
     ) -> Result<()> {
+        self.ensure_suite_prepared_with_global_timeout(
+            suite,
+            phase,
+            self.chief_config.suite_command_timeout_seconds,
+        )
+    }
+
+    pub(in crate::flow) fn ensure_suite_prepared_with_global_timeout(
+        &self,
+        suite: &TestSuiteConfig,
+        phase: Phase,
+        global_timeout_seconds: u64,
+    ) -> Result<()> {
         if self.prepared_suites.borrow().contains(&suite.name) {
             return Ok(());
         }
 
-        self.run_suite_prepare_command(suite, phase, "test_init", suite.test_init.as_deref())?;
-        self.run_suite_prepare_command(suite, phase, "test_setup", suite.test_setup.as_deref())?;
+        self.run_suite_prepare_command(
+            suite,
+            phase,
+            "test_init",
+            suite.test_init.as_deref(),
+            global_timeout_seconds,
+        )?;
+        self.run_suite_prepare_command(
+            suite,
+            phase,
+            "test_setup",
+            suite.test_setup.as_deref(),
+            global_timeout_seconds,
+        )?;
         self.prepared_suites.borrow_mut().insert(suite.name.clone());
         Ok(())
     }
@@ -148,12 +216,14 @@ impl<'a> FlowExecution<'a> {
         phase: Phase,
         kind: &str,
         command: Option<&str>,
+        global_timeout_seconds: u64,
     ) -> Result<()> {
         let Some(command) = command.map(str::trim).filter(|value| !value.is_empty()) else {
             return Ok(());
         };
         let cwd = suite_command_cwd(&self.project_dir, suite);
-        let timeout_seconds = self.suite_command_timeout_seconds(suite);
+        let timeout_seconds =
+            self.suite_command_timeout_seconds_with_global(suite, global_timeout_seconds);
         self.log_event(
             "info",
             Some(phase),

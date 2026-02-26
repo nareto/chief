@@ -31,6 +31,17 @@ pub struct ChiefEngine {
 }
 
 impl ChiefEngine {
+    pub(crate) fn effective_max_retries_for_flow(
+        flow_kind: FlowKind,
+        requested_max_retries: usize,
+    ) -> usize {
+        if matches!(flow_kind, FlowKind::LoopFile) {
+            1
+        } else {
+            requested_max_retries.max(1)
+        }
+    }
+
     pub fn new(project: ProjectContext) -> Self {
         Self { project }
     }
@@ -130,6 +141,7 @@ impl ChiefEngine {
     where
         F: FnMut(usize, usize, &anyhow::Error),
     {
+        let max_retries = Self::effective_max_retries_for_flow(flow_kind, max_retries);
         let todo_id = todo.id.clone();
         retry_with_policy_and_hook_and_delay(
             max_retries,

@@ -1,6 +1,6 @@
 use super::{
-    is_transient_lock_contention_error, retry_transient_lock_contention_with_delay, ChiefEngine,
-    ProjectContext, ProjectRegistry,
+    ChiefEngine, ProjectContext, ProjectRegistry, is_transient_lock_contention_error,
+    retry_transient_lock_contention_with_delay,
 };
 use crate::domain::{RunExitStatus, Todo, TodoStatus};
 use crate::flow::{FlowKind, TodoOutcome};
@@ -240,10 +240,50 @@ fn run_todos_until_done_with_retries_stops_after_first_terminal_todo_failure() {
 }
 
 #[test]
+fn loop_file_flow_forces_single_outer_retry_attempt() {
+    let root = TempDir::new("loop-file-max-retries");
+    let project_dir = root.path.join("project");
+    init_git_repo(&project_dir);
+    fs::write(project_dir.join("chief.yaml"), "chief: {}\n")
+        .expect("failed to write chief.yaml fixture");
+
+    let context = ProjectContext::load(&project_dir).expect("failed to load project context");
+    let engine = ChiefEngine::new(context);
+    let mut observed_max_retries = Vec::new();
+
+    let result = engine.run_todos_until_done_with_retries_with_runner(
+        FlowKind::LoopFile,
+        None,
+        9,
+        |_outcome: &TodoOutcome| {},
+        |_attempt, _total, _err| {},
+        |_run_id, flow_kind, _model_override, max_retries, _retry_hook| {
+            observed_max_retries.push((flow_kind, max_retries));
+            Ok(None)
+        },
+    );
+
+    assert!(
+        result.is_ok(),
+        "loop_file queue run should complete cleanly"
+    );
+    assert_eq!(
+        observed_max_retries.len(),
+        1,
+        "runner should be called once"
+    );
+    assert_eq!(
+        observed_max_retries[0],
+        (FlowKind::LoopFile, 1),
+        "loop_file flow must force max_retries to 1 regardless of caller value"
+    );
+}
+
+#[test]
 fn transient_lock_contention_signature_is_detected() {
     let err = anyhow!(
-            "git commit failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
-        );
+        "git commit failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository"
+    );
     assert!(is_transient_lock_contention_error(&err));
 }
 

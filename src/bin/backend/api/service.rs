@@ -144,6 +144,11 @@ impl ApiService {
             .unwrap_or(configured_flow)
             .parse::<FlowKind>()
             .map_err(|err| ApiError::unprocessable(err.to_string()))?;
+        if matches!(flow_kind, FlowKind::LoopFile) {
+            return Err(ApiError::unprocessable(
+                "flow 'loop_file' is CLI-only; use `chief loop_file --file <path>`",
+            ));
+        }
 
         let start_anyway = payload.start_anyway.unwrap_or(false);
         if !start_anyway {

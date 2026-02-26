@@ -1,6 +1,40 @@
 use super::*;
 
 impl<'a> FlowExecution<'a> {
+    pub(in crate::flow) fn reload_suite_check_context(
+        &self,
+        requested_suites: &[TestSuiteConfig],
+    ) -> Result<(ChiefConfig, Vec<TestSuiteConfig>)> {
+        let config_path = self.project_dir.join("chief.yaml");
+        let reloaded = ChiefYaml::load_or_default(&config_path).with_context(|| {
+            format!(
+                "failed to reload chief config from active worktree {}",
+                config_path.display()
+            )
+        })?;
+
+        if requested_suites.is_empty() {
+            return Ok((reloaded.chief, Vec::new()));
+        }
+
+        let mut reloaded_by_name = reloaded
+            .suites
+            .into_iter()
+            .map(|suite| (suite.name.clone(), suite))
+            .collect::<BTreeMap<_, _>>();
+
+        let suites = requested_suites
+            .iter()
+            .map(|suite| {
+                reloaded_by_name
+                    .remove(&suite.name)
+                    .unwrap_or_else(|| suite.clone())
+            })
+            .collect::<Vec<_>>();
+
+        Ok((reloaded.chief, suites))
+    }
+
     pub fn selected_suites(&self) -> Vec<TestSuiteConfig> {
         if self.todo.test_suites.is_empty() {
             return Vec::new();

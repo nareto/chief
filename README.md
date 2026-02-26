@@ -78,6 +78,7 @@ Included flows:
 
 - `single_prompt` (default): convergence loop with per-iteration checks over the todo's configured suites.
 - `tdd`: legacy RED -> GREEN -> POST_GREEN flow.
+- `loop_file` (CLI-only): convergence loop driven by a markdown file loaded via `chief loop_file --file ...`.
 
 Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
 
@@ -117,6 +118,19 @@ Run one project directly:
 ```bash
 cargo run --bin chief -- --project-dir /path/to/project
 ```
+
+Run one `loop_file` execution directly from a markdown plan/task file (no todo queueing):
+
+```bash
+cargo run --bin chief -- --project-dir /path/to/project loop_file --file plan.md
+```
+
+Notes for `loop_file`:
+
+- It always runs as a single todo execution (no outer todo queue).
+- Outer retries are effectively disabled (`max_retries = 1` for this flow).
+- Default inner loop iterations are `20` when `chief.max_loop_iterations` is not explicitly set in `chief.yaml`.
+- If `chief.max_loop_iterations` is explicitly set, that value takes precedence.
 
 From inside a target project directory (with `chief` on `PATH`), initialize symlinked example files and minimal local configs:
 
@@ -297,11 +311,11 @@ Services:
 
 ```yaml
 chief:
-  flow: single_prompt
+  flow: single_prompt # available: single_prompt, tdd, loop_file (CLI-only)
   agent: codex
   model: gpt-5
   max_retries: 10
-  max_loop_iterations: 6
+  max_loop_iterations: 6 # shared by all flows
   required_stable_iterations: 2
   agent_timeout_seconds: 2700
   suite_command_timeout_seconds: 1800
