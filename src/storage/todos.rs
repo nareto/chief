@@ -1,9 +1,9 @@
 use super::parsing::parse_todo_row;
 use super::*;
 use crate::domain::{Todo, TodoFile, TodoStatus};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
 
 impl ProjectStore {

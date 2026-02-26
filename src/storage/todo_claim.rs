@@ -3,7 +3,7 @@ use super::*;
 use crate::domain::{Todo, TodoStatus};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 impl ProjectStore {
     pub fn claim_next_pending_todo(&self) -> Result<Option<Todo>> {

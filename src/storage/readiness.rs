@@ -1,8 +1,8 @@
 use super::parsing::parse_readiness_row;
 use super::*;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 impl ProjectStore {

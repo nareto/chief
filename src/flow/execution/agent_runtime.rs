@@ -1,4 +1,16 @@
 use super::*;
+use std::io::{self, Write};
+
+fn mirror_agent_chunk_to_stdout(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+
+    let mut stdout = io::stdout().lock();
+    if stdout.write_all(text.as_bytes()).is_ok() {
+        let _ = stdout.flush();
+    }
+}
 
 impl<'a> FlowExecution<'a> {
     pub fn run_agent(
@@ -57,6 +69,7 @@ impl<'a> FlowExecution<'a> {
             cancel_signal: Some(self.cancel_signal.clone()),
             on_chunk: Some(Arc::new(move |stream, text| {
                 agent_stream::push_chunk(&stream_project, &stream_query_id, stream, text);
+                mirror_agent_chunk_to_stdout(text);
             })),
         }) {
             Ok(out) => out,
