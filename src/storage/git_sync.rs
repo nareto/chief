@@ -1,9 +1,9 @@
 use super::*;
 use crate::git::{
-    git_output_has_transient_lock_contention_signature, run_git_command_with_retry,
-    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS,
+    GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, git_output_has_transient_lock_contention_signature,
+    run_git_command_with_retry,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
 impl ProjectStore {

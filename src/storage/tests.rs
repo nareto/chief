@@ -2,7 +2,7 @@ use super::{ProjectStore, ReadinessStatus};
 use crate::domain::{EventRecord, EventType, Todo, TodoStatus};
 use crate::git::GIT_TRANSIENT_LOCK_RETRY_DELAY;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
