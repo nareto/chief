@@ -6,6 +6,19 @@ use std::path::Path;
 
 pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] =
     ["chief.db", "chief.example.yaml", "todos.example.yaml"];
+pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
+  flow: single_prompt
+  agent: codex
+  agent_extra_args: []
+  max_retries: 2
+  max_loop_iterations: 6
+  required_stable_iterations: 2
+  agent_timeout_seconds: 2700
+  suite_command_timeout_seconds: 1800
+  agent_log_max_output_lines: 10
+  agent_log_max_output_chars: 1500
+  use_agent_log_truncation_for_stdout_logs: false
+"#;
 
 pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
     let project_dir = &cli.project_dir;
@@ -58,7 +71,7 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
         skipped += 1;
     }
 
-    if write_file_if_missing(&chief_yaml_path, "chief: {}\n")? {
+    if write_file_if_missing(&chief_yaml_path, INIT_CHIEF_YAML_CONTENT)? {
         created += 1;
     } else {
         skipped += 1;

@@ -1,6 +1,6 @@
 use crate::agent::{AgentCancelledError, AgentRequest, CodingAgent};
 use crate::agent_stream;
-use crate::config::{ChiefConfig, TestSuiteConfig};
+use crate::config::{ChiefConfig, ChiefYaml, TestSuiteConfig};
 use crate::domain::{
     AgentOutput, EventRecord, EventType, LoopDecision, Phase, Todo, payload_from_json,
 };
@@ -27,6 +27,7 @@ pub enum FlowKind {
     #[default]
     Tdd,
     SinglePrompt,
+    LoopFile,
 }
 
 impl FlowKind {
@@ -34,6 +35,7 @@ impl FlowKind {
         match self {
             Self::Tdd => "tdd",
             Self::SinglePrompt => "single_prompt",
+            Self::LoopFile => "loop_file",
         }
     }
 
@@ -64,7 +66,7 @@ impl fmt::Display for FlowParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown flow '{}'; expected one of: tdd, single_prompt",
+            "unknown flow '{}'; expected one of: tdd, single_prompt, loop_file",
             self.input
         )
     }
@@ -79,6 +81,7 @@ impl FromStr for FlowKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "tdd" => Ok(Self::Tdd),
             "single_prompt" => Ok(Self::SinglePrompt),
+            "loop_file" => Ok(Self::LoopFile),
             other => Err(FlowParseError {
                 input: other.to_owned(),
             }),
@@ -220,7 +223,7 @@ pub use command_exec::{
 };
 pub use execution::FlowExecution;
 pub use loop_policy::{ConvergenceLoopPolicy, LoopPolicy, PhaseStrategy, UntilPassLoopPolicy};
-pub use strategies::{SinglePromptFlow, TddFlow, TodoFlow, build_flow};
+pub use strategies::{LoopFileFlow, SinglePromptFlow, TddFlow, TodoFlow, build_flow};
 
 pub(crate) use suite_checks::{run_lint_checks, run_test_and_lint};
 

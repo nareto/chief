@@ -1,14 +1,33 @@
 use super::*;
 
-pub(crate) fn run_lint_checks(
+struct ReloadedSuiteCheckContext {
+    chief_config: ChiefConfig,
+    suites: Vec<TestSuiteConfig>,
+}
+
+fn reloaded_suite_check_context(
+    execution: &FlowExecution<'_>,
+    suites: &[TestSuiteConfig],
+) -> Result<ReloadedSuiteCheckContext> {
+    let (chief_config, suites) = execution.reload_suite_check_context(suites)?;
+    Ok(ReloadedSuiteCheckContext {
+        chief_config,
+        suites,
+    })
+}
+
+fn run_lint_checks_with_context(
     execution: &FlowExecution<'_>,
     suites: &[TestSuiteConfig],
     phase: Phase,
+    global_timeout_seconds: u64,
 ) -> Result<bool> {
     let mut all_ok = true;
 
     for suite in suites {
-        let Some(out) = execution.run_lint_suite(suite, phase)? else {
+        let Some(out) =
+            execution.run_lint_suite_with_global_timeout(suite, phase, global_timeout_seconds)?
+        else {
             continue;
         };
 
@@ -40,7 +59,8 @@ pub(crate) fn run_lint_checks(
         if out.exit_code != 0 {
             if let Some(fix_cmd) = &suite.lint_fix_command {
                 let cwd = suite_command_cwd(&execution.project_dir, suite);
-                let timeout_seconds = execution.suite_command_timeout_seconds(suite);
+                let timeout_seconds = execution
+                    .suite_command_timeout_seconds_with_global(suite, global_timeout_seconds);
                 let fix_out =
                     execution.run_suite_command(fix_cmd, &cwd, &suite.env, timeout_seconds)?;
 
@@ -71,7 +91,11 @@ pub(crate) fn run_lint_checks(
 
                 if fix_out.exit_code == 0 {
                     // Re-run lint after successful fix.
-                    if let Some(recheck) = execution.run_lint_suite(suite, phase)? {
+                    if let Some(recheck) = execution.run_lint_suite_with_global_timeout(
+                        suite,
+                        phase,
+                        global_timeout_seconds,
+                    )? {
                         execution.log_event(
                             if recheck.exit_code == 0 {
                                 "info"
@@ -111,16 +135,34 @@ pub(crate) fn run_lint_checks(
     Ok(all_ok)
 }
 
+pub(crate) fn run_lint_checks(
+    execution: &FlowExecution<'_>,
+    suites: &[TestSuiteConfig],
+    phase: Phase,
+) -> Result<bool> {
+    let context = reloaded_suite_check_context(execution, suites)?;
+    run_lint_checks_with_context(
+        execution,
+        &context.suites,
+        phase,
+        context.chief_config.suite_command_timeout_seconds,
+    )
+}
+
 pub(crate) fn run_test_and_lint(
     execution: &FlowExecution<'_>,
     suites: &[TestSuiteConfig],
     phase: Phase,
 ) -> Result<bool> {
-    let lint_ok = run_lint_checks(execution, suites, phase)?;
+    let context = reloaded_suite_check_context(execution, suites)?;
+    let global_timeout_seconds = context.chief_config.suite_command_timeout_seconds;
+    let lint_ok =
+        run_lint_checks_with_context(execution, &context.suites, phase, global_timeout_seconds)?;
 
     let mut tests_ok = true;
-    for suite in suites {
-        let out = execution.run_test_suite(suite, phase)?;
+    for suite in &context.suites {
+        let out =
+            execution.run_test_suite_with_global_timeout(suite, phase, global_timeout_seconds)?;
         execution.log_event(
             if out.exit_code == 0 {
                 "info"

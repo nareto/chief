@@ -311,12 +311,13 @@ impl ChiefEngine {
             &mut FR,
         ) -> OrchestratorResult<Option<TodoOutcome>>,
     {
+        let effective_max_retries = Self::effective_max_retries_for_flow(flow_kind, max_retries);
         loop {
             let next = run_next_todo(
                 run_id,
                 flow_kind,
                 model_override.clone(),
-                max_retries.max(1),
+                effective_max_retries,
                 on_retry,
             )?;
 
