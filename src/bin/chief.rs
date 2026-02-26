@@ -34,6 +34,9 @@ struct Cli {
     model: Option<String>,
     #[arg(long)]
     max_retries: Option<usize>,
+    /// Markdown file used when running flow=loop_file via the default `chief` command.
+    #[arg(long)]
+    file: Option<PathBuf>,
     #[arg(long = "requirements")]
     requirements: Vec<String>,
     #[arg(long = "requirements-file")]
@@ -54,7 +57,7 @@ enum Commands {
     TailEvents(TailEventsArgs),
     /// Run suite-level commands from chief.yaml for a specific suite.
     Suite(SuiteArgs),
-    /// Execute one loop_file flow run from a markdown file (CLI-only).
+    /// Execute one loop_file flow run from a markdown file.
     #[command(name = "loop_file", alias = "loop-file")]
     LoopFile(LoopFileArgs),
 }
@@ -202,9 +205,6 @@ fn run(cli: &Cli) -> Result<()> {
     let flow_kind: FlowKind = flow_input
         .parse()
         .with_context(|| format!("invalid flow '{flow_input}'"))?;
-    if matches!(flow_kind, FlowKind::LoopFile) {
-        bail!("flow 'loop_file' is CLI-only; use `chief loop_file --file <path>`");
-    }
 
     let requirements_text = load_requirements_text(&cli.requirements, &cli.requirements_file)?;
     if !requirements_text.trim().is_empty() {
@@ -221,6 +221,18 @@ fn run(cli: &Cli) -> Result<()> {
             println!("{diff}");
         }
         return Ok(());
+    }
+
+    if matches!(flow_kind, FlowKind::LoopFile) {
+        let file = cli.file.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "flow 'loop_file' requires --file <path> (or use `chief loop_file --file <path>`)"
+            )
+        })?;
+        return run_loop_file(cli, &LoopFileArgs { file });
+    }
+    if cli.file.is_some() {
+        bail!("--file is only supported when flow resolves to 'loop_file'");
     }
 
     let engine = ChiefEngine::new(context.clone());
@@ -411,9 +423,6 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     let file_contents = fs::read_to_string(&file_path)
         .with_context(|| format!("failed to read loop_file input {}", file_path.display()))?;
 
-    let max_loop_explicit = chief_yaml_sets_max_loop_iterations(&context.config_path)?;
-    context.chief_yaml.chief.max_loop_iterations =
-        effective_loop_file_max_iterations(&context.chief_yaml.chief, max_loop_explicit);
     context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();
 
     let synthetic_todo = Todo {
@@ -483,40 +492,6 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
             let _ = engine.finish_run(&run_id, run_exit_status);
             Err(err.into_error()).context("loop_file execution failed")
         }
-    }
-}
-
-fn chief_yaml_sets_max_loop_iterations(config_path: &Path) -> Result<bool> {
-    let yaml = fs::read_to_string(config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    if yaml.trim().is_empty() {
-        return Ok(false);
-    }
-    let value: serde_yaml::Value = serde_yaml::from_str(&yaml)
-        .with_context(|| format!("failed to parse YAML {}", config_path.display()))?;
-
-    let Some(chief) = value
-        .as_mapping()
-        .and_then(|root| root.get(serde_yaml::Value::String("chief".to_owned())))
-        .and_then(serde_yaml::Value::as_mapping)
-    else {
-        return Ok(false);
-    };
-
-    Ok(chief.keys().any(|key| {
-        key.as_str()
-            .is_some_and(|field| field == "max_loop_iterations" || field == "max_loop")
-    }))
-}
-
-fn effective_loop_file_max_iterations(
-    chief_config: &chief::config::ChiefConfig,
-    max_loop_explicit: bool,
-) -> usize {
-    if max_loop_explicit {
-        chief_config.max_loop_iterations.max(1)
-    } else {
-        20
     }
 }
 

@@ -175,7 +175,7 @@ fn default_max_retries() -> usize {
 }
 
 fn default_max_loop_iterations() -> usize {
-    6
+    20
 }
 
 fn default_required_stable_iterations() -> usize {
@@ -231,7 +231,7 @@ mod tests {
     fn parse_max_loop_iterations_default() {
         let yaml = "chief: {}\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(parsed.chief.max_loop_iterations, 6);
+        assert_eq!(parsed.chief.max_loop_iterations, 20);
     }
 
     #[test]

@@ -7,11 +7,12 @@ use std::path::Path;
 pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] =
     ["chief.db", "chief.example.yaml", "todos.example.yaml"];
 pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
-  flow: single_prompt
+  flow: loop_file
+  # flow: single_prompt # uncomment to run queued todos.yaml workflow instead
   agent: codex
   agent_extra_args: []
   max_retries: 2
-  max_loop_iterations: 6
+  max_loop_iterations: 20
   required_stable_iterations: 2
   agent_timeout_seconds: 2700
   suite_command_timeout_seconds: 1800
