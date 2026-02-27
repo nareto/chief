@@ -2,38 +2,49 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub(in crate::flow) struct LoopFilePhaseStrategy {
-    candidate_suites: Vec<TestSuiteConfig>,
     involved_suite_names: BTreeSet<String>,
     pub(in crate::flow) last_agent_run: Option<AgentRunWithGitChanges>,
     attempts: usize,
 }
 
 impl LoopFilePhaseStrategy {
-    pub(in crate::flow) fn new(candidate_suites: Vec<TestSuiteConfig>) -> Self {
+    pub(in crate::flow) fn new() -> Self {
         Self {
-            candidate_suites,
             involved_suite_names: BTreeSet::new(),
             last_agent_run: None,
             attempts: 0,
         }
     }
 
-    fn involved_suites(&self) -> Vec<TestSuiteConfig> {
+    fn reload_configured_suites(execution: &FlowExecution<'_>) -> Result<Vec<TestSuiteConfig>> {
+        let config_path = execution.project_dir.join("chief.yaml");
+        let reloaded = ChiefYaml::load_or_default(&config_path).with_context(|| {
+            format!(
+                "failed to reload chief config from active worktree {}",
+                config_path.display()
+            )
+        })?;
+        Ok(reloaded.suites)
+    }
+
+    fn involved_suites(&self, execution: &FlowExecution<'_>) -> Result<Vec<TestSuiteConfig>> {
         if self.involved_suite_names.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.candidate_suites
+
+        let suites = Self::reload_configured_suites(execution)?;
+        Ok(suites
             .iter()
             .filter(|suite| self.involved_suite_names.contains(&suite.name))
             .cloned()
-            .collect()
+            .collect())
     }
 
     pub(super) fn run_post_green_for_involved_suites(
         &self,
         execution: &FlowExecution<'_>,
     ) -> Result<()> {
-        let involved_suites = self.involved_suites();
+        let involved_suites = self.involved_suites(execution)?;
         if involved_suites.is_empty() {
             execution.log_event(
                 "info",
@@ -89,6 +100,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
         let failure_context = execution.latest_single_prompt_failure_context()?;
         let has_previous_attempts = self.attempts > 0
             || execution.has_previous_single_prompt_attempt_since_last_retry_reset()?;
+        let suites_for_prompt = Self::reload_configured_suites(execution)?;
 
         let prompt = execution.prompts.render_json(
             "singleprompt_loadfile.md",
@@ -96,7 +108,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 "work_item": execution.work_item(),
                 "todo": execution.work_item_prompt_payload(),
                 "file_contents": execution.work_item_details(),
-                "suites": self.candidate_suites,
+                "suites": suites_for_prompt,
                 "iteration": self.attempts + 1,
                 "run_id": execution.run_id,
                 "first_attempt": !has_previous_attempts,
@@ -132,28 +144,9 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 had_git_changes: true,
             });
 
-        let mut suites_for_checks = self.candidate_suites.clone();
-        if suites_for_checks.is_empty() {
-            let config_path = execution.project_dir.join("chief.yaml");
-            if let Ok(reloaded) = ChiefYaml::load_or_default(&config_path)
-                && !reloaded.suites.is_empty()
-            {
-                suites_for_checks = reloaded.suites;
-                for suite in &suites_for_checks {
-                    if self
-                        .candidate_suites
-                        .iter()
-                        .all(|item| item.name != suite.name)
-                    {
-                        self.candidate_suites.push(suite.clone());
-                    }
-                }
-            }
-        }
-
+        let suites_for_checks = Self::reload_configured_suites(execution)?;
         for suite in &suites_for_checks {
             self.involved_suite_names.insert(suite.name.clone());
-            execution.ensure_suite_prepared(suite, Phase::LoopFile)?;
         }
 
         if suites_for_checks.is_empty() {
@@ -161,10 +154,13 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 "info",
                 Some(Phase::LoopFile),
                 EventType::PhaseChange,
-                "loop_file: no associated suites; skipping lint+test commands",
+                "loop_file: no configured suites; skipping lint+test commands",
                 BTreeMap::new(),
             )?;
         } else {
+            for suite in &suites_for_checks {
+                execution.ensure_suite_prepared(suite, Phase::LoopFile)?;
+            }
             let all_pass = run_test_and_lint(execution, &suites_for_checks, Phase::LoopFile)?;
             if !all_pass {
                 return Ok(LoopDecision::Retry);
@@ -186,7 +182,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
         }
 
         if run.had_git_changes {
-            let has_associated_test_suites = !execution.work_item_test_suites().is_empty();
+            let has_associated_test_suites = !suites_for_checks.is_empty();
             execution.log_event(
                 "warning",
                 Some(Phase::LoopFile),

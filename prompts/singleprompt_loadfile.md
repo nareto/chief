@@ -66,13 +66,10 @@ SQLITE QUERY: `{{ failure.sqlite_query }}`
 {% endif %}
 {% if not failed_lint and not failed_test and not failed_other %}
 
----
-
-After some checks, we just learned that the work done in previous iterations passed all linting and tests. In this case, your task changes slightly: check that the files touched by previous iterations do indeed satisfy the task. 
 
 {% endif %}
 {% endif %}
 
 If you find the existing implementation and the tests to be both complete, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the task is properly done and we can move on. 
 
-However, if you find anything lacking, please do the appropriate modifications (both in implementation and tests) and we will continue to work on this todo.
+However, if you find anything lacking, please do the appropriate modifications (both in implementation and tests) and we will continue to work on this task.

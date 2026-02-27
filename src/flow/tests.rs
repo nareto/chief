@@ -1,10 +1,9 @@
 use super::strategies::SinglePromptPhaseStrategy;
 use super::{
-    AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy,
+    build_flow, AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy, TestSuiteConfig,
     SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
     SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
     SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES, SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY,
-    TestSuiteConfig, build_flow,
 };
 use crate::agent::{AgentRequest, CodingAgent};
 use crate::config::ChiefConfig;
@@ -12,7 +11,7 @@ use crate::domain::{AgentOutput, EventType, LoopDecision, Phase, Todo, TodoStatu
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2065,6 +2064,87 @@ fn single_prompt_uses_todo_suites_in_prompt_when_todo_sets_subset() {
         rendered[0],
         vec!["backend".to_owned()],
         "single_prompt prompt should include todo-configured suites only"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let marker_file = project_dir.join("loop-file-all-suites.log");
+    let backend_lint = format!("printf BL >> {}", marker_file.display());
+    let backend_test = format!("printf BT >> {}", marker_file.display());
+    let frontend_lint = format!("printf FL >> {}", marker_file.display());
+    let frontend_test = format!("printf FT >> {}", marker_file.display());
+
+    fs::write(
+        project_dir.join("chief.yaml"),
+        format!(
+            "chief:\n  suite_command_timeout_seconds: 1800\nsuites:\n  - name: backend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{backend_test}\"\n    lint_command: \"{backend_lint}\"\n  - name: frontend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{frontend_test}\"\n    lint_command: \"{frontend_lint}\"\n"
+        ),
+    )
+    .expect("chief.yaml should be written");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "loop_file should run all configured suites".to_owned(),
+        expectations: "task body".to_owned(),
+        priority: 1,
+        test_suites: vec!["backend".to_owned()],
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = RecordingPromptStore::default();
+    let agent = SuccessfulAgent;
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let flow = build_flow(FlowKind::LoopFile, 4, 1);
+    let outcome = flow
+        .run_todo(&mut execution)
+        .expect("loop_file flow should complete");
+    assert_eq!(outcome.todo_id, "todo-1");
+
+    let marker_contents =
+        fs::read_to_string(&marker_file).expect("suite command marker should exist");
+    assert_eq!(
+        marker_contents, "BLFLBTFT",
+        "loop_file should run lint and test commands for every configured suite"
+    );
+
+    let rendered = prompts.rendered_suite_names();
+    assert!(
+        !rendered.is_empty(),
+        "loop_file should render at least one prompt"
+    );
+    assert_eq!(
+        rendered[0],
+        vec!["backend".to_owned(), "frontend".to_owned()],
+        "loop_file prompt should include all configured suites"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
