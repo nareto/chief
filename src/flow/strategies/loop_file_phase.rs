@@ -149,6 +149,38 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             self.involved_suite_names.insert(suite.name.clone());
         }
 
+        let pending_files = execution
+            .git
+            .changed_files(&execution.project_dir)
+            .context("failed to inspect git working tree after loop_file iteration")?;
+        let salvaged_uncommitted_changes = if pending_files.is_empty() {
+            false
+        } else {
+            let commit_message = format!(
+                "chief(loop_file salvage): {} (iteration {})",
+                execution.work_item_title(),
+                self.attempts
+            );
+            let commit_hash = execution
+                .git
+                .commit_and_tag(&execution.project_dir, &commit_message)
+                .context("failed to salvage uncommitted loop_file iteration changes")?;
+
+            execution.log_event(
+                "warning",
+                Some(Phase::LoopFile),
+                EventType::GitOp,
+                "loop_file: harness committed uncommitted iteration changes",
+                payload_from_json(json!({
+                    "iteration": self.attempts,
+                    "pending_files": pending_files,
+                    "commit_hash": commit_hash,
+                    "commit_message": commit_message,
+                })),
+            )?;
+            true
+        };
+
         if suites_for_checks.is_empty() {
             execution.log_event(
                 "info",
@@ -181,15 +213,22 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             return Ok(LoopDecision::Retry);
         }
 
-        if run.had_git_changes {
+        if run.had_git_changes || salvaged_uncommitted_changes {
             let has_associated_test_suites = !suites_for_checks.is_empty();
+            let mut touched_files = run.touched_files.clone();
+            for file in &pending_files {
+                if !touched_files.contains(file) {
+                    touched_files.push(file.clone());
+                }
+            }
             execution.log_event(
                 "warning",
                 Some(Phase::LoopFile),
-                EventType::PhaseFailure,
+                EventType::PhaseChange,
                 SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
                 payload_from_json(json!({
-                    "touched_files": run.touched_files,
+                    "touched_files": touched_files,
+                    "harness_salvaged_uncommitted_changes": salvaged_uncommitted_changes,
                     (SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY): SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
                     (SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY): has_associated_test_suites,
                 })),

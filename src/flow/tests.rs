@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -138,6 +138,46 @@ impl CodingAgent for SuccessfulAgent {
     }
 }
 
+#[derive(Debug)]
+struct OneShotDirtyAgent {
+    dirty_file: PathBuf,
+    dirty_flag: Arc<AtomicBool>,
+    runs: Mutex<usize>,
+}
+
+impl OneShotDirtyAgent {
+    fn new(dirty_file: PathBuf, dirty_flag: Arc<AtomicBool>) -> Self {
+        Self {
+            dirty_file,
+            dirty_flag,
+            runs: Mutex::new(0),
+        }
+    }
+}
+
+impl CodingAgent for OneShotDirtyAgent {
+    fn name(&self) -> &str {
+        "one-shot-dirty"
+    }
+
+    fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
+        let mut runs = self.runs.lock().expect("runs mutex poisoned");
+        if *runs == 0 {
+            fs::write(&self.dirty_file, "dirty").expect("dirty file write should succeed");
+            self.dirty_flag.store(true, Ordering::SeqCst);
+        }
+        *runs += 1;
+
+        Ok(AgentOutput {
+            exit_code: 0,
+            command: "one-shot-dirty-agent".to_owned(),
+            stdout: String::new(),
+            stderr: String::new(),
+            merged_output: String::new(),
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 struct RecordingPromptStore {
     rendered_suite_names: Mutex<Vec<Vec<String>>>,
@@ -241,6 +281,109 @@ impl GitOps for NoopGitOps {
 
     fn commit_and_tag(&self, _cwd: &Path, _message: &str) -> Result<String> {
         Ok("noop-commit".to_owned())
+    }
+
+    fn commit_paths(&self, _cwd: &Path, _paths: &[&str], _message: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn create_worktree(&self, _branch: &str, _worktree_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn merge_branch_into_main(&self, _branch: &str, _main_branch: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_worktree(&self, _worktree_path: &Path, _branch: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn current_branch(&self) -> Result<String> {
+        Ok("main".to_owned())
+    }
+}
+
+#[derive(Debug)]
+struct DirtyTrackingGitOps {
+    root: PathBuf,
+    dirty_file: String,
+    dirty_flag: Arc<AtomicBool>,
+    commit_messages: Mutex<Vec<String>>,
+    head_hash: Mutex<String>,
+    commit_count: Mutex<usize>,
+}
+
+impl DirtyTrackingGitOps {
+    fn new(root: PathBuf, dirty_file: impl Into<String>, dirty_flag: Arc<AtomicBool>) -> Self {
+        Self {
+            root,
+            dirty_file: dirty_file.into(),
+            dirty_flag,
+            commit_messages: Mutex::new(Vec::new()),
+            head_hash: Mutex::new("mock-head-0".to_owned()),
+            commit_count: Mutex::new(0),
+        }
+    }
+
+    fn commit_messages(&self) -> Vec<String> {
+        self.commit_messages
+            .lock()
+            .expect("commit messages mutex poisoned")
+            .clone()
+    }
+}
+
+impl GitOps for DirtyTrackingGitOps {
+    fn repo_root(&self) -> &Path {
+        &self.root
+    }
+
+    fn changed_files(&self, _cwd: &Path) -> Result<Vec<String>> {
+        if self.dirty_flag.load(Ordering::SeqCst) {
+            Ok(vec![self.dirty_file.clone()])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn diff(&self, _cwd: &Path, _against_ref: Option<&str>) -> Result<String> {
+        Ok(String::new())
+    }
+
+    fn diff_summary_for_files(&self, _cwd: &Path, _files: &[String]) -> Result<String> {
+        Ok(String::new())
+    }
+
+    fn commit_committer_timestamp_rfc3339(
+        &self,
+        _cwd: &Path,
+        _commit_hash: &str,
+    ) -> Result<String> {
+        Ok("1970-01-01T00:00:00+00:00".to_owned())
+    }
+
+    fn commit_and_tag(&self, _cwd: &Path, message: &str) -> Result<String> {
+        self.commit_messages
+            .lock()
+            .expect("commit messages mutex poisoned")
+            .push(message.to_owned());
+
+        if self.dirty_flag.swap(false, Ordering::SeqCst) {
+            let mut commit_count = self
+                .commit_count
+                .lock()
+                .expect("commit count mutex poisoned");
+            *commit_count += 1;
+            let commit_hash = format!("mock-commit-{}", *commit_count);
+            *self.head_hash.lock().expect("head hash mutex poisoned") = commit_hash;
+        }
+
+        Ok(self
+            .head_hash
+            .lock()
+            .expect("head hash mutex poisoned")
+            .clone())
     }
 
     fn commit_paths(&self, _cwd: &Path, _paths: &[&str], _message: &str) -> Result<()> {
@@ -2145,6 +2288,76 @@ fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
         rendered[0],
         vec!["backend".to_owned(), "frontend".to_owned()],
         "loop_file prompt should include all configured suites"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn loop_file_salvages_uncommitted_changes_with_harness_commit() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo_title = "loop_file harness salvage commit".to_owned();
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: todo_title.clone(),
+        expectations: "task body".to_owned(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = RecordingPromptStore::default();
+    let dirty_flag = Arc::new(AtomicBool::new(false));
+    let agent = OneShotDirtyAgent::new(project_dir.join("dirty.txt"), dirty_flag.clone());
+    let git = DirtyTrackingGitOps::new(project_dir.clone(), "dirty.txt", dirty_flag.clone());
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let flow = build_flow(FlowKind::LoopFile, 4, 1);
+    let outcome = flow
+        .run_todo(&mut execution)
+        .expect("loop_file flow should salvage and complete");
+
+    assert_eq!(outcome.commit_hash.as_deref(), Some("mock-commit-1"));
+
+    let commit_messages = git.commit_messages();
+    assert_eq!(
+        commit_messages.len(),
+        2,
+        "flow should create one salvage commit attempt and one final harness commit attempt"
+    );
+    assert_eq!(
+        commit_messages[0],
+        format!("chief(loop_file salvage): {todo_title} (iteration 1)")
+    );
+    assert_eq!(
+        commit_messages[1],
+        format!("chief(loop_file): {todo_title}")
+    );
+
+    assert!(
+        !dirty_flag.load(Ordering::SeqCst),
+        "harness salvage commit should leave no pending changes"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
