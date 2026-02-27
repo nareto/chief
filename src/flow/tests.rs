@@ -1,9 +1,10 @@
 use super::strategies::SinglePromptPhaseStrategy;
 use super::{
-    build_flow, AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy, TestSuiteConfig,
+    AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy,
     SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
     SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
     SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES, SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY,
+    TestSuiteConfig, build_flow,
 };
 use crate::agent::{AgentRequest, CodingAgent};
 use crate::config::ChiefConfig;
@@ -11,7 +12,7 @@ use crate::domain::{AgentOutput, EventType, LoopDecision, Phase, Todo, TodoStatu
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -259,6 +260,10 @@ impl GitOps for NoopGitOps {
         &self.root
     }
 
+    fn head_commit(&self, _cwd: &Path) -> Result<String> {
+        Ok("mock-head-0".to_owned())
+    }
+
     fn changed_files(&self, _cwd: &Path) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
@@ -339,6 +344,14 @@ impl GitOps for DirtyTrackingGitOps {
         &self.root
     }
 
+    fn head_commit(&self, _cwd: &Path) -> Result<String> {
+        Ok(self
+            .head_hash
+            .lock()
+            .expect("head hash mutex poisoned")
+            .clone())
+    }
+
     fn changed_files(&self, _cwd: &Path) -> Result<Vec<String>> {
         if self.dirty_flag.load(Ordering::SeqCst) {
             Ok(vec![self.dirty_file.clone()])
@@ -384,6 +397,143 @@ impl GitOps for DirtyTrackingGitOps {
             .lock()
             .expect("head hash mutex poisoned")
             .clone())
+    }
+
+    fn commit_paths(&self, _cwd: &Path, _paths: &[&str], _message: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn create_worktree(&self, _branch: &str, _worktree_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn merge_branch_into_main(&self, _branch: &str, _main_branch: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_worktree(&self, _worktree_path: &Path, _branch: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn current_branch(&self) -> Result<String> {
+        Ok("main".to_owned())
+    }
+}
+
+#[derive(Debug)]
+struct OneShotHeadAdvanceAgent {
+    head_hash: Arc<Mutex<String>>,
+    runs: Mutex<usize>,
+}
+
+impl OneShotHeadAdvanceAgent {
+    fn new(head_hash: Arc<Mutex<String>>) -> Self {
+        Self {
+            head_hash,
+            runs: Mutex::new(0),
+        }
+    }
+
+    fn runs(&self) -> usize {
+        *self.runs.lock().expect("runs mutex poisoned")
+    }
+}
+
+impl CodingAgent for OneShotHeadAdvanceAgent {
+    fn name(&self) -> &str {
+        "one-shot-head-advance"
+    }
+
+    fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
+        let mut runs = self.runs.lock().expect("runs mutex poisoned");
+        if *runs == 0 {
+            *self.head_hash.lock().expect("head hash mutex poisoned") = "mock-head-1".to_owned();
+        }
+        *runs += 1;
+
+        Ok(AgentOutput {
+            exit_code: 0,
+            command: "one-shot-head-advance-agent".to_owned(),
+            stdout: String::new(),
+            stderr: String::new(),
+            merged_output: String::new(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct HeadTrackingGitOps {
+    root: PathBuf,
+    head_hash: Arc<Mutex<String>>,
+    commit_messages: Mutex<Vec<String>>,
+    commit_count: Mutex<usize>,
+}
+
+impl HeadTrackingGitOps {
+    fn new(root: PathBuf, head_hash: Arc<Mutex<String>>) -> Self {
+        Self {
+            root,
+            head_hash,
+            commit_messages: Mutex::new(Vec::new()),
+            commit_count: Mutex::new(0),
+        }
+    }
+
+    fn commit_messages(&self) -> Vec<String> {
+        self.commit_messages
+            .lock()
+            .expect("commit messages mutex poisoned")
+            .clone()
+    }
+}
+
+impl GitOps for HeadTrackingGitOps {
+    fn repo_root(&self) -> &Path {
+        &self.root
+    }
+
+    fn head_commit(&self, _cwd: &Path) -> Result<String> {
+        Ok(self
+            .head_hash
+            .lock()
+            .expect("head hash mutex poisoned")
+            .clone())
+    }
+
+    fn changed_files(&self, _cwd: &Path) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    fn diff(&self, _cwd: &Path, _against_ref: Option<&str>) -> Result<String> {
+        Ok(String::new())
+    }
+
+    fn diff_summary_for_files(&self, _cwd: &Path, _files: &[String]) -> Result<String> {
+        Ok(String::new())
+    }
+
+    fn commit_committer_timestamp_rfc3339(
+        &self,
+        _cwd: &Path,
+        _commit_hash: &str,
+    ) -> Result<String> {
+        Ok("1970-01-01T00:00:00+00:00".to_owned())
+    }
+
+    fn commit_and_tag(&self, _cwd: &Path, message: &str) -> Result<String> {
+        self.commit_messages
+            .lock()
+            .expect("commit messages mutex poisoned")
+            .push(message.to_owned());
+
+        let mut commit_count = self
+            .commit_count
+            .lock()
+            .expect("commit count mutex poisoned");
+        *commit_count += 1;
+        let commit_hash = format!("mock-final-commit-{}", *commit_count);
+        *self.head_hash.lock().expect("head hash mutex poisoned") = commit_hash.clone();
+        Ok(commit_hash)
     }
 
     fn commit_paths(&self, _cwd: &Path, _paths: &[&str], _message: &str) -> Result<()> {
@@ -1751,6 +1901,9 @@ fn single_prompt_changed_files_retry_without_associated_suites_is_not_failure_co
         output: AgentOutput::success("agent-step", ""),
         touched_files: vec!["src/flow.rs".to_owned()],
         had_git_changes: true,
+        head_commit_before: "mock-head-0".to_owned(),
+        head_commit_after: "mock-head-0".to_owned(),
+        head_commit_changed: false,
     });
 
     let decision = strategy
@@ -1845,6 +1998,9 @@ fn single_prompt_changed_files_retry_with_associated_suites_remains_failure_cont
         output: AgentOutput::success("agent-step", ""),
         touched_files: vec!["src/flow.rs".to_owned()],
         had_git_changes: true,
+        head_commit_before: "mock-head-0".to_owned(),
+        head_commit_after: "mock-head-0".to_owned(),
+        head_commit_changed: false,
     });
 
     let decision = strategy
@@ -2358,6 +2514,101 @@ fn loop_file_salvages_uncommitted_changes_with_harness_commit() {
     assert!(
         !dirty_flag.load(Ordering::SeqCst),
         "harness salvage commit should leave no pending changes"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn loop_file_agent_commit_with_clean_tree_does_not_count_as_stable() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo_title = "loop_file commit-only retry".to_owned();
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: todo_title.clone(),
+        expectations: "task body".to_owned(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = RecordingPromptStore::default();
+    let head_hash = Arc::new(Mutex::new("mock-head-0".to_owned()));
+    let agent = OneShotHeadAdvanceAgent::new(head_hash.clone());
+    let git = HeadTrackingGitOps::new(project_dir.clone(), head_hash);
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let flow = build_flow(FlowKind::LoopFile, 4, 1);
+    let outcome = flow
+        .run_todo(&mut execution)
+        .expect("loop_file flow should complete");
+
+    assert_eq!(outcome.todo_id, "todo-1");
+    assert_eq!(outcome.commit_hash.as_deref(), Some("mock-final-commit-1"));
+    assert_eq!(
+        agent.runs(),
+        2,
+        "first iteration should retry because HEAD changed, requiring a second iteration"
+    );
+
+    let commit_messages = git.commit_messages();
+    assert_eq!(
+        commit_messages,
+        vec![format!("chief(loop_file): {todo_title}")],
+        "harness should perform only the final commit when the tree is already clean"
+    );
+
+    let events = execution
+        .todo_events_since_last_retry_reset(200)
+        .expect("event query should succeed");
+    let retry_event = events
+        .iter()
+        .find(|event| {
+            event.phase == Some(Phase::LoopFile)
+                && event.msg == SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE
+        })
+        .expect("loop_file should log a convergence retry when the agent changes HEAD");
+    assert_eq!(
+        retry_event
+            .payload
+            .get("head_commit_changed")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        retry_event
+            .payload
+            .get("head_commit_before")
+            .and_then(Value::as_str),
+        Some("mock-head-0")
+    );
+    assert_eq!(
+        retry_event
+            .payload
+            .get("head_commit_after")
+            .and_then(Value::as_str),
+        Some("mock-head-1")
     );
 
     let _ = fs::remove_dir_all(&project_dir);

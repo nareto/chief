@@ -128,6 +128,9 @@ struct AgentRunWithGitChanges {
     output: AgentOutput,
     touched_files: Vec<String>,
     had_git_changes: bool,
+    head_commit_before: String,
+    head_commit_after: String,
+    head_commit_changed: bool,
 }
 
 #[derive(Debug, Clone, Default)]

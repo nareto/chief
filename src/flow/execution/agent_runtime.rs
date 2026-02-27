@@ -135,11 +135,14 @@ impl<'a> FlowExecution<'a> {
         prompt: String,
         disallowed_paths: Vec<String>,
     ) -> Result<AgentRunWithGitChanges> {
+        let head_commit_before = self.git.head_commit(&self.project_dir)?;
         let before = self.working_tree_snapshot()?;
         let output = self.run_agent(phase, prompt, disallowed_paths)?;
         let after = self.working_tree_snapshot()?;
+        let head_commit_after = self.git.head_commit(&self.project_dir)?;
         let touched_files = changed_paths_between_snapshots(&before, &after);
         let had_git_changes = !touched_files.is_empty();
+        let head_commit_changed = head_commit_before != head_commit_after;
 
         self.log_event(
             "info",
@@ -149,6 +152,9 @@ impl<'a> FlowExecution<'a> {
             payload_from_json(json!({
                 "touched_files": &touched_files,
                 "had_git_changes": had_git_changes,
+                "head_commit_before": &head_commit_before,
+                "head_commit_after": &head_commit_after,
+                "head_commit_changed": head_commit_changed,
             })),
         )?;
 
@@ -156,6 +162,9 @@ impl<'a> FlowExecution<'a> {
             output,
             touched_files,
             had_git_changes,
+            head_commit_before,
+            head_commit_after,
+            head_commit_changed,
         })
     }
 

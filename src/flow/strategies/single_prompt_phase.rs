@@ -129,6 +129,9 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
                 output: output.clone(),
                 touched_files: Vec::new(),
                 had_git_changes: true,
+                head_commit_before: String::new(),
+                head_commit_after: String::new(),
+                head_commit_changed: true,
             });
 
         let suites_for_checks = self.candidate_suites.clone();

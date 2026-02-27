@@ -62,6 +62,7 @@ where
 
 pub trait GitOps: Send + Sync {
     fn repo_root(&self) -> &Path;
+    fn head_commit(&self, cwd: &Path) -> Result<String>;
     fn changed_files(&self, cwd: &Path) -> Result<Vec<String>>;
     fn diff(&self, cwd: &Path, against_ref: Option<&str>) -> Result<String>;
     fn diff_summary_for_files(&self, cwd: &Path, files: &[String]) -> Result<String>;
@@ -125,6 +126,10 @@ impl ShellGitOps {
 impl GitOps for ShellGitOps {
     fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    fn head_commit(&self, cwd: &Path) -> Result<String> {
+        self.run_capture(cwd, &["rev-parse", "HEAD"])
     }
 
     fn changed_files(&self, cwd: &Path) -> Result<Vec<String>> {
