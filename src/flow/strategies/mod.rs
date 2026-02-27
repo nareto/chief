@@ -8,10 +8,18 @@ use loop_file_phase::LoopFilePhaseStrategy;
 use phase_strategies::{GreenPhaseStrategy, PostGreenPhaseStrategy, RedPhaseStrategy};
 pub(in crate::flow) use single_prompt_phase::SinglePromptPhaseStrategy;
 
-pub trait TodoFlow: Send + Sync {
+pub trait ExecutionFlow: Send + Sync {
     fn name(&self) -> &'static str;
-    fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome>;
+    fn run(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome>;
+
+    fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
+        self.run(execution)
+    }
 }
+
+pub trait TodoFlow: ExecutionFlow {}
+
+impl<T: ExecutionFlow + ?Sized> TodoFlow for T {}
 
 #[derive(Debug, Clone)]
 pub struct TddFlow {
@@ -44,12 +52,12 @@ impl TddFlow {
     }
 }
 
-impl TodoFlow for TddFlow {
+impl ExecutionFlow for TddFlow {
     fn name(&self) -> &'static str {
         "tdd"
     }
 
-    fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
+    fn run(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
         let suites = execution.selected_suites();
         for suite in &suites {
             execution.ensure_suite_prepared(suite, Phase::Red)?;
@@ -91,20 +99,20 @@ impl TodoFlow for TddFlow {
             .git
             .commit_and_tag(
                 &execution.project_dir,
-                &format!("chief: {}", execution.todo.todo),
+                &format!("chief: {}", execution.work_item_title()),
             )
-            .context("failed to commit completed todo")?;
+            .context("failed to commit completed work item")?;
 
         execution.log_event(
             "info",
             Some(Phase::Exit),
             EventType::GitOp,
-            format!("Committed todo {}", execution.todo.id),
+            format!("Committed work item {}", execution.work_item_id()),
             payload_from_json(json!({ "commit_hash": commit_hash })),
         )?;
 
         Ok(TodoOutcome {
-            todo_id: execution.todo.id.clone(),
+            todo_id: execution.work_item_id().to_owned(),
             commit_hash: Some(commit_hash),
         })
     }
@@ -131,12 +139,12 @@ impl SinglePromptFlow {
     }
 }
 
-impl TodoFlow for SinglePromptFlow {
+impl ExecutionFlow for SinglePromptFlow {
     fn name(&self) -> &'static str {
         "single_prompt"
     }
 
-    fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
+    fn run(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
         let candidate_suites = execution.selected_suites();
         for suite in &candidate_suites {
             execution.ensure_suite_prepared(suite, Phase::SinglePrompt)?;
@@ -158,20 +166,20 @@ impl TodoFlow for SinglePromptFlow {
             .git
             .commit_and_tag(
                 &execution.project_dir,
-                &format!("chief(single_prompt): {}", execution.todo.todo),
+                &format!("chief(single_prompt): {}", execution.work_item_title()),
             )
-            .context("failed to commit todo")?;
+            .context("failed to commit work item")?;
 
         execution.log_event(
             "info",
             Some(Phase::Exit),
             EventType::GitOp,
-            format!("Committed todo {}", execution.todo.id),
+            format!("Committed work item {}", execution.work_item_id()),
             payload_from_json(json!({ "commit_hash": commit_hash })),
         )?;
 
         Ok(TodoOutcome {
-            todo_id: execution.todo.id.clone(),
+            todo_id: execution.work_item_id().to_owned(),
             commit_hash: Some(commit_hash),
         })
     }
@@ -198,12 +206,12 @@ impl LoopFileFlow {
     }
 }
 
-impl TodoFlow for LoopFileFlow {
+impl ExecutionFlow for LoopFileFlow {
     fn name(&self) -> &'static str {
         "loop_file"
     }
 
-    fn run_todo(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
+    fn run(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
         let candidate_suites = execution.selected_suites();
         for suite in &candidate_suites {
             execution.ensure_suite_prepared(suite, Phase::LoopFile)?;
@@ -225,20 +233,20 @@ impl TodoFlow for LoopFileFlow {
             .git
             .commit_and_tag(
                 &execution.project_dir,
-                &format!("chief(loop_file): {}", execution.todo.todo),
+                &format!("chief(loop_file): {}", execution.work_item_title()),
             )
-            .context("failed to commit todo")?;
+            .context("failed to commit work item")?;
 
         execution.log_event(
             "info",
             Some(Phase::Exit),
             EventType::GitOp,
-            format!("Committed todo {}", execution.todo.id),
+            format!("Committed work item {}", execution.work_item_id()),
             payload_from_json(json!({ "commit_hash": commit_hash })),
         )?;
 
         Ok(TodoOutcome {
-            todo_id: execution.todo.id.clone(),
+            todo_id: execution.work_item_id().to_owned(),
             commit_hash: Some(commit_hash),
         })
     }
