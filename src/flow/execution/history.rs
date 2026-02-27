@@ -14,6 +14,10 @@ impl<'a> FlowExecution<'a> {
         mut payload: BTreeMap<String, Value>,
     ) -> Result<()> {
         payload.insert(
+            WORK_ITEM_CONTEXT_HASH_PAYLOAD_KEY.to_owned(),
+            Value::String(self.work_item_context_hash()),
+        );
+        payload.insert(
             TODO_CONTEXT_HASH_PAYLOAD_KEY.to_owned(),
             Value::String(self.todo_context_hash()),
         );
@@ -25,7 +29,7 @@ impl<'a> FlowExecution<'a> {
             id: None,
             run_id: self.run_id.clone(),
             job_id: Some(self.job_id.clone()),
-            todo_id: Some(self.todo.id.clone()),
+            todo_id: Some(self.work_item_id().to_owned()),
             timestamp: Utc::now(),
             level: level.to_owned(),
             phase,
@@ -59,7 +63,7 @@ impl<'a> FlowExecution<'a> {
 
         let mut filtered = events
             .into_iter()
-            .filter(|event| event.todo_id.as_deref() == Some(&self.todo.id))
+            .filter(|event| event.todo_id.as_deref() == Some(self.work_item_id()))
             .filter(|event| allowed.contains(event.event_type.as_str()))
             .filter(|event| {
                 Self::event_matches_current_context(event, todo_hash.as_str(), exec_hash.as_str())
@@ -116,10 +120,9 @@ impl<'a> FlowExecution<'a> {
         let mut test_failures = Vec::new();
         let mut other_failures = Vec::new();
         let max_output_lines = self.chief_config.agent_log_max_output_lines;
-        let todo_has_associated_test_suites = !self.todo.test_suites.is_empty();
+        let todo_has_associated_test_suites = !self.work_item_test_suites().is_empty();
         let configured_suite_names = self
-            .todo
-            .test_suites
+            .work_item_test_suites()
             .iter()
             .map(|suite| suite.trim())
             .filter(|suite| !suite.is_empty())
@@ -257,7 +260,7 @@ impl<'a> FlowExecution<'a> {
 
         let mut filtered = Vec::new();
         for event in events {
-            if event.todo_id.as_deref() != Some(&self.todo.id) {
+            if event.todo_id.as_deref() != Some(self.work_item_id()) {
                 continue;
             }
 

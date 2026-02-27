@@ -93,8 +93,9 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
         let prompt = execution.prompts.render_json(
             "singleprompt_loadfile.md",
             &json!({
-                "todo": execution.todo,
-                "file_contents": execution.todo.expectations,
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
+                "file_contents": execution.work_item_details(),
                 "suites": self.candidate_suites,
                 "iteration": self.attempts + 1,
                 "run_id": execution.run_id,
@@ -131,9 +132,28 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 had_git_changes: true,
             });
 
-        let suites_for_checks = self.candidate_suites.clone();
+        let mut suites_for_checks = self.candidate_suites.clone();
+        if suites_for_checks.is_empty() {
+            let config_path = execution.project_dir.join("chief.yaml");
+            if let Ok(reloaded) = ChiefYaml::load_or_default(&config_path)
+                && !reloaded.suites.is_empty()
+            {
+                suites_for_checks = reloaded.suites;
+                for suite in &suites_for_checks {
+                    if self
+                        .candidate_suites
+                        .iter()
+                        .all(|item| item.name != suite.name)
+                    {
+                        self.candidate_suites.push(suite.clone());
+                    }
+                }
+            }
+        }
+
         for suite in &suites_for_checks {
             self.involved_suite_names.insert(suite.name.clone());
+            execution.ensure_suite_prepared(suite, Phase::LoopFile)?;
         }
 
         if suites_for_checks.is_empty() {
@@ -141,7 +161,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 "info",
                 Some(Phase::LoopFile),
                 EventType::PhaseChange,
-                "loop_file: no todo-associated suites; skipping lint+test commands",
+                "loop_file: no associated suites; skipping lint+test commands",
                 BTreeMap::new(),
             )?;
         } else {
@@ -166,7 +186,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
         }
 
         if run.had_git_changes {
-            let has_associated_test_suites = !execution.todo.test_suites.is_empty();
+            let has_associated_test_suites = !execution.work_item_test_suites().is_empty();
             execution.log_event(
                 "warning",
                 Some(Phase::LoopFile),

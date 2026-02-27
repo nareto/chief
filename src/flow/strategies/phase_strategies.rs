@@ -32,7 +32,8 @@ impl PhaseStrategy for RedPhaseStrategy {
         let prompt = execution.prompts.render_json(
             "red.md",
             &json!({
-                "todo": execution.todo,
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
                 "suites": self.suites,
                 "previous_steps_log": previous_steps_log,
             }),
@@ -103,7 +104,8 @@ impl PhaseStrategy for GreenPhaseStrategy {
         let prompt = execution.prompts.render_json(
             "green.md",
             &json!({
-                "todo": execution.todo,
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
                 "previous_steps_log": previous_steps_log,
             }),
         )?;
@@ -178,7 +180,8 @@ impl PhaseStrategy for PostGreenPhaseStrategy {
         let prompt = execution.prompts.render_json(
             "post_green.md",
             &json!({
-                "todo": execution.todo,
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
                 "post_green_commands": post_green_commands,
                 "previous_steps_log": previous_steps_log,
             }),

@@ -1,6 +1,30 @@
 use super::*;
 
 impl<'a> FlowExecution<'a> {
+    pub fn work_item(&self) -> WorkItem {
+        WorkItem::from_todo(self.todo.clone())
+    }
+
+    pub fn work_item_id(&self) -> &str {
+        self.todo.id.as_str()
+    }
+
+    pub fn work_item_title(&self) -> &str {
+        self.todo.todo.as_str()
+    }
+
+    pub fn work_item_details(&self) -> &str {
+        self.todo.expectations.as_str()
+    }
+
+    pub fn work_item_test_suites(&self) -> &[String] {
+        &self.todo.test_suites
+    }
+
+    pub fn work_item_prompt_payload(&self) -> Value {
+        self.work_item().to_legacy_todo_prompt_json()
+    }
+
     pub(in crate::flow) fn reload_suite_check_context(
         &self,
         requested_suites: &[TestSuiteConfig],
@@ -36,10 +60,10 @@ impl<'a> FlowExecution<'a> {
     }
 
     pub fn selected_suites(&self) -> Vec<TestSuiteConfig> {
-        if self.todo.test_suites.is_empty() {
+        if self.work_item_test_suites().is_empty() {
             return Vec::new();
         }
-        let names = self.todo.test_suites.iter().collect::<HashSet<_>>();
+        let names = self.work_item_test_suites().iter().collect::<HashSet<_>>();
         self.all_suites
             .iter()
             .filter(|suite| names.contains(&suite.name))
@@ -47,22 +71,26 @@ impl<'a> FlowExecution<'a> {
             .collect()
     }
 
-    pub(in crate::flow) fn todo_context_hash(&self) -> String {
-        let fingerprint = TodoContextFingerprint {
-            id: self.todo.id.trim().to_owned(),
-            todo: self.todo.todo.trim().to_owned(),
-            expectations: self.todo.expectations.trim().to_owned(),
-            test_suites: normalized_suite_names(&self.todo.test_suites),
+    pub(in crate::flow) fn work_item_context_hash(&self) -> String {
+        let fingerprint = WorkItemContextFingerprint {
+            id: self.work_item_id().trim().to_owned(),
+            title: self.work_item_title().trim().to_owned(),
+            details: self.work_item_details().trim().to_owned(),
+            test_suites: normalized_suite_names(self.work_item_test_suites()),
         };
         md5_hex_of_serializable(&fingerprint)
     }
 
+    pub(in crate::flow) fn todo_context_hash(&self) -> String {
+        self.work_item_context_hash()
+    }
+
     pub(in crate::flow) fn execution_context_hash(&self) -> String {
-        let todo_suite_names = normalized_suite_names(&self.todo.test_suites);
-        let configured_todo_suites = if todo_suite_names.is_empty() {
+        let work_item_suite_names = normalized_suite_names(self.work_item_test_suites());
+        let configured_work_item_suites = if work_item_suite_names.is_empty() {
             Vec::new()
         } else {
-            let expected = todo_suite_names.iter().collect::<HashSet<_>>();
+            let expected = work_item_suite_names.iter().collect::<HashSet<_>>();
             let mut suites = self
                 .all_suites
                 .iter()
@@ -72,7 +100,7 @@ impl<'a> FlowExecution<'a> {
             suites.sort_by(|left, right| left.name.cmp(&right.name));
             suites
         };
-        let suites = configured_todo_suites
+        let suites = configured_work_item_suites
             .into_iter()
             .map(|suite| SuiteExecutionFingerprint {
                 name: suite.name,
@@ -100,7 +128,7 @@ impl<'a> FlowExecution<'a> {
             max_loop_iterations: self.chief_config.max_loop_iterations,
             agent_timeout_seconds: self.chief_config.agent_timeout_seconds,
             suite_command_timeout_seconds: self.chief_config.suite_command_timeout_seconds,
-            todo_test_suites: todo_suite_names,
+            work_item_test_suites: work_item_suite_names,
             suites,
         };
         md5_hex_of_serializable(&fingerprint)
@@ -111,13 +139,24 @@ impl<'a> FlowExecution<'a> {
         expected_todo_hash: &str,
         expected_exec_hash: &str,
     ) -> bool {
-        let todo_hash = event
+        let work_item_hash = event
             .payload
-            .get(TODO_CONTEXT_HASH_PAYLOAD_KEY)
+            .get(WORK_ITEM_CONTEXT_HASH_PAYLOAD_KEY)
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if todo_hash != expected_todo_hash {
-            return false;
+        if !work_item_hash.is_empty() {
+            if work_item_hash != expected_todo_hash {
+                return false;
+            }
+        } else {
+            let todo_hash = event
+                .payload
+                .get(TODO_CONTEXT_HASH_PAYLOAD_KEY)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if todo_hash != expected_todo_hash {
+                return false;
+            }
         }
 
         let exec_hash = event

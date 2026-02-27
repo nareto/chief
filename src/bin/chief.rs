@@ -444,12 +444,9 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         todo: format!("loop_file: {}", file_path.display()),
         expectations: file_contents,
         priority: 1,
-        test_suites: context
-            .chief_yaml
-            .suites
-            .iter()
-            .map(|suite| suite.name.clone())
-            .collect(),
+        // Keep loop_file detached from todo queue semantics. Suite checks are
+        // resolved from the active chief.yaml during each iteration.
+        test_suites: Vec::new(),
         status: TodoStatus::Pending,
         done_at_commit: None,
     };

@@ -89,6 +89,34 @@ impl FromStr for FlowKind {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkItem {
+    pub id: String,
+    pub title: String,
+    pub details: String,
+    pub test_suites: Vec<String>,
+}
+
+impl WorkItem {
+    pub fn from_todo(todo: Todo) -> Self {
+        Self {
+            id: todo.id,
+            title: todo.todo,
+            details: todo.expectations,
+            test_suites: todo.test_suites,
+        }
+    }
+
+    pub fn to_legacy_todo_prompt_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "todo": self.title,
+            "expectations": self.details,
+            "test_suites": self.test_suites,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TodoOutcome {
     pub todo_id: String,
@@ -124,19 +152,20 @@ struct SinglePromptFailureItem {
 }
 
 const SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE: &str =
-    "single_prompt iteration changed files; waiting for two consecutive no-change iterations";
+    "iteration changed files; waiting for two consecutive no-change iterations";
 const SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY: &str = "single_prompt_retry_reason";
 const SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES: &str = "convergence_changed_files";
 const SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY: &str =
     "single_prompt_retry_has_associated_test_suites";
+const WORK_ITEM_CONTEXT_HASH_PAYLOAD_KEY: &str = "work_item_context_hash";
 const TODO_CONTEXT_HASH_PAYLOAD_KEY: &str = "todo_context_hash";
 const EXECUTION_CONTEXT_HASH_PAYLOAD_KEY: &str = "execution_context_hash";
 
 #[derive(Debug, Serialize)]
-struct TodoContextFingerprint {
+struct WorkItemContextFingerprint {
     id: String,
-    todo: String,
-    expectations: String,
+    title: String,
+    details: String,
     test_suites: Vec<String>,
 }
 
@@ -168,7 +197,7 @@ struct ExecutionContextFingerprint {
     max_loop_iterations: usize,
     agent_timeout_seconds: u64,
     suite_command_timeout_seconds: u64,
-    todo_test_suites: Vec<String>,
+    work_item_test_suites: Vec<String>,
     suites: Vec<SuiteExecutionFingerprint>,
 }
 
@@ -223,7 +252,9 @@ pub use command_exec::{
 };
 pub use execution::FlowExecution;
 pub use loop_policy::{ConvergenceLoopPolicy, LoopPolicy, PhaseStrategy, UntilPassLoopPolicy};
-pub use strategies::{LoopFileFlow, SinglePromptFlow, TddFlow, TodoFlow, build_flow};
+pub use strategies::{
+    ExecutionFlow, LoopFileFlow, SinglePromptFlow, TddFlow, TodoFlow, build_flow,
+};
 
 pub(crate) use suite_checks::{run_lint_checks, run_test_and_lint};
 

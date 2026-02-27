@@ -29,7 +29,7 @@ impl<'a> FlowExecution<'a> {
             .and_then(|value| value.to_str())
             .unwrap_or("project")
             .to_owned();
-        let todo_id = self.todo.id.clone();
+        let todo_id = self.work_item_id().to_owned();
 
         agent_stream::start_query(
             &project_name,

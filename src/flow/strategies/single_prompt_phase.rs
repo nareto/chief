@@ -93,7 +93,8 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
         let prompt = execution.prompts.render_json(
             "singleprompt.md",
             &json!({
-                "todo": execution.todo,
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
                 "suites": self.candidate_suites,
                 "iteration": self.attempts + 1,
                 "run_id": execution.run_id,
@@ -140,7 +141,7 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
                 "info",
                 Some(Phase::SinglePrompt),
                 EventType::PhaseChange,
-                "single_prompt: no todo-associated suites; skipping lint+test commands",
+                "single_prompt: no associated suites; skipping lint+test commands",
                 BTreeMap::new(),
             )?;
         } else {
@@ -165,7 +166,7 @@ impl PhaseStrategy for SinglePromptPhaseStrategy {
         }
 
         if run.had_git_changes {
-            let has_associated_test_suites = !execution.todo.test_suites.is_empty();
+            let has_associated_test_suites = !execution.work_item_test_suites().is_empty();
             execution.log_event(
                 "warning",
                 Some(Phase::SinglePrompt),
