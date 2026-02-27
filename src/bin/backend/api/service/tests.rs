@@ -148,6 +148,10 @@ impl GitOps for RecordingGitOps {
         &self.root
     }
 
+    fn head_commit(&self, _cwd: &Path) -> anyhow::Result<String> {
+        Ok("mock-head-0".to_owned())
+    }
+
     fn changed_files(&self, _cwd: &Path) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }

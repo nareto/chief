@@ -142,6 +142,9 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 output: output.clone(),
                 touched_files: Vec::new(),
                 had_git_changes: true,
+                head_commit_before: String::new(),
+                head_commit_after: String::new(),
+                head_commit_changed: true,
             });
 
         let suites_for_checks = Self::reload_configured_suites(execution)?;
@@ -213,7 +216,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             return Ok(LoopDecision::Retry);
         }
 
-        if run.had_git_changes || salvaged_uncommitted_changes {
+        if run.had_git_changes || run.head_commit_changed || salvaged_uncommitted_changes {
             let has_associated_test_suites = !suites_for_checks.is_empty();
             let mut touched_files = run.touched_files.clone();
             for file in &pending_files {
@@ -228,6 +231,9 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
                 payload_from_json(json!({
                     "touched_files": touched_files,
+                    "head_commit_before": run.head_commit_before,
+                    "head_commit_after": run.head_commit_after,
+                    "head_commit_changed": run.head_commit_changed,
                     "harness_salvaged_uncommitted_changes": salvaged_uncommitted_changes,
                     (SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY): SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
                     (SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY): has_associated_test_suites,
