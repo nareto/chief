@@ -1,4 +1,4 @@
-You are a coding agent asked to implement the following task, copy/pasted here inside <TASK></TASK> xml tags:
+You are a coding agent being run by a harness. Your goal is to implement the following task, copy/pasted here inside <TASK></TASK> xml tags:
 
 <TASK>
 
@@ -9,14 +9,19 @@ You are a coding agent asked to implement the following task, copy/pasted here i
 
 Implement the task fully, including tests. Include essential documentation (both in and out of code) when appropriate. Reuse existing patterns and avoid codebase fragmentation.
 
-You are also required to update chief.yaml as needed, following format and instructions in chief.example.yaml. The agent harness will run all the lintintg commands and test suites defined there after you are done with your work.
-
+If needed, update chief.yaml, following format and instructions in chief.example.yaml. The harness will run all the linting commands and test suites defined there after you are done with your work. Please keep in mind that these tests passing is no measure of completeness of the task. The only source of truth is the difference between the task specified above and the existing codebase.
 
 If you need more context you can also check git history.
 
+If you find the existing implementation and the tests to be both complete, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the task is properly done and we can move on. 
+
+However, if you find any part of the task is not reflected in the codebase, please do the appropriate modifications (both in implementation and tests) and the harness will know there is still work to be done.
+
+When done with your work, commit all changes.
+
 
 {% if not first_attempt %}
-Keep in mind this is not your first iteration at implementing this task.
+Please keep in mind this is not your first iteration at implementing this task.
 
 {% if touched_files_since_last_retry_reset %}
 The files touched by your previous iterations are:
@@ -70,6 +75,3 @@ SQLITE QUERY: `{{ failure.sqlite_query }}`
 {% endif %}
 {% endif %}
 
-If you find the existing implementation and the tests to be both complete, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the task is properly done and we can move on. 
-
-However, if you find anything lacking, please do the appropriate modifications (both in implementation and tests) and we will continue to work on this task.
