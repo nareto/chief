@@ -37,6 +37,50 @@ fn init_git_repo(path: &std::path::Path) {
     assert!(status.success(), "git init should succeed");
 }
 
+fn git_head(path: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .expect("git rev-parse should run");
+    assert!(
+        output.status.success(),
+        "git rev-parse should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn git_commit_file(path: &std::path::Path, file_name: &str, content: &str, message: &str) {
+    fs::write(path.join(file_name), content).expect("test file should be written");
+    let add_status = Command::new("git")
+        .args(["add", file_name])
+        .current_dir(path)
+        .status()
+        .expect("git add should run");
+    assert!(add_status.success(), "git add should succeed");
+
+    let commit_output = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Chief Test",
+            "-c",
+            "user.email=chief-tests@example.com",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ])
+        .current_dir(path)
+        .output()
+        .expect("git commit should run");
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+}
+
 fn write_chief_yaml(project_dir: &std::path::Path, content: &str) {
     fs::create_dir_all(chief::paths::chief_dir(project_dir))
         .expect(".chief directory should be created");
@@ -448,5 +492,42 @@ fn migrate_moves_legacy_root_files_into_dot_chief() {
     assert!(
         gitignore.contains(".chief/chief.db"),
         "migrate should add .chief/chief.db ignore entry"
+    );
+}
+
+#[test]
+fn git_commits_since_without_head_before_returns_recent_commits() {
+    let temp = TempDir::new("git-commits-since-no-head-before");
+    init_git_repo(&temp.path);
+    git_commit_file(&temp.path, "one.txt", "1\n", "test commit one");
+    git_commit_file(&temp.path, "two.txt", "2\n", "test commit two");
+
+    let commits =
+        git_commits_since(&temp.path, None).expect("git_commits_since should return commits");
+    assert_eq!(commits.len(), 2, "all commits should be included");
+    assert!(
+        commits[0].contains("test commit two"),
+        "latest commit should be listed first"
+    );
+    assert!(
+        commits[1].contains("test commit one"),
+        "older commit should still be included"
+    );
+}
+
+#[test]
+fn git_commits_since_with_head_before_filters_history() {
+    let temp = TempDir::new("git-commits-since-range");
+    init_git_repo(&temp.path);
+    git_commit_file(&temp.path, "one.txt", "1\n", "base commit");
+    let baseline_head = git_head(&temp.path);
+    git_commit_file(&temp.path, "two.txt", "2\n", "new commit");
+
+    let commits = git_commits_since(&temp.path, Some(baseline_head.as_str()))
+        .expect("git_commits_since should return commits after baseline");
+    assert_eq!(commits.len(), 1, "only new commits should be returned");
+    assert!(
+        commits[0].contains("new commit"),
+        "range output should include the new commit message"
     );
 }

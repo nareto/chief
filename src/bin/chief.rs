@@ -666,12 +666,14 @@ fn convergence_iteration_count(store: &ProjectStore, run_id: &str) -> Result<usi
 }
 
 fn git_commits_since(project_dir: &Path, head_before: Option<&str>) -> Result<Vec<String>> {
-    let Some(head_before) = head_before else {
-        return Ok(Vec::new());
-    };
-    let range = format!("{head_before}..HEAD");
-    let output = std::process::Command::new("git")
-        .args(["log", "--oneline", range.as_str()])
+    let mut command = std::process::Command::new("git");
+    command.arg("log").arg("--oneline");
+    if let Some(head_before) = head_before {
+        let range = format!("{head_before}..HEAD");
+        command.arg(range);
+    }
+
+    let output = command
         .current_dir(project_dir)
         .output()
         .context("failed to run git log --oneline")?;
