@@ -221,13 +221,19 @@ fn init_git_repo(project_dir: &Path) {
 }
 
 fn write_todos(project_dir: &Path, todos_yaml: &str) {
-    fs::write(project_dir.join("todos.yaml"), format!("{todos_yaml}\n"))
-        .expect("failed to write todos.yaml");
+    fs::write(
+        chief::paths::todos_path(&project_dir),
+        format!("{todos_yaml}\n"),
+    )
+    .expect("failed to write todos.yaml");
 }
 
 fn write_chief_yaml(project_dir: &Path, chief_yaml: &str) {
-    fs::write(project_dir.join("chief.yaml"), format!("{chief_yaml}\n"))
-        .expect("failed to write chief.yaml");
+    fs::write(
+        chief::paths::chief_yaml_path(&project_dir),
+        format!("{chief_yaml}\n"),
+    )
+    .expect("failed to write chief.yaml");
 }
 
 fn setup_service(initial_todos_yaml: &str) -> (TempDir, ApiService, String, PathBuf) {
@@ -285,9 +291,11 @@ async fn start_project_rejects_missing_chief_yaml_without_creating_run_or_job_re
     test_suites: []
     status: pending"#,
     );
-    let expected_config_path = project_dir.join("chief.yaml").display().to_string();
+    let expected_config_path = chief::paths::chief_yaml_path(&project_dir)
+        .display()
+        .to_string();
     assert!(
-        !project_dir.join("chief.yaml").exists(),
+        !chief::paths::chief_yaml_path(&project_dir).exists(),
         "fixture should intentionally omit chief.yaml"
     );
 
@@ -862,7 +870,7 @@ async fn start_project_skips_pre_run_checks_when_last_success_matches_chief_yaml
     );
 
     let store = ProjectStore::new(&project_dir);
-    let chief_yaml_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+    let chief_yaml_hash = chief_yaml_content_hash(&chief::paths::chief_yaml_path(&project_dir))
         .expect("chief.yaml hash should be computed");
     store
         .set_readiness_result(
@@ -921,7 +929,7 @@ async fn start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_succe
     );
 
     let store = ProjectStore::new(&project_dir);
-    let original_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+    let original_hash = chief_yaml_content_hash(&chief::paths::chief_yaml_path(&project_dir))
         .expect("chief.yaml hash should be computed");
     store
         .set_readiness_result(
@@ -943,7 +951,7 @@ async fn start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_succe
         r#"chief:
   flow: tdd"#,
     );
-    let updated_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+    let updated_hash = chief_yaml_content_hash(&chief::paths::chief_yaml_path(&project_dir))
         .expect("updated chief.yaml hash should be computed");
     assert_ne!(
         updated_hash,
@@ -1003,7 +1011,7 @@ async fn start_project_reruns_pre_run_checks_when_previous_result_was_not_succes
     );
 
     let store = ProjectStore::new(&project_dir);
-    let chief_yaml_hash = chief_yaml_content_hash(&project_dir.join("chief.yaml"))
+    let chief_yaml_hash = chief_yaml_content_hash(&chief::paths::chief_yaml_path(&project_dir))
         .expect("chief.yaml hash should be computed");
     store
         .set_readiness_result(
@@ -1664,13 +1672,13 @@ async fn update_chief_yaml_commits_changes_to_git() {
         .await
         .expect("update_chief_yaml should succeed");
 
-    let saved =
-        fs::read_to_string(project_dir.join("chief.yaml")).expect("chief.yaml should exist");
+    let saved = fs::read_to_string(chief::paths::chief_yaml_path(&project_dir))
+        .expect("chief.yaml should exist");
     assert_eq!(saved, updated_yaml, "file should contain updated content");
 
     let log = run_git(&project_dir, &["log", "--oneline", "-1"]);
     assert!(
-        log.contains("update chief.yaml via settings"),
+        log.contains("update .chief/chief.yaml via settings"),
         "latest commit should be the chief.yaml settings update, got: {log}"
     );
 
@@ -1682,7 +1690,7 @@ async fn update_chief_yaml_commits_changes_to_git() {
         .collect::<Vec<_>>();
     assert!(
         user_changes.is_empty(),
-        "chief.yaml should be committed (no dirty state), got: {status}"
+        ".chief/chief.yaml should be committed (no dirty state), got: {status}"
     );
 }
 
@@ -1702,8 +1710,8 @@ async fn update_chief_yaml_noop_commit_when_content_unchanged() {
 
     let commit_before = run_git(&project_dir, &["rev-parse", "HEAD"]);
 
-    let existing_content =
-        fs::read_to_string(project_dir.join("chief.yaml")).expect("chief.yaml should exist");
+    let existing_content = fs::read_to_string(chief::paths::chief_yaml_path(&project_dir))
+        .expect("chief.yaml should exist");
     service
         .update_chief_yaml(
             &project,
@@ -1754,8 +1762,8 @@ async fn update_chief_yaml_does_not_commit_other_dirty_files() {
     );
     assert_eq!(
         committed_files.trim(),
-        "chief.yaml",
-        "only chief.yaml should be in the commit, got: {committed_files}"
+        ".chief/chief.yaml",
+        "only .chief/chief.yaml should be in the commit, got: {committed_files}"
     );
 
     let status = run_git(&project_dir, &["status", "--porcelain"]);
@@ -1802,7 +1810,7 @@ async fn read_endpoints_return_api_errors_for_invalid_todos_yaml() {
     );
 
     fs::write(
-        project_dir.join("todos.yaml"),
+        chief::paths::todos_path(&project_dir),
         "todos:\n  - id: broken\n    todo: [missing quote\n",
     )
     .expect("failed to write invalid todos.yaml");

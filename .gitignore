@@ -5,6 +5,8 @@ __pycache__
 /target
 .chief-worktrees
 chief.db
+.chief/chief.db
+.chief/chief.db-*
 docker-compose.override.yml
 frontend/node_modules
 frontend/.next

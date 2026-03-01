@@ -164,7 +164,9 @@ fn run_todos_until_done_with_retries_stops_after_first_terminal_todo_failure() {
     let root = TempDir::new("cli-fail-fast");
     let project_dir = root.path.join("project");
     init_git_repo(&project_dir);
-    fs::write(project_dir.join("chief.yaml"), "chief: {}\n")
+    fs::create_dir_all(crate::paths::chief_dir(&project_dir))
+        .expect(".chief directory should be created");
+    fs::write(crate::paths::chief_yaml_path(&project_dir), "chief: {}\n")
         .expect("failed to write chief.yaml fixture");
 
     let context = ProjectContext::load(&project_dir).expect("failed to load project context");
@@ -244,7 +246,9 @@ fn loop_file_flow_forces_single_outer_retry_attempt() {
     let root = TempDir::new("loop-file-max-retries");
     let project_dir = root.path.join("project");
     init_git_repo(&project_dir);
-    fs::write(project_dir.join("chief.yaml"), "chief: {}\n")
+    fs::create_dir_all(crate::paths::chief_dir(&project_dir))
+        .expect(".chief directory should be created");
+    fs::write(crate::paths::chief_yaml_path(&project_dir), "chief: {}\n")
         .expect("failed to write chief.yaml fixture");
 
     let context = ProjectContext::load(&project_dir).expect("failed to load project context");

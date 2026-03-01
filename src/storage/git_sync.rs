@@ -16,7 +16,7 @@ impl ProjectStore {
         let relative_todos_path = self
             .todos_path
             .strip_prefix(&self.project_dir)
-            .unwrap_or_else(|_| Path::new("todos.yaml"))
+            .unwrap_or_else(|_| Path::new(".chief/todos.yaml"))
             .to_string_lossy()
             .to_string();
         let relative_todos = relative_todos_path.as_str();

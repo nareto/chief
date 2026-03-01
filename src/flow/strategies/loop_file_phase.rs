@@ -17,7 +17,7 @@ impl LoopFilePhaseStrategy {
     }
 
     fn reload_configured_suites(execution: &FlowExecution<'_>) -> Result<Vec<TestSuiteConfig>> {
-        let config_path = execution.project_dir.join("chief.yaml");
+        let config_path = crate::paths::chief_yaml_path(&execution.project_dir);
         let reloaded = ChiefYaml::load_or_default(&config_path).with_context(|| {
             format!(
                 "failed to reload chief config from active worktree {}",
@@ -89,64 +89,14 @@ impl LoopFilePhaseStrategy {
             ))
         }
     }
-}
 
-impl PhaseStrategy for LoopFilePhaseStrategy {
-    fn phase(&self) -> Phase {
-        Phase::LoopFile
-    }
-
-    fn attempt_fix(&mut self, execution: &mut FlowExecution<'_>) -> Result<AgentOutput> {
-        let failure_context = execution.latest_single_prompt_failure_context()?;
-        let has_previous_attempts = self.attempts > 0
-            || execution.has_previous_single_prompt_attempt_since_last_retry_reset()?;
-        let suites_for_prompt = Self::reload_configured_suites(execution)?;
-
-        let prompt = execution.prompts.render_json(
-            "singleprompt_loadfile.md",
-            &json!({
-                "work_item": execution.work_item(),
-                "todo": execution.work_item_prompt_payload(),
-                "file_contents": execution.work_item_details(),
-                "suites": suites_for_prompt,
-                "iteration": self.attempts + 1,
-                "run_id": execution.run_id,
-                "first_attempt": !has_previous_attempts,
-                "failed_lint": failure_context.failed_lint,
-                "failed_test": failure_context.failed_test,
-                "failed_other": failure_context.failed_other,
-                "touched_files_since_last_retry_reset": failure_context.touched_files_since_last_retry_reset,
-                "lint_failures": failure_context.lint_failures,
-                "test_failures": failure_context.test_failures,
-                "other_failures": failure_context.other_failures,
-            }),
-        )?;
-
-        let run = execution.run_agent_with_git_changes(Phase::LoopFile, prompt, Vec::new())?;
-        let output = run.output.clone();
-        self.last_agent_run = Some(run);
-        self.attempts += 1;
-        Ok(output)
-    }
-
-    fn check_goal(
+    fn evaluate_agent_run(
         &mut self,
         execution: &mut FlowExecution<'_>,
-        _iteration_idx: isize,
-        output: &AgentOutput,
+        run: AgentRunWithGitChanges,
+        phase_failure_msg: &str,
+        salvage_iteration: usize,
     ) -> Result<LoopDecision> {
-        let run = self
-            .last_agent_run
-            .take()
-            .unwrap_or_else(|| AgentRunWithGitChanges {
-                output: output.clone(),
-                touched_files: Vec::new(),
-                had_git_changes: true,
-                head_commit_before: String::new(),
-                head_commit_after: String::new(),
-                head_commit_changed: true,
-            });
-
         let suites_for_checks = Self::reload_configured_suites(execution)?;
         for suite in &suites_for_checks {
             self.involved_suite_names.insert(suite.name.clone());
@@ -162,7 +112,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             let commit_message = format!(
                 "chief(loop_file salvage): {} (iteration {})",
                 execution.work_item_title(),
-                self.attempts
+                salvage_iteration
             );
             let commit_hash = execution
                 .git
@@ -175,7 +125,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 EventType::GitOp,
                 "loop_file: harness committed uncommitted iteration changes",
                 payload_from_json(json!({
-                    "iteration": self.attempts,
+                    "iteration": salvage_iteration,
                     "pending_files": pending_files,
                     "commit_hash": commit_hash,
                     "commit_message": commit_message,
@@ -207,7 +157,7 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
                 "warning",
                 Some(Phase::LoopFile),
                 EventType::PhaseFailure,
-                "loop_file agent step failed",
+                phase_failure_msg,
                 payload_from_json(json!({
                     "exit_code": run.output.exit_code,
                     "command": run.output.command,
@@ -250,5 +200,157 @@ impl PhaseStrategy for LoopFilePhaseStrategy {
             BTreeMap::new(),
         )?;
         Ok(LoopDecision::Stable)
+    }
+
+    pub(super) fn run_convergence_review(
+        &mut self,
+        execution: &mut FlowExecution<'_>,
+    ) -> Result<LoopDecision> {
+        let suites_for_prompt = Self::reload_configured_suites(execution)?;
+        let prompt = execution.prompts.render_json(
+            "loop_file_convergence.md",
+            &json!({
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
+                "file_contents": execution.work_item_details(),
+                "suites": suites_for_prompt,
+                "iteration": self.attempts + 1,
+                "run_id": execution.run_id,
+            }),
+        )?;
+        let run = execution.run_agent_with_git_changes(Phase::LoopFile, prompt, Vec::new())?;
+        self.evaluate_agent_run(
+            execution,
+            run,
+            "loop_file convergence check agent step failed",
+            self.attempts + 1,
+        )
+    }
+
+    pub(super) fn ready_bd_ticket_count(
+        &self,
+        execution: &FlowExecution<'_>,
+    ) -> Result<Option<usize>> {
+        let local_bd = execution.project_dir.join("bd");
+        let bd_command = if local_bd.is_file() {
+            local_bd
+        } else {
+            std::path::PathBuf::from("bd")
+        };
+        let output = match std::process::Command::new(&bd_command)
+            .args(["ready", "--json"])
+            .current_dir(&execution.project_dir)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                execution.log_event(
+                    "warning",
+                    Some(Phase::LoopFile),
+                    EventType::PhaseChange,
+                    "loop_file: `bd` command was not found; skipping bd readiness check",
+                    BTreeMap::new(),
+                )?;
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(err).context("failed to run `bd ready --json` during loop_file");
+            }
+        };
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            execution.log_event(
+                "warning",
+                Some(Phase::LoopFile),
+                EventType::PhaseChange,
+                "loop_file: `bd ready --json` failed; skipping bd readiness check",
+                payload_from_json(json!({
+                    "status": output.status.to_string(),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                })),
+            )?;
+            return Ok(None);
+        }
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .context("failed to parse `bd ready --json` output")?;
+        if let Some(entries) = parsed.as_array() {
+            return Ok(Some(entries.len()));
+        }
+        Err(anyhow!(
+            "unexpected `bd ready --json` output shape; expected a JSON array"
+        ))
+    }
+
+    pub(super) fn reset_prompt_history(
+        &mut self,
+        execution: &FlowExecution<'_>,
+        marker: &str,
+    ) -> Result<()> {
+        self.last_agent_run = None;
+        self.attempts = 0;
+        execution.mark_retry_reset_boundary(Phase::LoopFile, marker)
+    }
+}
+
+impl PhaseStrategy for LoopFilePhaseStrategy {
+    fn phase(&self) -> Phase {
+        Phase::LoopFile
+    }
+
+    fn attempt_fix(&mut self, execution: &mut FlowExecution<'_>) -> Result<AgentOutput> {
+        let failure_context = execution.latest_single_prompt_failure_context()?;
+        let has_previous_attempts = self.attempts > 0
+            || execution.has_previous_single_prompt_attempt_since_last_retry_reset()?;
+        let suites_for_prompt = Self::reload_configured_suites(execution)?;
+
+        let prompt = execution.prompts.render_json(
+            "loop_file_prompt.md",
+            &json!({
+                "work_item": execution.work_item(),
+                "todo": execution.work_item_prompt_payload(),
+                "file_contents": execution.work_item_details(),
+                "suites": suites_for_prompt,
+                "iteration": self.attempts + 1,
+                "run_id": execution.run_id,
+                "first_attempt": !has_previous_attempts,
+                "failed_lint": failure_context.failed_lint,
+                "failed_test": failure_context.failed_test,
+                "failed_other": failure_context.failed_other,
+                "touched_files_since_last_retry_reset": failure_context.touched_files_since_last_retry_reset,
+                "lint_failures": failure_context.lint_failures,
+                "test_failures": failure_context.test_failures,
+                "other_failures": failure_context.other_failures,
+            }),
+        )?;
+
+        let run = execution.run_agent_with_git_changes(Phase::LoopFile, prompt, Vec::new())?;
+        let output = run.output.clone();
+        self.last_agent_run = Some(run);
+        self.attempts += 1;
+        Ok(output)
+    }
+
+    fn check_goal(
+        &mut self,
+        execution: &mut FlowExecution<'_>,
+        _iteration_idx: isize,
+        output: &AgentOutput,
+    ) -> Result<LoopDecision> {
+        let run = self
+            .last_agent_run
+            .take()
+            .unwrap_or_else(|| AgentRunWithGitChanges {
+                output: output.clone(),
+                touched_files: Vec::new(),
+                had_git_changes: true,
+                head_commit_before: String::new(),
+                head_commit_after: String::new(),
+                head_commit_changed: true,
+            });
+        self.evaluate_agent_run(execution, run, "loop_file agent step failed", self.attempts)
     }
 }

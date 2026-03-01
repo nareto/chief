@@ -95,7 +95,10 @@ impl CommandBackedAgent for CodexAgent {
         }
         if let Some(reasoning_effort) = &self.model_reasoning_effort {
             cmd.push("--config".to_owned());
-            cmd.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+            cmd.push(format!(
+                "model_reasoning_effort=\"{}\"",
+                normalize_codex_reasoning_effort(reasoning_effort)
+            ));
         }
         cmd.push("-".to_owned());
         cmd
@@ -219,6 +222,13 @@ impl CodingAgent for ClaudeAgent {
 
     fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
         run_command_backed_agent(self, request)
+    }
+}
+
+fn normalize_codex_reasoning_effort(raw: &str) -> &str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "xhigh" => "high",
+        _ => raw.trim(),
     }
 }
 

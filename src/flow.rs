@@ -28,6 +28,7 @@ pub enum FlowKind {
     Tdd,
     SinglePrompt,
     LoopFile,
+    Refactor,
 }
 
 impl FlowKind {
@@ -36,6 +37,7 @@ impl FlowKind {
             Self::Tdd => "tdd",
             Self::SinglePrompt => "single_prompt",
             Self::LoopFile => "loop_file",
+            Self::Refactor => "refactor",
         }
     }
 
@@ -66,7 +68,7 @@ impl fmt::Display for FlowParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown flow '{}'; expected one of: tdd, single_prompt, loop_file",
+            "unknown flow '{}'; expected one of: tdd, single_prompt, loop_file, refactor",
             self.input
         )
     }
@@ -82,6 +84,7 @@ impl FromStr for FlowKind {
             "tdd" => Ok(Self::Tdd),
             "single_prompt" => Ok(Self::SinglePrompt),
             "loop_file" => Ok(Self::LoopFile),
+            "refactor" => Ok(Self::Refactor),
             other => Err(FlowParseError {
                 input: other.to_owned(),
             }),
@@ -327,7 +330,9 @@ fn is_agent_timeout_response_event(event: &EventRecord) -> bool {
 
     event.event_type == EventType::PhaseFailure
         && (event.msg == "single_prompt agent step failed"
-            || event.msg == "loop_file agent step failed")
+            || event.msg == "loop_file agent step failed"
+            || event.msg == "loop_file convergence check agent step failed"
+            || event.msg == "refactor agent step failed")
         && event_exit_code(event) == Some(124)
 }
 

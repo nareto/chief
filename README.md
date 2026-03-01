@@ -15,7 +15,7 @@ Chief runs a phase-based loop for each todo:
 3. **POST_GREEN**: optional lint/build commands after tests pass.
 4. **Commit**: auto-commit and tag on success.
 
-Chief records all events (agent prompts/responses, diffs, test outputs) in `chief.db` and queries it to give context to subsequent prompts.
+Chief records all events (agent prompts/responses, diffs, test outputs) in `.chief/chief.db` and queries it to give context to subsequent prompts.
 
 ### Iteration Loops
 
@@ -46,9 +46,9 @@ Chief is a Rust TDD orchestration system with:
 
 The system keeps **per-project** state local:
 
-- `chief.yaml`
-- `todos.yaml`
-- `chief.db` (SQLite)
+- `.chief/chief.yaml`
+- `.chief/todos.yaml`
+- `.chief/chief.db` (SQLite)
 
 There is no centralized database.
 
@@ -57,8 +57,8 @@ There is no centralized database.
 Core library modules:
 
 - `src/domain.rs`: strongly-typed core models (`Todo`, `EventRecord`, `JobRecord`, `Phase`, `TodoStatus`, etc).
-- `src/config.rs`: `chief.yaml` parsing for `chief` and `suites`.
-- `src/storage.rs`: per-project SQLite + `todos.yaml` synchronization.
+- `src/config.rs`: `.chief/chief.yaml` parsing for `chief` and `suites`.
+- `src/storage.rs`: per-project SQLite + `.chief/todos.yaml` synchronization.
 - `src/prompt.rs`: prompt loading/rendering from `prompts/*.md` using Jinja syntax (`minijinja`).
 - `src/agent.rs`: coding-agent abstraction and concrete CLI agent adapters.
 - `src/git.rs`: git/worktree operations.
@@ -79,6 +79,7 @@ Included flows:
 - `single_prompt`: convergence loop with per-iteration checks over the todo's configured suites.
 - `tdd`: legacy RED -> GREEN -> POST_GREEN flow.
 - `loop_file`: convergence loop driven by a markdown file loaded via `--file`.
+- `refactor`: convergence loop that alternates `structural_cleanup.md` and `mechanical_cleanup.md`.
 
 Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
 
@@ -147,7 +148,13 @@ chief init --chief-root /path/to/chief
 ```
 
 `init` is idempotent: existing files/symlinks are left unchanged and only missing ones are created.
-It creates `chief.yaml` plus `chief.example.yaml`/`todos.example.yaml` symlinks, and does not create `todos.yaml`.
+It creates `.chief/chief.yaml` plus `.chief/chief.example.yaml`/`.chief/todos.example.yaml` symlinks, and does not create `.chief/todos.yaml`.
+
+For older projects that still have root-level `chief.yaml` / `todos.yaml` / `chief.db`, run:
+
+```bash
+chief migrate
+```
 
 Common options:
 
@@ -310,7 +317,7 @@ Services:
 
 `frontend` rewrites `/api/*` to backend. Terminal websocket defaults to `ws://localhost:8000` (configurable with `NEXT_PUBLIC_CHIEF_WS_BASE`).
 
-## Config (`chief.yaml`) quick example
+## Config (`.chief/chief.yaml`) quick example
 
 ```yaml
 chief:
@@ -335,7 +342,7 @@ suites:
     post_green_command: cargo test
 ```
 
-See `chief.example.yaml` for more patterns.
+See `.chief/chief.example.yaml` for more patterns.
 Backend runtime settings are configured on the `chief_backend` command line (see `just backend`).
 
 ## Current status
