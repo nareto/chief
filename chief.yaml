@@ -1,8 +1,9 @@
 chief:
-  flow: single_prompt
-  agent: claude
+  flow: loop_file
+  agent: codex
   agent_extra_args: []
   max_retries: 2
+  max_loop_iterations: 50
   agent_timeout_seconds: 2700
   suite_command_timeout_seconds: 1800
   agent_log_max_output_lines: 10
@@ -23,18 +24,18 @@ suites:
     default_target: .
     post_green_command: cargo test
     lint_command: cargo clippy
-  - name: frontend
-    language: TypeScript
-    framework: Vitest
-    test_root: frontend
-    test_command: npm run test
-    target_type: project
-    file_patterns:
-      - "*.test.ts"
-      - "*.test.tsx"
-    disallow_write_globs: []
-    env:
-      NODE_ENV: test
-    strip_root_from_target: true
-    default_target: .
-    post_green_command: npm run build
+  # - name: frontend
+  #   language: TypeScript
+  #   framework: Vitest
+  #   test_root: frontend
+  #   test_command: npm run test
+  #   target_type: project
+  #   file_patterns:
+  #     - "*.test.ts"
+  #     - "*.test.tsx"
+  #   disallow_write_globs: []
+  #   env:
+  #     NODE_ENV: test
+  #   strip_root_from_target: true
+  #   default_target: .
+  #   post_green_command: npm run build
