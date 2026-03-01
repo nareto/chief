@@ -46,8 +46,11 @@ fn init_git_repo(project_dir: &Path) {
 }
 
 fn write_todos(project_dir: &Path, todos_yaml: &str) {
-    fs::write(project_dir.join("todos.yaml"), format!("{todos_yaml}\n"))
-        .expect("failed to write todos.yaml");
+    fs::write(
+        crate::paths::todos_path(&project_dir),
+        format!("{todos_yaml}\n"),
+    )
+    .expect("failed to write todos.yaml");
 }
 
 #[test]
@@ -416,7 +419,7 @@ fn inconsistent_db_requires_confirmation_before_reset() {
     .normalize();
     let todo = store.append_todo(todo).expect("append_todo should succeed");
 
-    let conn = Connection::open(project_dir.join("chief.db")).expect("db should open");
+    let conn = Connection::open(crate::paths::chief_db_path(&project_dir)).expect("db should open");
     conn.execute_batch(
         "PRAGMA foreign_keys = OFF;
             DROP TABLE todos;
@@ -436,7 +439,7 @@ fn inconsistent_db_requires_confirmation_before_reset() {
         .expect("error should carry db reset required details");
     assert_eq!(
         reset_error.db_path,
-        project_dir.join("chief.db"),
+        crate::paths::chief_db_path(&project_dir),
         "reset-required error should include db path"
     );
 
@@ -444,7 +447,8 @@ fn inconsistent_db_requires_confirmation_before_reset() {
         .reset_db_from_todos_file()
         .expect("explicit db reset should succeed");
 
-    let conn = Connection::open(project_dir.join("chief.db")).expect("db should reopen");
+    let conn =
+        Connection::open(crate::paths::chief_db_path(&project_dir)).expect("db should reopen");
     let mut stmt = conn
         .prepare("PRAGMA table_info(todos)")
         .expect("table info should prepare");
@@ -508,7 +512,7 @@ fn trim_events_keeps_only_latest_runs() {
             .expect("record_event should succeed");
     }
 
-    let conn = Connection::open(project_dir.join("chief.db")).expect("db should open");
+    let conn = Connection::open(crate::paths::chief_db_path(&project_dir)).expect("db should open");
     conn.execute(
         "UPDATE runs SET started_at = ?1 WHERE run_id = 'run-1'",
         ["2024-01-01T00:00:00Z"],
@@ -582,7 +586,7 @@ fn trim_events_reclaims_db_space() {
         }
     }
 
-    let db_path = project_dir.join("chief.db");
+    let db_path = crate::paths::chief_db_path(&project_dir);
     let size_before = fs::metadata(&db_path)
         .expect("db metadata before trim should be readable")
         .len();
@@ -635,7 +639,7 @@ fn append_todo_auto_commits_todos_yaml_when_repo_available() {
     assert_eq!(after, before + 1, "append_todo should create one commit");
 
     let subject = run_git(&project_dir, &["log", "-1", "--pretty=%s"]);
-    assert_eq!(subject, "chore(todos): sync todos.yaml");
+    assert_eq!(subject, "chore(todos): sync .chief/todos.yaml");
 
     let files = run_git(
         &project_dir,
@@ -646,7 +650,7 @@ fn append_todo_auto_commits_todos_yaml_when_repo_available() {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(changed_files, vec!["todos.yaml"]);
+    assert_eq!(changed_files, vec![".chief/todos.yaml"]);
 
     let _ = fs::remove_dir_all(&project_dir);
 }
@@ -706,7 +710,7 @@ fn sync_todos_from_file_auto_commits_external_todos_yaml_edit() {
     init_git_repo(&project_dir);
 
     fs::write(
-            project_dir.join("todos.yaml"),
+            crate::paths::todos_path(&project_dir),
             "todos:\n  - id: imported-todo\n    priority: 7\n    todo: imported from requirements\n    expectations: persisted after sync\n    test_suites: []\n    status: pending\n    done_at_commit: null\n",
         )
         .expect("manual todos.yaml edit should succeed");
@@ -884,7 +888,7 @@ fn sync_todos_from_file_returns_error_for_invalid_yaml_without_mutating_sqlite()
     let before = store.list_todos().expect("baseline todos should load");
 
     fs::write(
-        project_dir.join("todos.yaml"),
+        crate::paths::todos_path(&project_dir),
         "todos:\n  - id: broken\n    todo: [missing quote\n",
     )
     .expect("failed to write invalid todos.yaml");

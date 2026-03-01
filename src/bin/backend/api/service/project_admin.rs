@@ -32,7 +32,18 @@ impl ApiService {
             run_git_capture(&context.project_dir, &["reset", "--hard", "HEAD"])?;
             run_git_capture(
                 &context.project_dir,
-                &["clean", "-fd", "-e", "chief.db", "-e", "chief.db-*"],
+                &[
+                    "clean",
+                    "-fd",
+                    "-e",
+                    ".chief/chief.db",
+                    "-e",
+                    ".chief/chief.db-*",
+                    "-e",
+                    "chief.db",
+                    "-e",
+                    "chief.db-*",
+                ],
             )?;
         }
 
@@ -143,18 +154,18 @@ impl ApiService {
 
         if let Err(err) = context.git.commit_paths(
             &context.project_dir,
-            &["chief.yaml"],
-            "chore: update chief.yaml via settings",
+            &[".chief/chief.yaml"],
+            "chore: update .chief/chief.yaml via settings",
         ) {
             info!(
                 project,
                 error = %err,
-                "skipped git commit for chief.yaml settings update"
+                "skipped git commit for .chief/chief.yaml settings update"
             );
         }
 
         Ok(MessageResponse {
-            message: "chief.yaml updated".to_owned(),
+            message: ".chief/chief.yaml updated".to_owned(),
         })
     }
 
@@ -165,7 +176,7 @@ impl ApiService {
             .reset_db_from_todos_file()
             .map_err(ApiError::internal)?;
         Ok(MessageResponse {
-            message: format!("reset chief.db for project {project}"),
+            message: format!("reset .chief/chief.db for project {project}"),
         })
     }
 

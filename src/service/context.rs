@@ -3,6 +3,7 @@ use crate::config::ChiefYaml;
 use crate::domain::{EventRecord, EventType, JobRecord, JobStatus, Phase, Todo};
 use crate::flow::FlowKind;
 use crate::git::ShellGitOps;
+use crate::paths;
 use crate::prompt::FsPromptStore;
 use crate::storage::ProjectStore;
 use anyhow::{Context, Result, anyhow};
@@ -26,7 +27,7 @@ pub struct ProjectContext {
 impl ProjectContext {
     pub fn load(project_dir: impl AsRef<Path>) -> Result<Self> {
         let project_dir = project_dir.as_ref().to_path_buf();
-        let config_path = project_dir.join("chief.yaml");
+        let config_path = paths::chief_yaml_path(&project_dir);
         let chief_yaml = ChiefYaml::load_or_default(&config_path)?;
 
         let store = ProjectStore::new(&project_dir);
@@ -65,7 +66,7 @@ impl ProjectContext {
             return Ok(());
         }
         Err(anyhow!(
-            "missing required chief config at {}. create chief.yaml (run `chief init` or copy chief.example.yaml)",
+            "missing required chief config at {}. create .chief/chief.yaml (run `chief init` or copy .chief/chief.example.yaml)",
             self.config_path.display()
         ))
     }

@@ -120,6 +120,7 @@ fn parse_phase(value: &str) -> Phase {
         "green" => Phase::Green,
         "single_prompt" => Phase::SinglePrompt,
         "loop_file" => Phase::LoopFile,
+        "refactor" => Phase::Refactor,
         "post_green" => Phase::PostGreen,
         "exit" => Phase::Exit,
         _ => Phase::Start,

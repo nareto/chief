@@ -90,10 +90,9 @@ impl ChiefEngine {
                 ));
             }
 
-            self.project
-                .store
-                .sync_todos_from_file()
-                .context("failed syncing todo DB from todos.yaml after requirements processing")?;
+            self.project.store.sync_todos_from_file().context(
+                "failed syncing todo DB from .chief/todos.yaml after requirements processing",
+            )?;
 
             let diff = self
                 .project

@@ -11,21 +11,19 @@ mod tests;
 use anyhow::{Context, Result, bail};
 use chief::domain::{JobStatus, RunExitStatus, Todo, TodoStatus};
 use chief::flow::FlowKind;
+use chief::git::GitOps;
 use chief::orchestrator::OrchestratorError;
+use chief::paths;
 use chief::scheduler::Scheduler;
 use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry};
 use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
 use clap::{Args, Parser, Subcommand};
+use rusqlite::OptionalExtension;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-
-const LOOP_FILE_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(150);
-const LOOP_FILE_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
@@ -54,6 +52,8 @@ struct Cli {
 enum Commands {
     /// Initialize Chief config files in a new project directory.
     Init(InitArgs),
+    /// Move legacy root-level chief files into .chief/.
+    Migrate,
     /// Remove completed todos that have a commit hash.
     CleanDone,
     /// Run project pre-run checks (same readiness checks used by backend/frontend start).
@@ -65,6 +65,8 @@ enum Commands {
     /// Execute one loop_file flow run from a markdown file.
     #[command(name = "loop_file", alias = "loop-file")]
     LoopFile(LoopFileArgs),
+    /// Run queued todos using the refactor flow.
+    Refactor,
 }
 
 #[derive(Debug, Args)]
@@ -176,27 +178,29 @@ fn run_with_db_reset_prompt() -> Result<()> {
 fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
     match command {
         Commands::Init(args) => init_files::run_init(cli, args),
+        Commands::Migrate => run_migrate(cli),
         Commands::CleanDone => run_clean_done(cli),
         Commands::Check(args) => run_check(cli, args),
         Commands::TailEvents(args) => run_tail_events(cli, args),
         Commands::Suite(args) => suite_commands::run_suite_command(cli, args),
         Commands::LoopFile(args) => run_loop_file(cli, args),
+        Commands::Refactor => run_refactor(cli),
     }
 }
 
 fn ensure_chief_yaml_exists(project_dir: &Path) -> Result<()> {
-    let config_path = project_dir.join("chief.yaml");
+    let config_path = paths::chief_yaml_path(project_dir);
     if config_path.is_file() {
         return Ok(());
     }
     bail!(
-        "missing required chief config at {}. create chief.yaml (run `chief init` or copy chief.example.yaml)",
+        "missing required chief config at {}. create .chief/chief.yaml (run `chief init` or copy .chief/chief.example.yaml)",
         config_path.display()
     )
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    if !matches!(cli.command, Some(Commands::Init(_))) {
+    if !matches!(cli.command, Some(Commands::Init(_) | Commands::Migrate)) {
         ensure_chief_yaml_exists(&cli.project_dir)?;
     }
 
@@ -240,12 +244,18 @@ fn run(cli: &Cli) -> Result<()> {
         bail!("--file is only supported when flow resolves to 'loop_file'");
     }
 
+    run_todo_queue_flow(cli, context, flow_kind)
+}
+
+fn run_todo_queue_flow(cli: &Cli, context: ProjectContext, flow_kind: FlowKind) -> Result<()> {
     let engine = ChiefEngine::new(context.clone());
     let max_retries = cli
         .max_retries
         .unwrap_or(context.chief_yaml.chief.max_retries.max(1));
+    let head_before = context.git.head_commit(&context.project_dir).ok();
+    let latest_run_before = latest_run_id(&context.store)?;
 
-    match engine.run_todos_until_done_with_retries(
+    let queue_result = engine.run_todos_until_done_with_retries(
         flow_kind,
         cli.model.clone(),
         max_retries,
@@ -263,7 +273,17 @@ fn run(cli: &Cli) -> Result<()> {
         |attempt, total, err| {
             eprintln!("run failed ({attempt}/{total}): {err:#}");
         },
-    ) {
+    );
+
+    let latest_run_after = latest_run_id(&context.store)?;
+    let run_id = latest_run_after
+        .as_deref()
+        .filter(|candidate| latest_run_before.as_deref() != Some(*candidate));
+    if let Err(err) = print_cli_flow_summary(&context, run_id, head_before.as_deref()) {
+        eprintln!("warning: failed to print run summary: {err:#}");
+    }
+
+    match queue_result {
         Ok(()) => {
             println!("all todos are done");
             Ok(())
@@ -271,6 +291,14 @@ fn run(cli: &Cli) -> Result<()> {
         Err(OrchestratorError::Retryable(err)) => Err(err).context("maximum retry count reached"),
         Err(OrchestratorError::Unrecoverable(err)) => Err(err).context("unrecoverable failure"),
     }
+}
+
+fn run_refactor(cli: &Cli) -> Result<()> {
+    if cli.file.is_some() {
+        bail!("--file is only supported when flow resolves to 'loop_file'");
+    }
+    let context = ProjectContext::load(&cli.project_dir)?;
+    run_todo_queue_flow(cli, context, FlowKind::Refactor)
 }
 
 fn run_clean_done(cli: &Cli) -> Result<()> {
@@ -429,12 +457,8 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         .with_context(|| format!("failed to read loop_file input {}", file_path.display()))?;
 
     context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();
-    println!(
-        "loop_file: started {} (showing progress every {}s)",
-        file_path.display(),
-        LOOP_FILE_PROGRESS_HEARTBEAT_INTERVAL.as_secs()
-    );
-    let progress_reporter = LoopFileProgressReporter::start();
+    println!("loop_file: started {}", file_path.display());
+    let head_before = context.git.head_commit(&context.project_dir).ok();
 
     let synthetic_todo = Todo {
         id: Todo::compute_id(
@@ -445,7 +469,7 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         expectations: file_contents,
         priority: 1,
         // Keep loop_file detached from todo queue semantics. Suite checks are
-        // resolved from the active chief.yaml during each iteration.
+        // resolved from the active .chief/chief.yaml during each iteration.
         test_suites: Vec::new(),
         status: TodoStatus::Pending,
         done_at_commit: None,
@@ -476,7 +500,12 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
             println!("loop_file: retry {attempt}/{total} failed: {err:#}");
         },
     );
-    drop(progress_reporter);
+
+    if let Err(err) =
+        print_cli_flow_summary(&context, Some(run_id.as_str()), head_before.as_deref())
+    {
+        eprintln!("warning: failed to print run summary: {err:#}");
+    }
 
     match result {
         Ok(outcome) => {
@@ -506,52 +535,6 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     }
 }
 
-struct LoopFileProgressReporter {
-    stop_signal: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl LoopFileProgressReporter {
-    fn start() -> Self {
-        let stop_signal = Arc::new(AtomicBool::new(false));
-        let stop_signal_thread = Arc::clone(&stop_signal);
-        let worker = std::thread::spawn(move || {
-            let started = Instant::now();
-            let mut last_heartbeat_at = started;
-
-            loop {
-                if stop_signal_thread.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                let now = Instant::now();
-                if now.duration_since(last_heartbeat_at) >= LOOP_FILE_PROGRESS_HEARTBEAT_INTERVAL {
-                    println!(
-                        "loop_file: still running (elapsed {}s)",
-                        now.duration_since(started).as_secs()
-                    );
-                    last_heartbeat_at = now;
-                }
-                std::thread::sleep(LOOP_FILE_PROGRESS_POLL_INTERVAL);
-            }
-        });
-
-        Self {
-            stop_signal,
-            worker: Some(worker),
-        }
-    }
-}
-
-impl Drop for LoopFileProgressReporter {
-    fn drop(&mut self) {
-        self.stop_signal.store(true, Ordering::SeqCst);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
 fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String> {
     let mut chunks = Vec::new();
     for item in inline {
@@ -575,7 +558,7 @@ fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String
 
 fn confirm_db_reset(db_path: &Path) -> Result<bool> {
     eprint!(
-        "Delete {} and rebuild from todos.yaml? [y/N]: ",
+        "Delete {} and rebuild from .chief/todos.yaml? [y/N]: ",
         db_path.display()
     );
     io::stderr().flush()?;
@@ -583,4 +566,147 @@ fn confirm_db_reset(db_path: &Path) -> Result<bool> {
     io::stdin().read_line(&mut input)?;
     let answer = input.trim().to_ascii_lowercase();
     Ok(answer == "y" || answer == "yes")
+}
+
+fn run_migrate(cli: &Cli) -> Result<()> {
+    let project_dir = &cli.project_dir;
+    if !project_dir.exists() {
+        bail!(
+            "project directory does not exist: {}",
+            project_dir.display()
+        );
+    }
+    if !project_dir.is_dir() {
+        bail!("project path is not a directory: {}", project_dir.display());
+    }
+
+    let chief_dir = paths::chief_dir(project_dir);
+    fs::create_dir_all(&chief_dir)
+        .with_context(|| format!("failed to create {}", chief_dir.display()))?;
+
+    let legacy_file_names = [
+        paths::CHIEF_DB_FILE_NAME,
+        paths::CHIEF_YAML_FILE_NAME,
+        paths::CHIEF_EXAMPLE_FILE_NAME,
+        paths::TODOS_FILE_NAME,
+        paths::TODOS_EXAMPLE_FILE_NAME,
+        "todos.exampl.yaml",
+    ];
+
+    let mut moved = 0usize;
+    let mut skipped = 0usize;
+    for file_name in legacy_file_names {
+        let source = paths::legacy_root_file_path(project_dir, file_name);
+        if !source.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        let destination = chief_dir.join(file_name);
+        if destination.exists() {
+            bail!(
+                "cannot migrate {} because destination already exists: {}",
+                source.display(),
+                destination.display()
+            );
+        }
+
+        fs::rename(&source, &destination).with_context(|| {
+            format!(
+                "failed to migrate {} -> {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        moved += 1;
+    }
+
+    init_files::ensure_gitignore_entries(
+        &project_dir.join(".gitignore"),
+        &init_files::INIT_GITIGNORE_ENTRIES,
+    )?;
+    println!(
+        "migrated chief files to {} (moved {moved}, skipped {skipped})",
+        chief_dir.display()
+    );
+    Ok(())
+}
+
+fn latest_run_id(store: &ProjectStore) -> Result<Option<String>> {
+    if !store.db_path.exists() {
+        return Ok(None);
+    }
+    let conn = rusqlite::Connection::open(&store.db_path)
+        .with_context(|| format!("failed to open {}", store.db_path.display()))?;
+    let mut stmt = match conn.prepare("SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1") {
+        Ok(stmt) => stmt,
+        Err(err) if err.to_string().contains("no such table: runs") => return Ok(None),
+        Err(err) => return Err(err).context("failed to prepare latest run query"),
+    };
+    stmt.query_row([], |row| row.get::<_, String>(0))
+        .optional()
+        .context("failed to read latest run id")
+}
+
+fn convergence_iteration_count(store: &ProjectStore, run_id: &str) -> Result<usize> {
+    let conn = rusqlite::Connection::open(&store.db_path)
+        .with_context(|| format!("failed to open {}", store.db_path.display()))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COUNT(*) FROM events
+             WHERE run_id = ?1
+               AND event_type = 'phase_change'
+               AND msg LIKE 'convergence loop iteration %'",
+        )
+        .context("failed to prepare iteration count query")?;
+    let count: i64 = stmt
+        .query_row([run_id], |row| row.get(0))
+        .context("failed to query convergence iteration count")?;
+    Ok(count.max(0) as usize)
+}
+
+fn git_commits_since(project_dir: &Path, head_before: Option<&str>) -> Result<Vec<String>> {
+    let Some(head_before) = head_before else {
+        return Ok(Vec::new());
+    };
+    let range = format!("{head_before}..HEAD");
+    let output = std::process::Command::new("git")
+        .args(["log", "--oneline", range.as_str()])
+        .current_dir(project_dir)
+        .output()
+        .context("failed to run git log --oneline")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn print_cli_flow_summary(
+    context: &ProjectContext,
+    run_id: Option<&str>,
+    head_before: Option<&str>,
+) -> Result<()> {
+    let iterations = match run_id {
+        Some(run_id) => convergence_iteration_count(&context.store, run_id)?,
+        None => 0,
+    };
+    let commits = git_commits_since(&context.project_dir, head_before)?;
+
+    println!("run summary:");
+    println!("iterations: {iterations}");
+    println!("commits: {}", commits.len());
+    println!("git log --oneline:");
+    if commits.is_empty() {
+        println!("(no new commits)");
+    } else {
+        for commit in commits {
+            println!("{commit}");
+        }
+    }
+    Ok(())
 }

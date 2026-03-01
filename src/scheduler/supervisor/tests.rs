@@ -1,4 +1,3 @@
-
 use super::{Scheduler, StopMode, WorkerInvocation, WorkerResult, WorkerRunner};
 use crate::domain::{JobStatus, Todo, TodoStatus};
 use crate::flow::FlowKind;
@@ -67,9 +66,14 @@ fn init_git_repo(path: &Path) {
     );
 
     fs::write(path.join("README.md"), "seed\n").expect("failed to write seed file");
-    fs::write(path.join("chief.yaml"), "chief: {}\n").expect("failed to write chief.yaml fixture");
+    let chief_yaml_path = crate::paths::chief_yaml_path(path);
+    let chief_dir = chief_yaml_path
+        .parent()
+        .expect(".chief/chief.yaml should have a parent directory");
+    fs::create_dir_all(chief_dir).expect("failed to create .chief directory");
+    fs::write(&chief_yaml_path, "chief: {}\n").expect("failed to write chief.yaml fixture");
     let add = Command::new("git")
-        .args(["add", "README.md", "chief.yaml"])
+        .args(["add", "README.md", ".chief/chief.yaml"])
         .current_dir(path)
         .output()
         .expect("failed to git add seed file");

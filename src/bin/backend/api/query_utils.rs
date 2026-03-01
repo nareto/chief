@@ -7,7 +7,10 @@ use crate::api::error::ApiError;
 use crate::api::types::PhaseIteration;
 
 pub(crate) fn is_internal_workspace_state_file(path: &str) -> bool {
-    path == "chief.db" || path.starts_with("chief.db-")
+    path == ".chief/chief.db"
+        || path.starts_with(".chief/chief.db-")
+        || path == "chief.db"
+        || path.starts_with("chief.db-")
 }
 
 pub(crate) fn resolve_last_done_todo_committed_at(
@@ -145,6 +148,7 @@ pub(crate) fn parse_phase(value: &str) -> Result<Phase, ApiError> {
         "green" => Ok(Phase::Green),
         "single_prompt" => Ok(Phase::SinglePrompt),
         "loop_file" => Ok(Phase::LoopFile),
+        "refactor" => Ok(Phase::Refactor),
         "post_green" => Ok(Phase::PostGreen),
         "exit" => Ok(Phase::Exit),
         other => Err(ApiError::unprocessable(format!(

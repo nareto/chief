@@ -29,7 +29,7 @@ impl<'a> FlowExecution<'a> {
         &self,
         requested_suites: &[TestSuiteConfig],
     ) -> Result<(ChiefConfig, Vec<TestSuiteConfig>)> {
-        let config_path = self.project_dir.join("chief.yaml");
+        let config_path = crate::paths::chief_yaml_path(&self.project_dir);
         let reloaded = ChiefYaml::load_or_default(&config_path).with_context(|| {
             format!(
                 "failed to reload chief config from active worktree {}",

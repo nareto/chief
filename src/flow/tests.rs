@@ -31,6 +31,7 @@ fn parses_known_flow_kinds() {
         FlowKind::SinglePrompt
     );
     assert_eq!(FlowKind::from_str("loop_file").unwrap(), FlowKind::LoopFile);
+    assert_eq!(FlowKind::from_str("refactor").unwrap(), FlowKind::Refactor);
     assert_eq!(FlowKind::from_str(" TDD ").unwrap(), FlowKind::Tdd);
 }
 
@@ -49,10 +50,12 @@ fn build_flow_matches_kind() {
     let tdd = build_flow(FlowKind::Tdd, 6, 2);
     let single_prompt = build_flow(FlowKind::SinglePrompt, 6, 2);
     let loop_file = build_flow(FlowKind::LoopFile, 20, 2);
+    let refactor = build_flow(FlowKind::Refactor, 20, 2);
 
     assert_eq!(tdd.name(), "tdd");
     assert_eq!(single_prompt.name(), "single_prompt");
     assert_eq!(loop_file.name(), "loop_file");
+    assert_eq!(refactor.name(), "refactor");
 }
 
 fn temp_project_dir() -> PathBuf {
@@ -139,6 +142,35 @@ impl CodingAgent for SuccessfulAgent {
     }
 }
 
+#[derive(Debug, Default)]
+struct CountingSuccessfulAgent {
+    runs: Mutex<usize>,
+}
+
+impl CountingSuccessfulAgent {
+    fn runs(&self) -> usize {
+        *self.runs.lock().expect("runs mutex poisoned")
+    }
+}
+
+impl CodingAgent for CountingSuccessfulAgent {
+    fn name(&self) -> &str {
+        "counting-success"
+    }
+
+    fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
+        let mut runs = self.runs.lock().expect("runs mutex poisoned");
+        *runs += 1;
+        Ok(AgentOutput {
+            exit_code: 0,
+            command: "counting-success-agent".to_owned(),
+            stdout: String::new(),
+            stderr: String::new(),
+            merged_output: String::new(),
+        })
+    }
+}
+
 #[derive(Debug)]
 struct OneShotDirtyAgent {
     dirty_file: PathBuf,
@@ -211,6 +243,34 @@ impl PromptStore for RecordingPromptStore {
             .expect("rendered suites mutex poisoned")
             .push(suite_names);
         Ok("single prompt request".to_owned())
+    }
+
+    fn exists(&self, _template_name: &str) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+struct TemplateRecordingPromptStore {
+    template_names: Mutex<Vec<String>>,
+}
+
+impl TemplateRecordingPromptStore {
+    fn template_names(&self) -> Vec<String> {
+        self.template_names
+            .lock()
+            .expect("template names mutex poisoned")
+            .clone()
+    }
+}
+
+impl PromptStore for TemplateRecordingPromptStore {
+    fn render_json(&self, template_name: &str, _data: &Value) -> Result<String> {
+        self.template_names
+            .lock()
+            .expect("template names mutex poisoned")
+            .push(template_name.to_owned());
+        Ok(format!("prompt:{template_name}"))
     }
 
     fn exists(&self, _template_name: &str) -> bool {
@@ -2382,7 +2442,7 @@ fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
     let frontend_test = format!("printf FT >> {}", marker_file.display());
 
     fs::write(
-        project_dir.join("chief.yaml"),
+        crate::paths::chief_yaml_path(&project_dir),
         format!(
             "chief:\n  suite_command_timeout_seconds: 1800\nsuites:\n  - name: backend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{backend_test}\"\n    lint_command: \"{backend_lint}\"\n  - name: frontend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{frontend_test}\"\n    lint_command: \"{frontend_lint}\"\n"
         ),
@@ -2431,8 +2491,8 @@ fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
     let marker_contents =
         fs::read_to_string(&marker_file).expect("suite command marker should exist");
     assert_eq!(
-        marker_contents, "BLFLBTFT",
-        "loop_file should run lint and test commands for every configured suite"
+        marker_contents, "BLFLBTFTBLFLBTFT",
+        "loop_file should run lint and test commands during convergence and convergence review"
     );
 
     let rendered = prompts.rendered_suite_names();
@@ -2568,8 +2628,8 @@ fn loop_file_agent_commit_with_clean_tree_does_not_count_as_stable() {
     assert_eq!(outcome.commit_hash.as_deref(), Some("mock-final-commit-1"));
     assert_eq!(
         agent.runs(),
-        2,
-        "first iteration should retry because HEAD changed, requiring a second iteration"
+        3,
+        "loop_file should run an additional convergence review after convergence is reached"
     );
 
     let commit_messages = git.commit_messages();
@@ -2609,6 +2669,160 @@ fn loop_file_agent_commit_with_clean_tree_does_not_count_as_stable() {
             .get("head_commit_after")
             .and_then(Value::as_str),
         Some("mock-head-1")
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn loop_file_restarts_convergence_when_bd_has_ready_tickets() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+    fs::write(
+        crate::paths::chief_yaml_path(&project_dir),
+        "chief:\n  suite_command_timeout_seconds: 1800\n",
+    )
+    .expect("chief config should be written");
+
+    let bd_script = project_dir.join("bd");
+    fs::write(
+        &bd_script,
+        "#!/bin/sh\nset -eu\nstate=\".bd_ready_once\"\nif [ ! -f \"$state\" ]; then\n  printf '[{\"id\":\"chief-1\"}]\\n'\n  : > \"$state\"\nelse\n  printf '[]\\n'\nfi\n",
+    )
+    .expect("bd script should be written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bd_script)
+            .expect("metadata should be readable")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bd_script, perms).expect("script should be executable");
+    }
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "loop_file convergence reset for bd tickets".to_owned(),
+        expectations: "task body".to_owned(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = TemplateRecordingPromptStore::default();
+    let agent = CountingSuccessfulAgent::default();
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let flow = build_flow(FlowKind::LoopFile, 4, 1);
+    flow.run_todo(&mut execution)
+        .expect("loop_file flow should complete after bd restart");
+
+    assert_eq!(
+        agent.runs(),
+        4,
+        "loop_file should run two convergence passes (iteration + convergence each pass)"
+    );
+    assert_eq!(
+        prompts.template_names(),
+        vec![
+            "loop_file_prompt.md".to_owned(),
+            "loop_file_convergence.md".to_owned(),
+            "loop_file_prompt.md".to_owned(),
+            "loop_file_convergence.md".to_owned(),
+        ],
+    );
+
+    let events = store
+        .query_events(crate::storage::EventQuery {
+            limit: 200,
+            ..crate::storage::EventQuery::default()
+        })
+        .expect("event query should succeed");
+    assert!(
+        events.iter().any(|event| {
+            event
+                .msg
+                .starts_with("Retry cleanup: discarded local git changes before loop bd/")
+        }),
+        "loop_file should log a retry-reset marker before restarting convergence after bd tickets"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn refactor_alternates_structural_and_mechanical_prompts() {
+    let project_dir = temp_project_dir();
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "run refactor cleanup loop".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = TemplateRecordingPromptStore::default();
+    let agent = SuccessfulAgent;
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let flow = build_flow(FlowKind::Refactor, 4, 2);
+    flow.run_todo(&mut execution)
+        .expect("refactor flow should complete");
+
+    let rendered_templates = prompts.template_names();
+    assert_eq!(
+        rendered_templates,
+        vec![
+            "structural_cleanup.md".to_owned(),
+            "mechanical_cleanup.md".to_owned(),
+        ],
+        "refactor flow should alternate prompts across convergence iterations"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -2802,7 +3016,7 @@ fn run_test_and_lint_reloads_chief_yaml_suite_commands_between_iterations() {
     let second_command = format!("printf second >> {}", marker_file.display());
 
     fs::write(
-        project_dir.join("chief.yaml"),
+        crate::paths::chief_yaml_path(&project_dir),
         format!(
             "chief:\n  suite_command_timeout_seconds: 1800\nsuites:\n  - name: backend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{first_command}\"\n"
         ),
@@ -2852,7 +3066,7 @@ fn run_test_and_lint_reloads_chief_yaml_suite_commands_between_iterations() {
     assert!(first_ok, "first lint+test run should pass");
 
     fs::write(
-        project_dir.join("chief.yaml"),
+        crate::paths::chief_yaml_path(&project_dir),
         format!(
             "chief:\n  suite_command_timeout_seconds: 1800\nsuites:\n  - name: backend\n    language: shell\n    framework: shell\n    test_root: .\n    test_command: \"{second_command}\"\n"
         ),

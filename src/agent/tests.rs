@@ -24,6 +24,23 @@ fn codex_command_uses_full_permissions_without_sandbox() {
 }
 
 #[test]
+fn codex_reasoning_effort_maps_xhigh_to_high() {
+    let agent = CodexAgent {
+        model: Some("gpt-5".to_owned()),
+        model_reasoning_effort: Some("xhigh".to_owned()),
+        extra_args: Vec::new(),
+    };
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .iter()
+            .any(|arg| arg == "model_reasoning_effort=\"high\""),
+        "codex command should normalize xhigh to high: {command:?}"
+    );
+}
+
+#[test]
 fn claude_command_uses_full_permissions_mode() {
     let agent = ClaudeAgent {
         model: None,

@@ -137,10 +137,7 @@ fn emit_event_to_stdout(event: &EventRecord) {
     let phase = format_phase_label(event.phase, color);
     let event_type = style(event.event_type.as_str(), "\x1b[34m", color);
     let timestamp = style(&ts, "\x1b[90m", color);
-    let line = format!(
-        "[{timestamp}] {level} {phase} {event_type} - {}",
-        event.msg
-    );
+    let line = format!("[{timestamp}] {level} {phase} {event_type} - {}", event.msg);
     println!("{line}");
     let _ = io::stdout().flush();
 }

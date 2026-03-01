@@ -37,6 +37,13 @@ fn init_git_repo(path: &std::path::Path) {
     assert!(status.success(), "git init should succeed");
 }
 
+fn write_chief_yaml(project_dir: &std::path::Path, content: &str) {
+    fs::create_dir_all(chief::paths::chief_dir(project_dir))
+        .expect(".chief directory should be created");
+    fs::write(chief::paths::chief_yaml_path(project_dir), content)
+        .expect("chief.yaml should be written");
+}
+
 #[test]
 fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
     let temp = TempDir::new("run-missing-chief-yaml");
@@ -62,7 +69,7 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
         "error should include chief.yaml path: {rendered}"
     );
     assert!(
-        !temp.path.join("chief.db").exists(),
+        !chief::paths::chief_db_path(&temp.path).exists(),
         "rejected run should not execute todo processing or create chief.db"
     );
 }
@@ -71,8 +78,7 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
 fn run_requires_file_when_loop_file_flow_is_selected() {
     let temp = TempDir::new("run-loop-file-missing-file");
     init_git_repo(&temp.path);
-    fs::write(temp.path.join("chief.yaml"), "chief:\n  flow: loop_file\n")
-        .expect("chief.yaml should be written");
+    write_chief_yaml(&temp.path, "chief:\n  flow: loop_file\n");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -105,7 +111,7 @@ fn ensure_gitignore_entries_creates_file_when_missing() {
     assert!(changed);
     assert_eq!(
         fs::read_to_string(gitignore_path).expect("gitignore should exist"),
-        "chief.db\nchief.example.yaml\ntodos.example.yaml\n"
+        ".chief/chief.db\n.chief/chief.example.yaml\n.chief/todos.example.yaml\n"
     );
 }
 
@@ -113,7 +119,8 @@ fn ensure_gitignore_entries_creates_file_when_missing() {
 fn ensure_gitignore_entries_appends_only_missing_entries() {
     let temp = TempDir::new("gitignore-append");
     let gitignore_path = temp.path.join(".gitignore");
-    fs::write(&gitignore_path, "target/\nchief.db").expect("seed gitignore should be written");
+    fs::write(&gitignore_path, "target/\n.chief/chief.db")
+        .expect("seed gitignore should be written");
 
     let changed =
         init_files::ensure_gitignore_entries(&gitignore_path, &init_files::INIT_GITIGNORE_ENTRIES)
@@ -122,7 +129,7 @@ fn ensure_gitignore_entries_appends_only_missing_entries() {
     assert!(changed);
     assert_eq!(
         fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
-        "target/\nchief.db\nchief.example.yaml\ntodos.example.yaml\n"
+        "target/\n.chief/chief.db\n.chief/chief.example.yaml\n.chief/todos.example.yaml\n"
     );
 }
 
@@ -132,7 +139,7 @@ fn ensure_gitignore_entries_is_idempotent() {
     let gitignore_path = temp.path.join(".gitignore");
     fs::write(
         &gitignore_path,
-        "/chief.db\n./chief.example.yaml\ntodos.example.yaml\n",
+        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/todos.example.yaml\n",
     )
     .expect("seed gitignore should be written");
 
@@ -143,7 +150,7 @@ fn ensure_gitignore_entries_is_idempotent() {
     assert!(!changed);
     assert_eq!(
         fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
-        "/chief.db\n./chief.example.yaml\ntodos.example.yaml\n"
+        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/todos.example.yaml\n"
     );
 }
 
@@ -255,10 +262,19 @@ fn parse_loop_file_command() {
 }
 
 #[test]
+fn parse_refactor_command() {
+    let cli = Cli::try_parse_from(["chief", "refactor"]).expect("refactor command should parse");
+
+    let Some(Commands::Refactor) = cli.command else {
+        panic!("expected refactor command");
+    };
+}
+
+#[test]
 fn loop_file_fails_when_input_file_is_missing() {
     let temp = TempDir::new("loop-file-missing-input");
     init_git_repo(&temp.path);
-    fs::write(temp.path.join("chief.yaml"), "chief: {}\n").expect("chief.yaml should be written");
+    write_chief_yaml(&temp.path, "chief: {}\n");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -285,11 +301,18 @@ fn loop_file_fails_when_input_file_is_missing() {
 fn init_writes_full_default_chief_yaml_block() {
     let temp = TempDir::new("init-default-chief-yaml");
     let chief_root = temp.path.join("chief-root");
-    fs::create_dir_all(&chief_root).expect("chief-root dir should be created");
-    fs::write(chief_root.join("chief.example.yaml"), "chief: {}\n")
-        .expect("chief.example.yaml should be created");
-    fs::write(chief_root.join("todos.example.yaml"), "todos: []\n")
-        .expect("todos.example.yaml should be created");
+    let chief_root_config_dir = chief_root.join(".chief");
+    fs::create_dir_all(&chief_root_config_dir).expect("chief-root dir should be created");
+    fs::write(
+        chief_root_config_dir.join("chief.example.yaml"),
+        "chief: {}\n",
+    )
+    .expect("chief.example.yaml should be created");
+    fs::write(
+        chief_root_config_dir.join("todos.example.yaml"),
+        "todos: []\n",
+    )
+    .expect("todos.example.yaml should be created");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -310,15 +333,15 @@ fn init_writes_full_default_chief_yaml_block() {
     };
     init_files::run_init(&cli, args).expect("init should succeed");
 
-    let chief_yaml =
-        fs::read_to_string(temp.path.join("chief.yaml")).expect("chief.yaml should be readable");
+    let chief_yaml = fs::read_to_string(chief::paths::chief_yaml_path(&temp.path))
+        .expect("chief.yaml should be readable");
     assert_eq!(chief_yaml, init_files::INIT_CHIEF_YAML_CONTENT);
     assert!(
         !chief_yaml.contains("\n  max_retries:"),
         "init default chief.yaml should not include max_retries"
     );
     assert!(
-        !temp.path.join("todos.yaml").exists(),
+        !chief::paths::todos_path(&temp.path).exists(),
         "init should not create todos.yaml"
     );
     assert!(
@@ -331,12 +354,9 @@ fn init_writes_full_default_chief_yaml_block() {
 fn run_rejects_file_option_for_non_loop_file_flows() {
     let temp = TempDir::new("run-file-option-invalid-flow");
     init_git_repo(&temp.path);
-    fs::write(
-        temp.path.join("chief.yaml"),
-        "chief:\n  flow: single_prompt\n",
-    )
-    .expect("chief.yaml should be written");
-    fs::write(temp.path.join("todos.yaml"), "todos: []\n").expect("todos.yaml should be written");
+    write_chief_yaml(&temp.path, "chief:\n  flow: single_prompt\n");
+    fs::write(chief::paths::todos_path(&temp.path), "todos: []\n")
+        .expect("todos.yaml should be written");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -376,4 +396,57 @@ fn resolve_suite_command_replaces_target_placeholder() {
     )
     .expect("test_init");
     assert_eq!(test_init_override, "echo init crate::mod");
+}
+
+#[test]
+fn migrate_moves_legacy_root_files_into_dot_chief() {
+    let temp = TempDir::new("migrate-legacy-files");
+    fs::write(temp.path.join("chief.yaml"), "chief: {}\n").expect("legacy chief.yaml should exist");
+    fs::write(temp.path.join("todos.yaml"), "todos: []\n").expect("legacy todos.yaml should exist");
+    fs::write(temp.path.join("chief.example.yaml"), "chief: {}\n")
+        .expect("legacy chief.example.yaml should exist");
+    fs::write(temp.path.join("todos.example.yaml"), "todos: []\n")
+        .expect("legacy todos.example.yaml should exist");
+    fs::write(temp.path.join("chief.db"), "sqlite").expect("legacy chief.db should exist");
+
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        flow: None,
+        model: None,
+        max_retries: None,
+        file: None,
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: Some(Commands::Migrate),
+    };
+
+    run(&cli).expect("migrate command should succeed");
+
+    assert!(
+        !temp.path.join("chief.yaml").exists(),
+        "legacy chief.yaml should be moved"
+    );
+    assert!(
+        !temp.path.join("todos.yaml").exists(),
+        "legacy todos.yaml should be moved"
+    );
+    assert!(
+        chief::paths::chief_yaml_path(&temp.path).exists(),
+        "migrated .chief/chief.yaml should exist"
+    );
+    assert!(
+        chief::paths::todos_path(&temp.path).exists(),
+        "migrated .chief/todos.yaml should exist"
+    );
+    assert!(
+        chief::paths::chief_db_path(&temp.path).exists(),
+        "migrated .chief/chief.db should exist"
+    );
+
+    let gitignore = fs::read_to_string(temp.path.join(".gitignore"))
+        .expect(".gitignore should be created during migrate");
+    assert!(
+        gitignore.contains(".chief/chief.db"),
+        "migrate should add .chief/chief.db ignore entry"
+    );
 }

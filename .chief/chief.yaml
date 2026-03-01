@@ -9,7 +9,7 @@ chief:
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
   use_agent_log_truncation_for_stdout_logs: false
-  model: gpt-5.3
+  model: gpt-5.3-codex
 suites:
   - name: backend
     language: Rust

@@ -2,7 +2,10 @@ use super::*;
 
 impl<'a> FlowExecution<'a> {
     fn is_prompt_family_phase(phase: Option<Phase>) -> bool {
-        matches!(phase, Some(Phase::SinglePrompt | Phase::LoopFile))
+        matches!(
+            phase,
+            Some(Phase::SinglePrompt | Phase::LoopFile | Phase::Refactor)
+        )
     }
 
     pub fn log_event(

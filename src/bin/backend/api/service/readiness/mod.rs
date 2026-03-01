@@ -225,7 +225,7 @@ impl ApiService {
 
         info!(
             project,
-            "skipping pre-run checks because previous checks succeeded and chief.yaml is unchanged"
+            "skipping pre-run checks because previous checks succeeded and .chief/chief.yaml is unchanged"
         );
         Ok(false)
     }

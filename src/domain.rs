@@ -13,6 +13,7 @@ pub enum Phase {
     Green,
     SinglePrompt,
     LoopFile,
+    Refactor,
     PostGreen,
     Exit,
 }
@@ -26,6 +27,7 @@ impl Phase {
             Self::Green => "green",
             Self::SinglePrompt => "single_prompt",
             Self::LoopFile => "loop_file",
+            Self::Refactor => "refactor",
             Self::PostGreen => "post_green",
             Self::Exit => "exit",
         }

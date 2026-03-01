@@ -63,11 +63,12 @@ impl ApiError {
     pub fn chief_yaml_missing(config_path: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            message: "chief.yaml is required before starting a run for this project".to_owned(),
+            message: ".chief/chief.yaml is required before starting a run for this project"
+                .to_owned(),
             code: Some("chief_yaml_missing".to_owned()),
             details: Some(serde_json::json!({
                 "config_path": config_path.into(),
-                "hint": "create chief.yaml (run `chief init` or copy chief.example.yaml)",
+                "hint": "create .chief/chief.yaml (run `chief init` or copy .chief/chief.example.yaml)",
             })),
         }
     }
@@ -88,7 +89,7 @@ impl ApiError {
             return Self {
                 status: StatusCode::CONFLICT,
                 message:
-                    "chief.db is inconsistent for this project. Reset is required before continuing."
+                    ".chief/chief.db is inconsistent for this project. Reset is required before continuing."
                         .to_owned(),
                 code: Some("db_reset_required".to_owned()),
                 details: Some(serde_json::json!({

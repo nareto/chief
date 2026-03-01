@@ -1,4 +1,5 @@
 use crate::domain::{EventType, Phase, TodoFile};
+use crate::paths;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -110,8 +111,8 @@ impl ProjectStore {
     pub fn new(project_dir: impl AsRef<Path>) -> Self {
         let project_dir = project_dir.as_ref().to_path_buf();
         Self {
-            db_path: project_dir.join("chief.db"),
-            todos_path: project_dir.join("todos.yaml"),
+            db_path: paths::chief_db_path(&project_dir),
+            todos_path: paths::todos_path(&project_dir),
             project_dir,
         }
     }
@@ -120,6 +121,11 @@ impl ProjectStore {
         if !self.project_dir.exists() {
             fs::create_dir_all(&self.project_dir)
                 .with_context(|| format!("failed to create {}", self.project_dir.display()))?;
+        }
+        let chief_dir = paths::chief_dir(&self.project_dir);
+        if !chief_dir.exists() {
+            fs::create_dir_all(&chief_dir)
+                .with_context(|| format!("failed to create {}", chief_dir.display()))?;
         }
         if !self.todos_path.exists() {
             let initial = serde_yaml::to_string(&TodoFile::default())?;
