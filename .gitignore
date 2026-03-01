@@ -11,3 +11,5 @@ frontend/.next
 frontend/tsconfig.tsbuildinfo
 .serena
 .env
+
+ref_1.md
