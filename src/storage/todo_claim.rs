@@ -9,7 +9,7 @@ impl ProjectStore {
     pub fn claim_next_pending_todo(&self) -> Result<Option<Todo>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        let normalized_legacy = self.normalize_legacy_attempted_todos_to_pending(&tx)?;
+        self.normalize_legacy_attempted_todos_to_pending(&tx)?;
 
         let mut stmt = tx.prepare(
             "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
@@ -44,9 +44,6 @@ impl ProjectStore {
             }
         }
 
-        if normalized_legacy > 0 || claimed.is_some() {
-            self.sync_todos_file_from_conn(&tx)?;
-        }
         tx.commit()?;
         Ok(claimed)
     }
@@ -54,7 +51,7 @@ impl ProjectStore {
     pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        let normalized_legacy = self.normalize_legacy_attempted_todos_to_pending(&tx)?;
+        self.normalize_legacy_attempted_todos_to_pending(&tx)?;
 
         let mut stmt = tx.prepare(
             "SELECT id, priority, todo, expectations, test_suites, status, done_at_commit
@@ -92,9 +89,6 @@ impl ProjectStore {
             }
         }
 
-        if normalized_legacy > 0 || claimed.is_some() {
-            self.sync_todos_file_from_conn(&tx)?;
-        }
         tx.commit()?;
         Ok(claimed)
     }

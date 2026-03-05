@@ -1,4 +1,4 @@
-use crate::domain::{EventType, Phase, TodoFile};
+use crate::domain::{EventType, Phase};
 use crate::paths;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -54,7 +54,6 @@ pub fn db_reset_required_from_anyhow(err: &anyhow::Error) -> Option<DbResetRequi
 pub struct ProjectStore {
     pub project_dir: PathBuf,
     pub db_path: PathBuf,
-    pub todos_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -111,7 +110,6 @@ impl ProjectStore {
         let project_dir = project_dir.as_ref().to_path_buf();
         Self {
             db_path: paths::chief_db_path(&project_dir),
-            todos_path: paths::todos_path(&project_dir),
             project_dir,
         }
     }
@@ -126,22 +124,6 @@ impl ProjectStore {
             fs::create_dir_all(&chief_dir)
                 .with_context(|| format!("failed to create {}", chief_dir.display()))?;
         }
-        if !self.todos_path.exists() {
-            let initial = serde_yaml::to_string(&TodoFile::default())?;
-            fs::write(&self.todos_path, format!("{initial}\n"))
-                .with_context(|| format!("failed to initialize {}", self.todos_path.display()))?;
-        }
-        Ok(())
-    }
-
-    pub fn reset_db_from_todos_file(&self) -> Result<()> {
-        self.reset_db_file()?;
-        let conn = Connection::open(&self.db_path)
-            .with_context(|| format!("failed to open {} for reset", self.db_path.display()))?;
-        self.ensure_schema_ready(&conn)?;
-        drop(conn);
-        self.sync_todos_from_file()?;
-        self.reset_in_progress_todos_to_pending()?;
         Ok(())
     }
 

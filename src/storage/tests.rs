@@ -38,6 +38,7 @@ fn init_git_repo(project_dir: &Path) {
         &["config", "user.email", "chief-storage-tests@example.com"],
     );
     run_git(project_dir, &["config", "user.name", "Chief Storage Tests"]);
+    fs::write(project_dir.join("README.md"), "seed\n").expect("failed to write seed file");
     run_git(project_dir, &["add", "--all"]);
     run_git(project_dir, &["commit", "-m", "chore: baseline"]);
 }

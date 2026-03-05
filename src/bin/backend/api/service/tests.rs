@@ -217,6 +217,7 @@ fn init_git_repo(project_dir: &Path) {
         project_dir,
         &["config", "user.name", "Chief API Service Tests"],
     );
+    fs::write(project_dir.join("README.md"), "seed\n").expect("failed to write seed file");
 }
 
 fn seed_todos(store: &ProjectStore, todos_yaml: &str) {

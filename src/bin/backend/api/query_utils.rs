@@ -7,7 +7,9 @@ use crate::api::error::ApiError;
 use crate::api::types::PhaseIteration;
 
 pub(crate) fn is_internal_workspace_state_file(path: &str) -> bool {
-    path == ".chief/chief.db"
+    path == ".chief"
+        || path == ".chief/"
+        || path == ".chief/chief.db"
         || path.starts_with(".chief/chief.db-")
         || path == ".chief/todos.yaml"
         || path == "chief.db"

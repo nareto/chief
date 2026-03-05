@@ -5,14 +5,11 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] = [
-    ".chief/chief.db",
-    ".chief/chief.example.yaml",
-    ".chief/todos.example.yaml",
-];
+pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 2] =
+    [".chief/chief.db", ".chief/chief.example.yaml"];
 pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   flow: loop_file
-  # flow: refactor # uncomment to run queued workflow using .chief/todos.yaml
+  # flow: refactor # uncomment to run queued workflow
   agent: codex
   agent_extra_args: []
   max_loop_iterations: 20
@@ -42,12 +39,8 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
         project_dir.join(&args.chief_root)
     };
     let chief_example_source = paths::chief_example_path(&chief_root_for_checks);
-    let todos_example_source = paths::todos_example_path(&chief_root_for_checks);
     if !chief_example_source.is_file() {
         bail!("example file not found: {}", chief_example_source.display());
-    }
-    if !todos_example_source.is_file() {
-        bail!("example file not found: {}", todos_example_source.display());
     }
 
     let chief_dir = paths::chief_dir(project_dir);
@@ -55,7 +48,6 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
         .with_context(|| format!("failed to create {}", chief_dir.display()))?;
 
     let chief_example_link = paths::chief_example_path(project_dir);
-    let todos_example_link = paths::todos_example_path(project_dir);
     let chief_yaml_path = paths::chief_yaml_path(project_dir);
 
     let mut created = 0usize;
@@ -66,12 +58,6 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
     } else {
         skipped += 1;
     }
-    if create_file_symlink_if_missing(&todos_example_source, &todos_example_link)? {
-        created += 1;
-    } else {
-        skipped += 1;
-    }
-
     if write_file_if_missing(&chief_yaml_path, INIT_CHIEF_YAML_CONTENT)? {
         created += 1;
     } else {

@@ -1,10 +1,9 @@
 use super::parsing::parse_todo_row;
 use super::*;
-use crate::domain::{Todo, TodoFile, TodoStatus};
+use crate::domain::{Todo, TodoStatus};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::fs;
 
 impl ProjectStore {
     pub fn reset_in_progress_todos_to_pending(&self) -> Result<usize> {
@@ -20,44 +19,8 @@ impl ProjectStore {
                 TodoStatus::InProgress.as_str(),
             ],
         )?;
-        if changed > 0 {
-            self.sync_todos_file_from_conn(&tx)?;
-        }
         tx.commit()?;
         Ok(changed)
-    }
-
-    pub fn load_todo_file(&self) -> Result<TodoFile> {
-        let content = fs::read_to_string(&self.todos_path)
-            .with_context(|| format!("failed to read {}", self.todos_path.display()))?;
-        if content.trim().is_empty() {
-            return Ok(TodoFile::default());
-        }
-        let parsed: TodoFile = serde_yaml::from_str(&content)
-            .with_context(|| format!("invalid YAML in {}", self.todos_path.display()))?;
-        Ok(TodoFile {
-            todos: parsed.todos.into_iter().map(Todo::normalize).collect(),
-        })
-    }
-
-    pub fn save_todo_file(&self, todo_file: &TodoFile) -> Result<()> {
-        let normalized = TodoFile {
-            todos: todo_file
-                .todos
-                .iter()
-                .cloned()
-                .map(Todo::normalize)
-                .collect(),
-        };
-        let body = serde_yaml::to_string(&normalized)?;
-        fs::write(&self.todos_path, format!("{body}\n"))
-            .with_context(|| format!("failed to write {}", self.todos_path.display()))?;
-        Ok(())
-    }
-
-    pub fn sync_todos_from_file(&self) -> Result<()> {
-        let todos = self.load_todo_file()?.todos;
-        self.replace_todos(todos)
     }
 
     pub fn replace_todos(&self, todos: Vec<Todo>) -> Result<()> {
@@ -85,7 +48,6 @@ impl ProjectStore {
             )?;
         }
 
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -133,7 +95,6 @@ impl ProjectStore {
         if changed == 0 {
             return Err(anyhow!("todo '{todo_id}' not found"));
         }
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -143,7 +104,6 @@ impl ProjectStore {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         self.upsert_todo_row(&tx, &normalized)?;
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
         Ok(normalized)
     }
@@ -188,7 +148,6 @@ impl ProjectStore {
         }
 
         self.upsert_todo_row(&tx, &next)?;
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
         Ok(next)
     }
@@ -202,7 +161,6 @@ impl ProjectStore {
             return Err(anyhow!("todo '{todo_id}' not found"));
         }
 
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -215,9 +173,6 @@ impl ProjectStore {
             "DELETE FROM todos WHERE status = ?1",
             params![TodoStatus::Done.as_str()],
         )?;
-        if deleted > 0 {
-            self.sync_todos_file_from_conn(&tx)?;
-        }
         tx.commit()?;
         Ok(deleted)
     }
@@ -229,9 +184,6 @@ impl ProjectStore {
             "DELETE FROM todos WHERE status = ?1 AND done_at_commit IS NOT NULL",
             params![TodoStatus::Done.as_str()],
         )?;
-        if deleted > 0 {
-            self.sync_todos_file_from_conn(&tx)?;
-        }
         tx.commit()?;
         Ok(deleted)
     }
@@ -245,11 +197,6 @@ impl ProjectStore {
         let rows = stmt.query_map([], parse_todo_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to read todos")
-    }
-
-    pub(super) fn sync_todos_file_from_conn(&self, conn: &Connection) -> Result<()> {
-        let todos = self.list_todos_with_conn(conn)?;
-        self.save_todo_file(&TodoFile { todos })
     }
 
     fn upsert_todo_row(&self, conn: &Connection, todo: &Todo) -> Result<()> {

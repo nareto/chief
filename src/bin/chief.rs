@@ -584,9 +584,6 @@ fn run_migrate(cli: &Cli) -> Result<()> {
         paths::CHIEF_DB_FILE_NAME,
         paths::CHIEF_YAML_FILE_NAME,
         paths::CHIEF_EXAMPLE_FILE_NAME,
-        paths::TODOS_FILE_NAME,
-        paths::TODOS_EXAMPLE_FILE_NAME,
-        "todos.exampl.yaml",
     ];
 
     let mut moved = 0usize;

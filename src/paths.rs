@@ -4,8 +4,6 @@ pub const CHIEF_DIR_NAME: &str = ".chief";
 pub const CHIEF_DB_FILE_NAME: &str = "chief.db";
 pub const CHIEF_YAML_FILE_NAME: &str = "chief.yaml";
 pub const CHIEF_EXAMPLE_FILE_NAME: &str = "chief.example.yaml";
-pub const TODOS_FILE_NAME: &str = "todos.yaml";
-pub const TODOS_EXAMPLE_FILE_NAME: &str = "todos.example.yaml";
 
 pub fn chief_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(CHIEF_DIR_NAME)
@@ -21,14 +19,6 @@ pub fn chief_yaml_path(project_dir: &Path) -> PathBuf {
 
 pub fn chief_example_path(project_dir: &Path) -> PathBuf {
     chief_dir(project_dir).join(CHIEF_EXAMPLE_FILE_NAME)
-}
-
-pub fn todos_path(project_dir: &Path) -> PathBuf {
-    chief_dir(project_dir).join(TODOS_FILE_NAME)
-}
-
-pub fn todos_example_path(project_dir: &Path) -> PathBuf {
-    chief_dir(project_dir).join(TODOS_EXAMPLE_FILE_NAME)
 }
 
 pub fn legacy_root_file_path(project_dir: &Path, file_name: &str) -> PathBuf {
