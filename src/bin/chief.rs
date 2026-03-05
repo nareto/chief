@@ -31,6 +31,7 @@ use std::sync::atomic::AtomicBool;
 struct Cli {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
+    /// Flow to run (`loop_file` or `refactor`). Defaults to `.chief/chief.yaml`.
     #[arg(long)]
     flow: Option<String>,
     #[arg(long)]
@@ -52,7 +53,7 @@ struct Cli {
 enum Commands {
     /// Initialize Chief config files in a new project directory.
     Init(InitArgs),
-    /// Move legacy root-level chief files into .chief/.
+    /// Move legacy root-level `chief.yaml`, `chief.example.yaml`, and `chief.db` into `.chief/`.
     Migrate,
     /// Remove completed todos that have a commit hash.
     CleanDone,

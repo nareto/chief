@@ -1,36 +1,31 @@
 # Chief (Rust)
 
-**Chief** is an automated TDD orchestrator that enforces discipline on your coding agent: write failing tests first, then implement, then verify.
+**Chief** is an automated coding-agent orchestrator for file-driven loops and queued refactor work with reproducible checks.
 
 This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralph/) from Geoffrey Huntley.
 
 ## How It Works
 
-Chief runs a phase-based loop for each todo:
+Chief supports two runtime flows:
 
-1. **RED**: write or refine tests
-  - stability required to pass phase (see next section)
-2. **GREEN**: implement features
-  - tests must pass to pass the phase.
-3. **POST_GREEN**: optional lint/build commands after tests pass.
-4. **Commit**: auto-commit and tag on success.
+1. **`loop_file`**: run one convergence loop from a markdown file (`--file`) and exit.
+2. **`refactor`**: claim queued work items from SQLite, run convergence iterations, and commit successful outcomes.
 
-Chief records all events (agent prompts/responses, diffs, test outputs) in `.chief/chief.db` and queries it to give context to subsequent prompts.
+Chief records prompts/responses, diffs, command output, and run metadata in `.chief/chief.db`.
 
-### Iteration Loops
+### Convergence Loop
 
-Ralph Wiggum works great for tasks where you can easily verify correctness (e.g. green phase). For other tasks, we use the idea of convergence: if the agent, when asked to improve on the existing work, does not do any changes, and it does so twice in a row, then we consider the task a success.
+Chief uses convergence semantics:
 
-Chief uses two loop types:
-
-- **Convergence loop**: require consecutive stable outcomes (used in RED and no-test GREEN tasks).
-- **Until-pass loop**: repeatedly run checks and ask the agent to fix failures until all checks pass (used for linting, GREEN with tests, and POST_GREEN).
+- each iteration asks the agent to improve the current work
+- if files change, Chief runs another iteration
+- once there are no file changes for `required_stable_iterations` in a row, the run is considered stable and succeeds
 
 ## ⚠️ Potential Data Loss Warning
 
 **Chief performs destructive Git operations.**
 
-To recover from failed TDD cycles, this tool may use `git reset --hard` and `git clean -fd` to revert local changes between retry loops. It assumes it is the sole actor in the repository during execution.
+To recover from failed convergence attempts, this tool may use `git reset --hard` and `git clean -fd` to revert local changes between retry loops. It assumes it is the sole actor in the repository during execution.
 
 - **Start Clean:** Ensure you have no uncommitted changes or untracked files before running.
 - **Hands Off:** Do not modify files manually while the script is active.
@@ -38,7 +33,7 @@ To recover from failed TDD cycles, this tool may use `git reset --hard` and `git
 
 ## Rust Runtime Layout
 
-Chief is a Rust TDD orchestration system with:
+Chief is a Rust orchestration system with:
 
 - `chief` binary for single-project execution (current Chief flow).
 - `chief_backend` binary for multi-project orchestration + introspection API.
@@ -47,7 +42,6 @@ Chief is a Rust TDD orchestration system with:
 The system keeps **per-project** state local:
 
 - `.chief/chief.yaml`
-- `.chief/todos.yaml`
 - `.chief/chief.db` (SQLite)
 
 There is no centralized database.
@@ -58,7 +52,7 @@ Core library modules:
 
 - `src/domain.rs`: strongly-typed core models (`Todo`, `EventRecord`, `JobRecord`, `Phase`, `TodoStatus`, etc).
 - `src/config.rs`: `.chief/chief.yaml` parsing for `chief` and `suites`.
-- `src/storage.rs`: per-project SQLite + `.chief/todos.yaml` synchronization.
+- `src/storage.rs`: per-project SQLite persistence for todos, events, jobs, and runs.
 - `src/prompt.rs`: prompt loading/rendering from `prompts/*.md` using Jinja syntax (`minijinja`).
 - `src/agent.rs`: coding-agent abstraction and concrete CLI agent adapters.
 - `src/git.rs`: git/worktree operations.
@@ -66,20 +60,18 @@ Core library modules:
 - `src/service.rs`: project registry + execution engine.
 - `src/scheduler.rs`: multi-agent backend scheduler.
 
-### Pluggable flow design (lego bricks)
+### Pluggable flow design
 
 `src/flow.rs` is intentionally modular:
 
-- `PhaseStrategy` trait: behavior for one phase (`RED`, `GREEN`, `POST_GREEN`, etc).
-- `LoopPolicy` trait: convergence loops vs until-pass loops.
-- `TodoFlow` trait: composition of phase strategies into full todo workflows.
+- `PhaseStrategy` trait: behavior for one flow phase.
+- `LoopPolicy` trait: convergence loop behavior.
+- `TodoFlow` trait: composition of phase strategies into full workflows.
 
 Included flows:
 
-- `single_prompt`: convergence loop with per-iteration checks over the todo's configured suites.
-- `tdd`: legacy RED -> GREEN -> POST_GREEN flow.
 - `loop_file`: convergence loop driven by a markdown file loaded via `--file`.
-- `refactor`: convergence loop that alternates `structural_cleanup.md` and `mechanical_cleanup.md`.
+- `refactor`: convergence loop that alternates `structural_cleanup.md` and `mechanical_cleanup.md` for queued work items.
 
 Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
 
@@ -93,9 +85,7 @@ For each project, the scheduler supports configurable parallel coding agents:
 - each claimed todo runs in a dedicated git worktree at `../<project_name>__worktrees/<job_id>`.
 - `agents` controls how many workers can run in parallel.
 - todo selection is serialized (one selector at a time) to reduce conflicts.
-- for workers after the first, selector prompt (`prompts/todo_select.md`) includes:
-  - available todos (not done, not in progress)
-  - currently in-progress todos
+- for workers after the first, selection considers both available and currently in-progress SQLite todos
 - each worker processes exactly one todo, exits, and then the scheduler spawns the next worker.
 - successful worker branches are merged back to mainline branch.
 
@@ -103,12 +93,11 @@ For each project, the scheduler supports configurable parallel coding agents:
 
 All prompts are Markdown templates with Jinja syntax under:
 
-- `prompts/red.md`
-- `prompts/green.md`
-- `prompts/post_green.md`
-- `prompts/lint_fix.md`
+- `prompts/loop_file_prompt.md`
+- `prompts/loop_file_convergence.md`
+- `prompts/structural_cleanup.md`
+- `prompts/mechanical_cleanup.md`
 - `prompts/requirements.md`
-- `prompts/todo_select.md`
 
 Each project can own its own `prompts/` directory.
 
@@ -148,9 +137,9 @@ chief init --chief-root /path/to/chief
 ```
 
 `init` is idempotent: existing files/symlinks are left unchanged and only missing ones are created.
-It creates `.chief/chief.yaml` plus `.chief/chief.example.yaml`/`.chief/todos.example.yaml` symlinks, and does not create `.chief/todos.yaml`.
+It creates `.chief/chief.yaml` and `.chief/chief.example.yaml`.
 
-For older projects that still have root-level `chief.yaml` / `todos.yaml` / `chief.db`, run:
+For older projects that still have root-level `chief.yaml` / `chief.example.yaml` / `chief.db`, run:
 
 ```bash
 chief migrate
@@ -161,7 +150,7 @@ Common options:
 ```bash
 cargo run --bin chief -- \
   --project-dir /path/to/project \
-  --flow tdd \
+  --flow refactor \
   --model gpt-5
 ```
 
@@ -247,7 +236,7 @@ Example authenticated request:
 curl -X POST http://localhost:8000/api/projects/myproj/start \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
-  -d '{"agents":1,"flow":"tdd"}'
+  -d '{"agents":1,"flow":"refactor"}'
 ```
 
 Frontend is a Next.js app (`frontend/`) and calls backend APIs for:
@@ -321,8 +310,8 @@ Services:
 
 ```yaml
 chief:
-  flow: loop_file # default for `chief init`; requires `--file`
-  # flow: single_prompt
+  flow: refactor # queued SQLite work-item processing
+  # flow: loop_file # file-driven run; requires `--file`
   agent: codex
   model: gpt-5
   max_retries: 10

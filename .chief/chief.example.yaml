@@ -1,12 +1,12 @@
 chief:
   flow: loop_file # default file-driven workflow; requires `chief --file <path>` (or `chief loop_file --file <path>`)
-  # flow: single_prompt # uncomment to switch to queued todos.yaml workflow (or use tdd)
+  # flow: refactor # uncomment to run queued SQLite work-item workflow
   agent: codex
   # model: gpt-5
   # model_reasoning_effort: high
   agent_extra_args: []
   max_retries: 2
-  max_loop_iterations: 20 # shared inner-loop cap used by all flows (single_prompt, tdd phases, loop_file)
+  max_loop_iterations: 20 # shared inner-loop cap used by all flows
   required_stable_iterations: 2 # convergence loops require this many consecutive stable iterations
   agent_timeout_seconds: 2700 # set to 0 for no timeout
   suite_command_timeout_seconds: 1800
