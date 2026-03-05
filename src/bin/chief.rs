@@ -27,7 +27,7 @@ use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
-#[command(about = "Chief TDD orchestrator CLI")]
+#[command(about = "Chief orchestration CLI")]
 struct Cli {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,

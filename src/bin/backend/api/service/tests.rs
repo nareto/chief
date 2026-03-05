@@ -377,7 +377,7 @@ async fn start_project_rejects_loop_file_flow_as_cli_only() {
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: single_prompt"#,
+  flow: loop_file"#,
     );
 
     let err = service
@@ -433,7 +433,7 @@ async fn start_project_blocks_when_pre_run_checks_detect_broken_suite_command() 
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: single_prompt
+  flow: refactor
 suites:
   - name: smoke
     language: rust
@@ -526,7 +526,7 @@ async fn start_project_pre_run_checks_use_clean_worktree_without_untracked_files
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: single_prompt
+  flow: refactor
 suites:
   - name: smoke
     language: rust
@@ -629,7 +629,7 @@ async fn run_suite_check_uses_clean_worktree_without_untracked_files() {
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: single_prompt
+  flow: refactor
 suites:
   - name: smoke
     language: rust
@@ -719,7 +719,7 @@ async fn start_project_persists_pre_run_check_result_if_request_future_is_droppe
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: single_prompt
+  flow: refactor
 suites:
   - name: smoke
     language: rust
@@ -814,7 +814,8 @@ async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: tdd"#,
+  flow: refactor
+  model: gpt-5"#,
     );
 
     run_git(&project_dir, &["add", "--all"]);
@@ -832,7 +833,8 @@ async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor
+  model: gpt-5"#,
     );
 
     let response = service
@@ -849,7 +851,7 @@ async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
         .expect("start_project should succeed");
 
     assert!(
-        response.message.contains("flow=single_prompt"),
+        response.message.contains("flow=refactor"),
         "start_project should use refreshed chief.yaml flow, got message: {}",
         response.message
     );
@@ -866,7 +868,7 @@ async fn start_project_skips_pre_run_checks_when_last_success_matches_chief_yaml
     test_suites: []
     status: done"#,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor"#,
     );
 
     let store = ProjectStore::new(&project_dir);
@@ -925,7 +927,7 @@ async fn start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_succe
     test_suites: []
     status: done"#,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor"#,
     );
 
     let store = ProjectStore::new(&project_dir);
@@ -949,7 +951,8 @@ async fn start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_succe
     write_chief_yaml(
         &project_dir,
         r#"chief:
-  flow: tdd"#,
+  flow: refactor
+  model: gpt-5"#,
     );
     let updated_hash = chief_yaml_content_hash(&chief::paths::chief_yaml_path(&project_dir))
         .expect("updated chief.yaml hash should be computed");
@@ -972,7 +975,7 @@ async fn start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_succe
         .await
         .expect("start_project should succeed after rerunning pre-run checks");
     assert!(
-        response.message.contains("flow=tdd"),
+        response.message.contains("flow=refactor"),
         "start_project should use updated chief.yaml flow, got: {}",
         response.message
     );
@@ -1007,7 +1010,7 @@ async fn start_project_reruns_pre_run_checks_when_previous_result_was_not_succes
     test_suites: []
     status: done"#,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor"#,
     );
 
     let store = ProjectStore::new(&project_dir);
@@ -1658,10 +1661,10 @@ async fn update_chief_yaml_commits_changes_to_git() {
     test_suites: []
     status: pending"#,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor"#,
     );
 
-    let updated_yaml = "chief:\n  flow: tdd\n";
+    let updated_yaml = "chief:\n  flow: refactor\n  model: gpt-5\n";
     service
         .update_chief_yaml(
             &project,
@@ -1705,7 +1708,7 @@ async fn update_chief_yaml_noop_commit_when_content_unchanged() {
     test_suites: []
     status: pending"#,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor"#,
     );
 
     let commit_before = run_git(&project_dir, &["rev-parse", "HEAD"]);
@@ -1740,7 +1743,7 @@ async fn update_chief_yaml_does_not_commit_other_dirty_files() {
     test_suites: []
     status: pending"#,
         r#"chief:
-  flow: single_prompt"#,
+  flow: refactor"#,
     );
 
     fs::write(project_dir.join("unrelated.txt"), "dirty\n")
@@ -1750,7 +1753,7 @@ async fn update_chief_yaml_does_not_commit_other_dirty_files() {
         .update_chief_yaml(
             &project,
             UpdateChiefYamlRequest {
-                content: "chief:\n  flow: tdd\n".to_owned(),
+                content: "chief:\n  flow: refactor\n  model: gpt-5\n".to_owned(),
             },
         )
         .await

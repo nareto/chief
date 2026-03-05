@@ -25,8 +25,6 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum FlowKind {
     #[default]
-    Tdd,
-    SinglePrompt,
     LoopFile,
     Refactor,
 }
@@ -34,15 +32,13 @@ pub enum FlowKind {
 impl FlowKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Tdd => "tdd",
-            Self::SinglePrompt => "single_prompt",
             Self::LoopFile => "loop_file",
             Self::Refactor => "refactor",
         }
     }
 
     /// Resolve a configured flow string to its canonical name.
-    /// Known flow names are normalized, empty input defaults to `SinglePrompt`,
+    /// Known flow names are normalized, empty input defaults to `LoopFile`,
     /// and unrecognized values are returned as-is (custom flow names).
     pub fn resolve_name(input: &str) -> String {
         let trimmed = input.trim();
@@ -51,7 +47,7 @@ impl FlowKind {
             .map(|kind| kind.as_str().to_owned())
             .unwrap_or_else(|_| {
                 if trimmed.is_empty() {
-                    FlowKind::SinglePrompt.as_str().to_owned()
+                    FlowKind::LoopFile.as_str().to_owned()
                 } else {
                     trimmed.to_owned()
                 }
@@ -68,7 +64,7 @@ impl fmt::Display for FlowParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown flow '{}'; expected one of: tdd, single_prompt, loop_file, refactor",
+            "unknown flow '{}'; expected one of: loop_file, refactor",
             self.input
         )
     }
@@ -81,8 +77,6 @@ impl FromStr for FlowKind {
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "tdd" => Ok(Self::Tdd),
-            "single_prompt" => Ok(Self::SinglePrompt),
             "loop_file" => Ok(Self::LoopFile),
             "refactor" => Ok(Self::Refactor),
             other => Err(FlowParseError {
@@ -258,11 +252,11 @@ pub use command_exec::{
 };
 pub use execution::FlowExecution;
 pub use loop_policy::{ConvergenceLoopPolicy, LoopPolicy, PhaseStrategy, UntilPassLoopPolicy};
-pub use strategies::{
-    ExecutionFlow, LoopFileFlow, SinglePromptFlow, TddFlow, TodoFlow, build_flow,
-};
+pub use strategies::{ExecutionFlow, LoopFileFlow, RefactorFlow, TodoFlow, build_flow};
 
-pub(crate) use suite_checks::{run_lint_checks, run_test_and_lint};
+#[cfg(test)]
+pub(crate) use suite_checks::run_lint_checks;
+pub(crate) use suite_checks::run_test_and_lint;
 
 fn event_exit_code(event: &EventRecord) -> Option<i64> {
     let value = event.payload.get("exit_code")?;

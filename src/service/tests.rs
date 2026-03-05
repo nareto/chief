@@ -184,7 +184,7 @@ fn run_todos_until_done_with_retries_stops_after_first_terminal_todo_failure() {
     let mut completed_ids = Vec::new();
 
     let result = engine.run_todos_until_done_with_retries_with_runner(
-        FlowKind::SinglePrompt,
+        FlowKind::Refactor,
         None,
         3,
         |outcome: &TodoOutcome| completed_ids.push(outcome.todo_id.clone()),

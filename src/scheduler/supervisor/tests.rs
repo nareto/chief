@@ -136,7 +136,7 @@ async fn unrecoverable_worker_failure_stops_scheduler_and_sets_unrecoverable_run
             .or_insert_with(super::super::ProjectRuntime::new);
         state.running = true;
         state.desired_agents = 1;
-        state.flow_kind = FlowKind::SinglePrompt;
+        state.flow_kind = FlowKind::Refactor;
         state.model_override = None;
         state.stop_requested = false;
         state.stop_mode = StopMode::None;

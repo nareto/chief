@@ -12,7 +12,7 @@ pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] = [
 ];
 pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   flow: loop_file
-  # flow: single_prompt # uncomment to run queued workflow using .chief/todos.yaml
+  # flow: refactor # uncomment to run queued workflow using .chief/todos.yaml
   agent: codex
   agent_extra_args: []
   max_loop_iterations: 20

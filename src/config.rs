@@ -95,7 +95,7 @@ impl Default for ChiefConfig {
 }
 
 fn default_flow() -> String {
-    "single_prompt".to_owned()
+    "loop_file".to_owned()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

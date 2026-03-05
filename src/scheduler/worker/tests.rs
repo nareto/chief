@@ -130,13 +130,7 @@ fn unrecoverable_worker_error_marks_job_failed_with_lock_details() {
         .start_run(run_id)
         .expect("failed to start run record");
     let job = context
-        .create_job(
-            run_id,
-            1,
-            FlowKind::SinglePrompt,
-            Some(todo_id.clone()),
-            None,
-        )
+        .create_job(run_id, 1, FlowKind::Refactor, Some(todo_id.clone()), None)
         .expect("failed to create job");
 
     let terminal_error = "git commit failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository".to_owned();
@@ -145,7 +139,7 @@ fn unrecoverable_worker_error_marks_job_failed_with_lock_details() {
         run_id.to_owned(),
         job,
         todo,
-        FlowKind::SinglePrompt,
+        FlowKind::Refactor,
         None,
         false,
         Arc::new(Mutex::new(())),
@@ -221,13 +215,7 @@ fn lock_retry_exhaustion_in_executor_keeps_worker_terminal_state_and_error_detai
         .start_run(run_id)
         .expect("failed to start run record");
     let job = context
-        .create_job(
-            run_id,
-            1,
-            FlowKind::SinglePrompt,
-            Some(todo_id.clone()),
-            None,
-        )
+        .create_job(run_id, 1, FlowKind::Refactor, Some(todo_id.clone()), None)
         .expect("failed to create job");
 
     let terminal_lock_detail = "git commit failed: Unable to create '/tmp/repo/.git/index.lock': File exists.\nAnother git process seems to be running in this repository".to_owned();
@@ -240,7 +228,7 @@ fn lock_retry_exhaustion_in_executor_keeps_worker_terminal_state_and_error_detai
         run_id.to_owned(),
         job,
         todo,
-        FlowKind::SinglePrompt,
+        FlowKind::Refactor,
         None,
         false,
         Arc::new(Mutex::new(())),

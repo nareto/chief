@@ -1,14 +1,12 @@
-use super::strategies::SinglePromptPhaseStrategy;
 use super::{
-    AgentRunWithGitChanges, FlowExecution, FlowKind, PhaseStrategy,
-    SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+    FlowExecution, FlowKind, SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
     SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
     SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES, SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY,
     TestSuiteConfig, build_flow,
 };
 use crate::agent::{AgentRequest, CodingAgent};
 use crate::config::ChiefConfig;
-use crate::domain::{AgentOutput, EventType, LoopDecision, Phase, Todo, TodoStatus};
+use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::ProjectStore;
@@ -25,14 +23,12 @@ use uuid::Uuid;
 
 #[test]
 fn parses_known_flow_kinds() {
-    assert_eq!(FlowKind::from_str("tdd").unwrap(), FlowKind::Tdd);
-    assert_eq!(
-        FlowKind::from_str("single_prompt").unwrap(),
-        FlowKind::SinglePrompt
-    );
     assert_eq!(FlowKind::from_str("loop_file").unwrap(), FlowKind::LoopFile);
     assert_eq!(FlowKind::from_str("refactor").unwrap(), FlowKind::Refactor);
-    assert_eq!(FlowKind::from_str(" TDD ").unwrap(), FlowKind::Tdd);
+    assert_eq!(
+        FlowKind::from_str(" LOOP_FILE ").unwrap(),
+        FlowKind::LoopFile
+    );
 }
 
 #[test]
@@ -47,13 +43,9 @@ fn rejects_unknown_flow_kind() {
 
 #[test]
 fn build_flow_matches_kind() {
-    let tdd = build_flow(FlowKind::Tdd, 6, 2);
-    let single_prompt = build_flow(FlowKind::SinglePrompt, 6, 2);
     let loop_file = build_flow(FlowKind::LoopFile, 20, 2);
     let refactor = build_flow(FlowKind::Refactor, 20, 2);
 
-    assert_eq!(tdd.name(), "tdd");
-    assert_eq!(single_prompt.name(), "single_prompt");
     assert_eq!(loop_file.name(), "loop_file");
     assert_eq!(refactor.name(), "refactor");
 }
@@ -667,7 +659,7 @@ fn run_test_and_lint_runs_all_suites_and_returns_false_when_any_test_fails() {
     let chief_config = ChiefConfig::default();
     let marker_file = project_dir.join("second-suite-ran.txt");
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -724,7 +716,7 @@ fn run_test_suite_executes_cleanup_command_even_on_test_failure() {
     let chief_config = ChiefConfig::default();
     let cleanup_marker = project_dir.join("cleanup-ran.txt");
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -778,7 +770,7 @@ fn suite_preparation_commands_run_once_per_suite_per_execution() {
     };
     let chief_config = ChiefConfig::default();
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -840,7 +832,7 @@ fn previous_steps_log_orders_entries_oldest_first_within_limit() {
     };
     let chief_config = ChiefConfig::default();
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -957,7 +949,7 @@ fn previous_steps_log_includes_command_and_truncated_output() {
         ..ChiefConfig::default()
     };
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -1125,7 +1117,7 @@ fn single_prompt_failure_context_includes_failed_commands_and_output_tails() {
         ..ChiefConfig::default()
     };
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -1389,7 +1381,7 @@ fn single_prompt_failure_context_includes_all_latest_iteration_failures_in_order
         ..ChiefConfig::default()
     };
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-1".to_owned(),
         job_id: "job-1".to_owned(),
         worker_index: 1,
@@ -1584,7 +1576,7 @@ fn single_prompt_failure_context_uses_latest_suite_failures_across_runs() {
     };
     let chief_config = ChiefConfig::default();
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-current".to_owned(),
         job_id: "job-current".to_owned(),
         worker_index: 1,
@@ -1845,7 +1837,7 @@ fn single_prompt_failure_context_stops_at_retry_cleanup_reset_for_suite_history(
     };
     let chief_config = ChiefConfig::default();
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-current".to_owned(),
         job_id: "job-current".to_owned(),
         worker_index: 1,
@@ -1956,23 +1948,19 @@ fn single_prompt_changed_files_retry_without_associated_suites_is_not_failure_co
         prepared_suites: RefCell::new(BTreeSet::new()),
     };
 
-    let mut strategy = SinglePromptPhaseStrategy::new(Vec::new());
-    strategy.last_agent_run = Some(AgentRunWithGitChanges {
-        output: AgentOutput::success("agent-step", ""),
-        touched_files: vec!["src/flow.rs".to_owned()],
-        had_git_changes: true,
-        head_commit_before: "mock-head-0".to_owned(),
-        head_commit_after: "mock-head-0".to_owned(),
-        head_commit_changed: false,
-    });
-
-    let decision = strategy
-        .check_goal(&mut execution, 0, &AgentOutput::success("unused", ""))
-        .expect("single_prompt check_goal should succeed");
-    assert!(
-        matches!(decision, LoopDecision::Retry),
-        "changed files must continue to trigger retry"
-    );
+    execution
+        .log_event(
+            "warning",
+            Some(Phase::Refactor),
+            EventType::PhaseFailure,
+            SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+            crate::domain::payload_from_json(serde_json::json!({
+                "touched_files": ["src/flow.rs"],
+                "single_prompt_retry_reason": SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
+                "single_prompt_retry_has_associated_test_suites": false,
+            })),
+        )
+        .expect("changed-files phase failure event should be logged");
 
     let context = execution
         .latest_single_prompt_failure_context()
@@ -2053,23 +2041,19 @@ fn single_prompt_changed_files_retry_with_associated_suites_remains_failure_cont
         prepared_suites: RefCell::new(BTreeSet::new()),
     };
 
-    let mut strategy = SinglePromptPhaseStrategy::new(Vec::new());
-    strategy.last_agent_run = Some(AgentRunWithGitChanges {
-        output: AgentOutput::success("agent-step", ""),
-        touched_files: vec!["src/flow.rs".to_owned()],
-        had_git_changes: true,
-        head_commit_before: "mock-head-0".to_owned(),
-        head_commit_after: "mock-head-0".to_owned(),
-        head_commit_changed: false,
-    });
-
-    let decision = strategy
-        .check_goal(&mut execution, 0, &AgentOutput::success("unused", ""))
-        .expect("single_prompt check_goal should succeed");
-    assert!(
-        matches!(decision, LoopDecision::Retry),
-        "changed files must continue to trigger retry"
-    );
+    execution
+        .log_event(
+            "warning",
+            Some(Phase::Refactor),
+            EventType::PhaseFailure,
+            SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+            crate::domain::payload_from_json(serde_json::json!({
+                "touched_files": ["src/flow.rs"],
+                "single_prompt_retry_reason": SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
+                "single_prompt_retry_has_associated_test_suites": true,
+            })),
+        )
+        .expect("changed-files phase failure event should be logged");
 
     let context = execution
         .latest_single_prompt_failure_context()
@@ -2142,7 +2126,7 @@ fn touched_files_since_last_retry_reset_uses_all_runs_and_stops_at_latest_reset(
     };
     let chief_config = ChiefConfig::default();
 
-    let execution = FlowExecution {
+    let mut execution = FlowExecution {
         run_id: "run-current".to_owned(),
         job_id: "job-current".to_owned(),
         worker_index: 1,
@@ -2366,14 +2350,14 @@ fn previous_attempt_detection_spans_runs_and_resets_on_retry_cleanup() {
 }
 
 #[test]
-fn single_prompt_uses_todo_suites_in_prompt_when_todo_sets_subset() {
+fn refactor_uses_todo_suites_in_prompt_when_todo_sets_subset() {
     let project_dir = temp_project_dir();
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
 
     let todo = Todo {
         id: "todo-1".to_owned(),
-        todo: "run single prompt with todo suites".to_owned(),
+        todo: "run refactor with todo suites".to_owned(),
         expectations: String::new(),
         priority: 1,
         test_suites: vec!["backend".to_owned()],
@@ -2408,21 +2392,21 @@ fn single_prompt_uses_todo_suites_in_prompt_when_todo_sets_subset() {
         prepared_suites: RefCell::new(BTreeSet::new()),
     };
 
-    let flow = build_flow(FlowKind::SinglePrompt, 6, 2);
+    let flow = build_flow(FlowKind::Refactor, 6, 2);
     let outcome = flow
         .run_todo(&mut execution)
-        .expect("single_prompt flow should complete");
+        .expect("refactor flow should complete");
     assert_eq!(outcome.todo_id, "todo-1");
 
     let rendered = prompts.rendered_suite_names();
     assert!(
         !rendered.is_empty(),
-        "single_prompt should render at least one prompt"
+        "refactor should render at least one prompt"
     );
     assert_eq!(
         rendered[0],
         vec!["backend".to_owned()],
-        "single_prompt prompt should include todo-configured suites only"
+        "refactor prompt should include todo-configured suites only"
     );
 
     let _ = fs::remove_dir_all(&project_dir);

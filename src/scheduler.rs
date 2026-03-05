@@ -70,7 +70,7 @@ impl ProjectRuntime {
             running: false,
             stop_requested: false,
             stop_mode: StopMode::None,
-            flow_kind: FlowKind::SinglePrompt,
+            flow_kind: FlowKind::Refactor,
             model_override: None,
             last_error: None,
             selection_lock: Arc::new(Mutex::new(())),

@@ -135,6 +135,7 @@ fn run_lint_checks_with_context(
     Ok(all_ok)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn run_lint_checks(
     execution: &FlowExecution<'_>,
     suites: &[TestSuiteConfig],

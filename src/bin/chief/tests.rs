@@ -398,13 +398,13 @@ fn init_writes_full_default_chief_yaml_block() {
 fn run_rejects_file_option_for_non_loop_file_flows() {
     let temp = TempDir::new("run-file-option-invalid-flow");
     init_git_repo(&temp.path);
-    write_chief_yaml(&temp.path, "chief:\n  flow: single_prompt\n");
+    write_chief_yaml(&temp.path, "chief:\n  flow: refactor\n");
     fs::write(chief::paths::todos_path(&temp.path), "todos: []\n")
         .expect("todos.yaml should be written");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: Some("single_prompt".to_owned()),
+        flow: Some("refactor".to_owned()),
         model: None,
         max_retries: None,
         file: Some(PathBuf::from("plan.md")),
