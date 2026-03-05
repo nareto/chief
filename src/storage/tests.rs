@@ -42,14 +42,6 @@ fn init_git_repo(project_dir: &Path) {
     run_git(project_dir, &["commit", "-m", "chore: baseline"]);
 }
 
-fn write_todos(project_dir: &Path, todos_yaml: &str) {
-    fs::write(
-        crate::paths::todos_path(&project_dir),
-        format!("{todos_yaml}\n"),
-    )
-    .expect("failed to write todos.yaml");
-}
-
 #[test]
 fn claim_todo_updates_sqlite() {
     let project_dir = temp_project_dir();
@@ -371,16 +363,18 @@ fn inconsistent_db_requires_confirmation_before_reset() {
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
 
-    let todo_id = "survives-db-reset";
-    write_todos(
-        &project_dir,
-        &format!(
-            "todos:\n  - id: {todo_id}\n    todo: survives db reset\n    expectations: reset keeps canonical schema\n    priority: 3\n    test_suites: []\n    status: in_progress\n    done_at_commit: null"
-        ),
-    );
+    let todo = Todo {
+        id: "survives-db-reset".to_owned(),
+        todo: "survives db reset".to_owned(),
+        expectations: "reset keeps canonical schema".to_owned(),
+        priority: 3,
+        test_suites: Vec::new(),
+        status: TodoStatus::InProgress,
+        done_at_commit: None,
+    };
     store
-        .list_todos()
-        .expect("listing todos should create canonical schema");
+        .append_todo(todo)
+        .expect("append_todo should persist fixture row");
 
     let conn = Connection::open(crate::paths::chief_db_path(&project_dir)).expect("db should open");
     conn.execute_batch(
@@ -396,8 +390,8 @@ fn inconsistent_db_requires_confirmation_before_reset() {
     drop(conn);
 
     let err = store
-        .sync_todos_from_file()
-        .expect_err("sync_todos_from_file should require db reset");
+        .list_todos()
+        .expect_err("list_todos should require db reset");
     let reset_error = super::db_reset_required_from_anyhow(&err)
         .expect("error should carry db reset required details");
     assert_eq!(
@@ -406,9 +400,7 @@ fn inconsistent_db_requires_confirmation_before_reset() {
         "reset-required error should include db path"
     );
 
-    store
-        .reset_db_from_todos_file()
-        .expect("explicit db reset should succeed");
+    store.reset_db().expect("explicit db reset should succeed");
 
     let conn =
         Connection::open(crate::paths::chief_db_path(&project_dir)).expect("db should reopen");
@@ -436,15 +428,9 @@ fn inconsistent_db_requires_confirmation_before_reset() {
     );
 
     let todos = store.list_todos().expect("list_todos should succeed");
-    let recovered = todos.iter().find(|item| item.id == todo_id);
     assert!(
-        recovered.is_some(),
-        "todo should still exist after db reset"
-    );
-    assert_eq!(
-        recovered.expect("todo should be present").status,
-        TodoStatus::Pending,
-        "in_progress todos should be re-queued to pending during reset"
+        todos.is_empty(),
+        "db-only reset should recreate schema without importing todos from files"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -605,32 +591,37 @@ fn append_todo_does_not_auto_commit_when_repo_available() {
 }
 
 #[test]
-fn sync_todos_from_file_does_not_auto_commit_external_todos_yaml_edit() {
+fn replace_todos_does_not_auto_commit_when_repo_available() {
     let project_dir = temp_project_dir();
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
     init_git_repo(&project_dir);
-
-    fs::write(
-            crate::paths::todos_path(&project_dir),
-            "todos:\n  - id: imported-todo\n    priority: 7\n    todo: imported from requirements\n    expectations: persisted after sync\n    test_suites: []\n    status: pending\n    done_at_commit: null\n",
-        )
-        .expect("manual todos.yaml edit should succeed");
 
     let before = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
         .parse::<usize>()
         .expect("commit count should parse");
 
     store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should succeed");
+        .replace_todos(vec![
+            Todo {
+                id: "imported-todo".to_owned(),
+                priority: 7,
+                todo: "imported from requirements".to_owned(),
+                expectations: "persisted after sync".to_owned(),
+                test_suites: Vec::new(),
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            }
+            .normalize(),
+        ])
+        .expect("replace_todos should succeed");
 
     let after = run_git(&project_dir, &["rev-list", "--count", "HEAD"])
         .parse::<usize>()
         .expect("commit count should parse");
     assert_eq!(
         after, before,
-        "sync_todos_from_file should not auto-commit external todos.yaml updates"
+        "replace_todos should not auto-commit queue updates"
     );
 
     let todos = store.list_todos().expect("list_todos should succeed");
@@ -643,48 +634,51 @@ fn sync_todos_from_file_does_not_auto_commit_external_todos_yaml_edit() {
 }
 
 #[test]
-fn sync_todos_from_file_reconciles_add_update_remove_without_duplicates() {
+fn replace_todos_reconciles_add_update_remove_without_duplicates() {
     let project_dir = temp_project_dir();
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: keep-unchanged
-    todo: Keep this todo exactly
-    expectations: Keep this expectations text
-    priority: 4
-    test_suites: ["unit"]
-    status: done
-    done_at_commit: keep-commit
-  - id: update-me
-    todo: Old todo text
-    expectations: Old expectations
-    priority: 2
-    test_suites: []
-    status: pending
-    done_at_commit: null
-  - id: remove-me
-    todo: Remove this todo
-    expectations: Remove this expectations
-    priority: 3
-    test_suites: []
-    status: attempted
-    done_at_commit: null"#,
-    );
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite");
+        .replace_todos(vec![
+            Todo {
+                id: "keep-unchanged".to_owned(),
+                todo: "Keep this todo exactly".to_owned(),
+                expectations: "Keep this expectations text".to_owned(),
+                priority: 4,
+                test_suites: vec!["unit".to_owned()],
+                status: TodoStatus::Done,
+                done_at_commit: Some("keep-commit".to_owned()),
+            },
+            Todo {
+                id: "update-me".to_owned(),
+                todo: "Old todo text".to_owned(),
+                expectations: "Old expectations".to_owned(),
+                priority: 2,
+                test_suites: Vec::new(),
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            },
+            Todo {
+                id: "remove-me".to_owned(),
+                todo: "Remove this todo".to_owned(),
+                expectations: "Remove this expectations".to_owned(),
+                priority: 3,
+                test_suites: Vec::new(),
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            },
+        ])
+        .expect("replace_todos should seed sqlite");
 
     let baseline_todos = store.list_todos().expect("list_todos should succeed");
     assert!(
         baseline_todos.iter().any(|todo| todo.id == "remove-me"),
-        "baseline sync should include todos present in todos.yaml",
+        "baseline replace_todos should include seeded entries",
     );
     assert!(
         baseline_todos.iter().all(|todo| todo.id != "add-me"),
-        "baseline sync should not include todos not yet added to todos.yaml",
+        "baseline replace_todos should not include missing entries",
     );
 
     let unchanged_before = baseline_todos
@@ -693,35 +687,37 @@ fn sync_todos_from_file_reconciles_add_update_remove_without_duplicates() {
         .cloned()
         .expect("baseline unchanged todo should exist");
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: add-me
-    todo: Newly added todo
-    expectations: Added in yaml
-    priority: 9
-    test_suites: ["integration"]
-    status: pending
-    done_at_commit: null
-  - id: update-me
-    todo: Updated todo text
-    expectations: Updated expectations
-    priority: 1
-    test_suites: ["smoke"]
-    status: done
-    done_at_commit: updated-commit
-  - id: keep-unchanged
-    todo: Keep this todo exactly
-    expectations: Keep this expectations text
-    priority: 4
-    test_suites: ["unit"]
-    status: done
-    done_at_commit: keep-commit"#,
-    );
-
     store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should reconcile sqlite to file");
+        .replace_todos(vec![
+            Todo {
+                id: "add-me".to_owned(),
+                todo: "Newly added todo".to_owned(),
+                expectations: "Added in sqlite".to_owned(),
+                priority: 9,
+                test_suites: vec!["integration".to_owned()],
+                status: TodoStatus::Pending,
+                done_at_commit: None,
+            },
+            Todo {
+                id: "update-me".to_owned(),
+                todo: "Updated todo text".to_owned(),
+                expectations: "Updated expectations".to_owned(),
+                priority: 1,
+                test_suites: vec!["smoke".to_owned()],
+                status: TodoStatus::Done,
+                done_at_commit: Some("updated-commit".to_owned()),
+            },
+            Todo {
+                id: "keep-unchanged".to_owned(),
+                todo: "Keep this todo exactly".to_owned(),
+                expectations: "Keep this expectations text".to_owned(),
+                priority: 4,
+                test_suites: vec!["unit".to_owned()],
+                status: TodoStatus::Done,
+                done_at_commit: Some("keep-commit".to_owned()),
+            },
+        ])
+        .expect("replace_todos should reconcile sqlite state");
 
     let todos = store.list_todos().expect("list_todos should succeed");
     let ids = todos.iter().map(|todo| todo.id.clone()).collect::<Vec<_>>();
@@ -741,7 +737,7 @@ fn sync_todos_from_file_reconciles_add_update_remove_without_duplicates() {
     );
     assert!(
         todos.iter().all(|todo| todo.id != "remove-me"),
-        "todo removed from todos.yaml should be deleted from sqlite"
+        "todo removed from replacement set should be deleted from sqlite"
     );
 
     let updated = todos
@@ -760,54 +756,43 @@ fn sync_todos_from_file_reconciles_add_update_remove_without_duplicates() {
         .expect("unchanged todo should still exist");
     assert_eq!(
         unchanged_after, &unchanged_before,
-        "todo not changed in todos.yaml should keep persisted values after reconciliation"
+        "todo not changed in replacement set should keep persisted values after reconciliation"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
 }
 
 #[test]
-fn sync_todos_from_file_returns_error_for_invalid_yaml_without_mutating_sqlite() {
+fn replace_todos_with_empty_input_clears_sqlite_queue() {
     let project_dir = temp_project_dir();
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: baseline-todo
-    todo: Baseline todo
-    expectations: Baseline expectations
-    priority: 3
-    test_suites: []
-    status: pending"#,
-    );
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite");
+        .replace_todos(vec![Todo {
+            id: "baseline-todo".to_owned(),
+            todo: "Baseline todo".to_owned(),
+            expectations: "Baseline expectations".to_owned(),
+            priority: 3,
+            test_suites: Vec::new(),
+            status: TodoStatus::Pending,
+            done_at_commit: None,
+        }])
+        .expect("replace_todos should seed sqlite");
 
-    let before = store.list_todos().expect("baseline todos should load");
+    let after = store.list_todos().expect("sqlite should remain readable");
+    assert_eq!(after.len(), 1, "expected seeded todo before clear");
 
-    fs::write(
-        crate::paths::todos_path(&project_dir),
-        "todos:\n  - id: broken\n    todo: [missing quote\n",
-    )
-    .expect("failed to write invalid todos.yaml");
-
-    let err = store
-        .sync_todos_from_file()
-        .expect_err("sync_todos_from_file should fail for invalid todos.yaml");
-    assert!(
-        err.to_string().contains("invalid YAML in"),
-        "expected invalid YAML error, got: {err}",
-    );
-
-    let after = store
+    store
+        .replace_todos(Vec::new())
+        .expect("replace_todos should support clearing the queue");
+    let cleared = store
         .list_todos()
-        .expect("sqlite should remain readable after sync error");
+        .expect("sqlite should remain readable after clear");
     assert_eq!(
-        after, before,
-        "failed sync should not mutate sqlite todo rows"
+        cleared.len(),
+        0,
+        "empty replacement set should remove all sqlite todo rows"
     );
 
     let _ = fs::remove_dir_all(&project_dir);

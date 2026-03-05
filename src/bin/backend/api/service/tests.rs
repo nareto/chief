@@ -219,12 +219,12 @@ fn init_git_repo(project_dir: &Path) {
     );
 }
 
-fn write_todos(project_dir: &Path, todos_yaml: &str) {
-    fs::write(
-        chief::paths::todos_path(&project_dir),
-        format!("{todos_yaml}\n"),
-    )
-    .expect("failed to write todos.yaml");
+fn seed_todos(store: &ProjectStore, todos_yaml: &str) {
+    let todo_file: TodoFile =
+        serde_yaml::from_str(todos_yaml).expect("todos fixture must be valid YAML");
+    store
+        .replace_todos(todo_file.todos)
+        .expect("replace_todos should seed sqlite from fixture");
 }
 
 fn write_chief_yaml(project_dir: &Path, chief_yaml: &str) {
@@ -244,16 +244,11 @@ fn setup_service(initial_todos_yaml: &str) -> (TempDir, ApiService, String, Path
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(&project_dir, initial_todos_yaml);
 
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
-    let todo_file: TodoFile =
-        serde_yaml::from_str(initial_todos_yaml).expect("initial todos fixture must be valid YAML");
-    store
-        .replace_todos(todo_file.todos)
-        .expect("replace_todos should seed sqlite from fixture");
+    seed_todos(&store, initial_todos_yaml);
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -402,8 +397,8 @@ async fn start_project_blocks_when_pre_run_checks_detect_broken_suite_command() 
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(
-        &project_dir,
+    seed_todos(
+        &store,
         r#"todos:
   - id: pending-1
     todo: Example pending todo
@@ -428,10 +423,6 @@ suites:
 
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
-
-    store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -495,8 +486,8 @@ async fn start_project_pre_run_checks_use_clean_worktree_without_untracked_files
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(
-        &project_dir,
+    seed_todos(
+        &store,
         r#"todos:
   - id: pending-1
     todo: Example pending todo
@@ -522,10 +513,6 @@ suites:
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
     fs::write(project_dir.join(".runtime-only.env"), "TOKEN=dev\n")
         .expect("failed to write runtime-only env file");
-
-    store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -598,8 +585,8 @@ async fn run_suite_check_uses_clean_worktree_without_untracked_files() {
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(
-        &project_dir,
+    seed_todos(
+        &store,
         r#"todos:
   - id: pending-1
     todo: Example pending todo
@@ -624,10 +611,6 @@ suites:
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
     fs::write(project_dir.join(".runtime-only.env"), "TOKEN=dev\n")
         .expect("failed to write runtime-only env file");
-
-    store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -688,8 +671,8 @@ async fn start_project_persists_pre_run_check_result_if_request_future_is_droppe
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(
-        &project_dir,
+    seed_todos(
+        &store,
         r#"todos:
   - id: pending-1
     todo: Example pending todo
@@ -712,10 +695,6 @@ suites:
 
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
-
-    store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -783,8 +762,8 @@ async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(
-        &project_dir,
+    seed_todos(
+        &store,
         r#"todos:
   - id: done-1
     todo: Completed todo
@@ -802,10 +781,6 @@ async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
 
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
-
-    store
-        .sync_todos_from_file()
-        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -1055,8 +1030,8 @@ async fn start_project_reruns_pre_run_checks_when_previous_result_was_not_succes
 }
 
 #[tokio::test]
-async fn get_todos_ignores_manual_todos_yaml_additions_without_db_reset() {
-    let (_workspace, service, project, project_dir) = setup_service(
+async fn get_todos_reflects_sqlite_additions_without_refresh_side_effects() {
+    let (_workspace, service, project, _project_dir) = setup_service(
         r#"todos:
   - id: todo-in-db
     todo: Existing todo
@@ -1066,45 +1041,35 @@ async fn get_todos_ignores_manual_todos_yaml_additions_without_db_reset() {
     status: pending"#,
     );
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: todo-in-db
-    todo: Existing todo
-    expectations: Existing expectations
-    priority: 1
-    test_suites: []
-    status: pending
-  - id: manual-new
-    todo: Manually added todo
-    expectations: Appears without reset_db
-    priority: 8
-    test_suites: []
-    status: pending"#,
-    );
+    service
+        .add_todo(
+            &project,
+            crate::api::types::AddTodoRequest {
+                todo: "Manually added todo".to_owned(),
+                expectations: Some("Appears without reset_db".to_owned()),
+                priority: Some(8),
+                test_suites: Some(Vec::new()),
+            },
+        )
+        .await
+        .expect("add_todo should persist sqlite queue updates");
 
     let response = service
         .get_todos(&project)
         .await
-        .expect("get_todos should succeed after manual todos.yaml edit");
+        .expect("get_todos should succeed after sqlite edit");
 
     assert!(
-        response.todos.iter().all(|todo| todo.id != "manual-new"),
-        "manual todos.yaml edits should not mutate sqlite-backed queue state"
-    );
-    assert_eq!(
         response
             .todos
             .iter()
-            .map(|todo| todo.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["todo-in-db"],
-        "get_todos should reflect sqlite state only"
+            .any(|todo| todo.todo == "Manually added todo"),
+        "sqlite queue additions should be visible immediately"
     );
 }
 
 #[tokio::test]
-async fn get_todos_ignores_manual_todos_yaml_removals() {
+async fn get_todos_reflects_sqlite_deletions() {
     let (_workspace, service, project, project_dir) = setup_service(
         r#"todos:
   - id: todo-keep
@@ -1121,44 +1086,38 @@ async fn get_todos_ignores_manual_todos_yaml_removals() {
     status: pending"#,
     );
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: todo-keep
-    todo: Keep this todo
-    expectations: Keep this expectations
-    priority: 5
-    test_suites: []
-    status: pending"#,
-    );
+    service
+        .delete_todo(&project, "todo-remove")
+        .await
+        .expect("delete_todo should remove sqlite queue items");
 
     let response = service
         .get_todos(&project)
         .await
-        .expect("get_todos should read sqlite without file refresh");
+        .expect("get_todos should read sqlite queue state");
     assert_eq!(
         response.todos.len(),
-        2,
-        "manual file removals should not alter sqlite-backed queue state"
+        1,
+        "sqlite deletion should reduce queue size"
     );
     assert!(
-        response.todos.iter().any(|todo| todo.id == "todo-remove"),
-        "removed todo should still be returned by get_todos"
+        response.todos.iter().all(|todo| todo.id != "todo-remove"),
+        "deleted todo should not be returned by get_todos"
     );
 
     let store = ProjectStore::new(&project_dir);
     let sqlite_todos = store
         .list_todos()
-        .expect("sqlite todos should be readable after sync");
+        .expect("sqlite todos should be readable after delete");
     assert!(
-        sqlite_todos.iter().any(|todo| todo.id == "todo-remove"),
-        "manual file edits should not mutate sqlite todo state"
+        sqlite_todos.iter().all(|todo| todo.id != "todo-remove"),
+        "sqlite queue state should reflect the deletion"
     );
 }
 
 #[tokio::test]
-async fn get_todos_and_get_state_ignore_manual_todos_yaml_edits_between_calls() {
-    let (_workspace, service, project, project_dir) = setup_service(
+async fn get_todos_and_get_state_reflect_sqlite_mutations_between_calls() {
+    let (_workspace, service, project, _project_dir) = setup_service(
         r#"todos:
   - id: todo-alpha
     todo: Original todo text
@@ -1206,67 +1165,79 @@ async fn get_todos_and_get_state_ignore_manual_todos_yaml_edits_between_calls() 
         "baseline available count should match"
     );
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: todo-alpha
-    todo: Edited todo text from file
-    expectations: Edited expectations from file
-    priority: 9
-    test_suites: []
-    status: done
-    done_at_commit: manual-edit-commit
-  - id: todo-gamma
-    todo: Newly added todo from file
-    expectations: Added between API reads
-    priority: 6
-    test_suites: []
-    status: pending
-  - id: todo-beta
-    todo: Already done
-    expectations: Keep done
-    priority: 2
-    test_suites: []
-    status: done"#,
-    );
+    service
+        .update_todo(
+            &project,
+            "todo-alpha",
+            crate::api::types::UpdateTodoRequest {
+                id: None,
+                todo: Some("Edited todo text from sqlite".to_owned()),
+                expectations: Some("Edited expectations from sqlite".to_owned()),
+                priority: Some(9),
+                test_suites: Some(Vec::new()),
+                status: Some("done".to_owned()),
+                done_at_commit: Some(Some("manual-edit-commit".to_owned())),
+            },
+        )
+        .await
+        .expect("update_todo should mutate sqlite queue state");
+    service
+        .add_todo(
+            &project,
+            crate::api::types::AddTodoRequest {
+                todo: "Newly added todo from sqlite".to_owned(),
+                expectations: Some("Added between API reads".to_owned()),
+                priority: Some(6),
+                test_suites: Some(Vec::new()),
+            },
+        )
+        .await
+        .expect("add_todo should mutate sqlite queue state");
+    service
+        .delete_todo(&project, "todo-remove")
+        .await
+        .expect("delete_todo should mutate sqlite queue state");
 
     let todos = service
         .get_todos(&project)
         .await
-        .expect("get_todos should continue reading sqlite state");
+        .expect("get_todos should reflect sqlite state changes");
     let edited = todos
         .todos
         .iter()
         .find(|todo| todo.id == "todo-alpha")
-        .expect("baseline todo should still exist");
-    assert_eq!(edited.todo, "Original todo text");
-    assert_eq!(edited.expectations, "Original expectations");
-    assert_eq!(edited.priority, 1);
-    assert_eq!(edited.done_at_commit, None);
+        .expect("edited todo should still exist");
+    assert_eq!(edited.todo, "Edited todo text from sqlite");
+    assert_eq!(edited.expectations, "Edited expectations from sqlite");
+    assert_eq!(edited.priority, 9);
+    assert_eq!(edited.done_at_commit.as_deref(), Some("manual-edit-commit"));
     assert!(
-        todos.todos.iter().all(|todo| todo.id != "todo-gamma"),
-        "second get_todos should not include manually added file todos"
+        todos
+            .todos
+            .iter()
+            .any(|todo| todo.todo == "Newly added todo from sqlite"),
+        "second get_todos should include sqlite additions"
     );
     assert!(
-        todos.todos.iter().any(|todo| todo.id == "todo-remove"),
-        "sqlite queue should keep todos removed only from file"
+        todos.todos.iter().all(|todo| todo.id != "todo-remove"),
+        "second get_todos should remove deleted sqlite todos"
     );
 
     let state = service
         .get_state(&project)
         .await
-        .expect("get_state should use sqlite state for progress calculation");
+        .expect("get_state should reflect sqlite state changes");
     assert_eq!(
         state.todos.total, 3,
-        "total todos should remain unchanged from sqlite baseline"
+        "total todos should reflect add/update/delete reconciliation"
     );
     assert_eq!(
-        state.todos.completed, 1,
-        "completed count should remain unchanged from sqlite baseline"
+        state.todos.completed, 2,
+        "completed count should reflect updated todo status"
     );
     assert_eq!(
-        state.todos.available, 2,
-        "available count should remain unchanged from sqlite baseline"
+        state.todos.available, 1,
+        "available count should reflect reconciled sqlite state"
     );
 }
 
@@ -1620,17 +1591,12 @@ fn setup_service_with_chief_yaml(
     init_git_repo(&project_dir);
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
-    write_todos(&project_dir, initial_todos_yaml);
     write_chief_yaml(&project_dir, initial_chief_yaml);
 
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
-    let todo_file: TodoFile =
-        serde_yaml::from_str(initial_todos_yaml).expect("initial todos fixture must be valid YAML");
-    store
-        .replace_todos(todo_file.todos)
-        .expect("replace_todos should seed sqlite from fixture");
+    seed_todos(&store, initial_todos_yaml);
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -1766,7 +1732,7 @@ async fn update_chief_yaml_does_not_commit_other_dirty_files() {
 }
 
 #[tokio::test]
-async fn read_endpoints_ignore_invalid_todos_yaml_after_db_seed() {
+async fn read_endpoints_reflect_sqlite_replacements_between_reads() {
     let (_workspace, service, project, project_dir) = setup_service(
         r#"todos:
   - id: valid-todo
@@ -1801,57 +1767,38 @@ async fn read_endpoints_ignore_invalid_todos_yaml_after_db_seed() {
         "baseline completed should match"
     );
 
-    fs::write(
-        chief::paths::todos_path(&project_dir),
-        "todos:\n  - id: broken\n    todo: [missing quote\n",
-    )
-    .expect("failed to write invalid todos.yaml");
-
-    let todos_after_invalid_yaml = service
-        .get_todos(&project)
-        .await
-        .expect("get_todos should keep serving sqlite state");
-    assert_eq!(
-        todos_after_invalid_yaml
-            .todos
-            .iter()
-            .map(|todo| todo.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["valid-todo"],
-        "manual invalid todos.yaml should not impact sqlite-backed reads"
-    );
-
-    let state_after_invalid_yaml = service
-        .get_state(&project)
-        .await
-        .expect("get_state should keep serving sqlite progress");
-    assert_eq!(
-        state_after_invalid_yaml.todos.total, 1,
-        "sqlite progress should remain intact after invalid file edits"
-    );
-
-    write_todos(
-        &project_dir,
+    let store = ProjectStore::new(&project_dir);
+    seed_todos(
+        &store,
         r#"todos:
   - id: recovered-todo
-    todo: Recovered after fixing yaml
-    expectations: Reads should recover after parse error
+    todo: Recovered through sqlite replacement
+    expectations: Reads should reflect sqlite queue replacement
     priority: 7
     test_suites: []
     status: pending"#,
     );
 
-    let recovered_todos = service
+    let replaced_todos = service
         .get_todos(&project)
         .await
-        .expect("get_todos should continue to serve sqlite state");
+        .expect("get_todos should reflect sqlite replacement");
     assert_eq!(
-        recovered_todos
+        replaced_todos
             .todos
             .iter()
             .map(|todo| todo.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["valid-todo"],
-        "manual todos.yaml recovery should not mutate sqlite-backed queue content"
+        vec!["recovered-todo"],
+        "queue reads should reflect sqlite replacement set"
+    );
+
+    let state_after_replace = service
+        .get_state(&project)
+        .await
+        .expect("get_state should reflect sqlite replacement");
+    assert_eq!(
+        state_after_replace.todos.total, 1,
+        "state totals should follow sqlite replacement set"
     );
 }
