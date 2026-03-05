@@ -24,9 +24,6 @@ impl ProjectStore {
             self.sync_todos_file_from_conn(&tx)?;
         }
         tx.commit()?;
-        if changed > 0 {
-            self.auto_commit_todos_yaml()?;
-        }
         Ok(changed)
     }
 
@@ -85,7 +82,6 @@ impl ProjectStore {
         }
 
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -134,7 +130,6 @@ impl ProjectStore {
         }
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -145,7 +140,6 @@ impl ProjectStore {
         self.upsert_todo_row(&tx, &normalized)?;
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
         Ok(normalized)
     }
 
@@ -191,7 +185,6 @@ impl ProjectStore {
         self.upsert_todo_row(&tx, &next)?;
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
         Ok(next)
     }
 
@@ -206,7 +199,6 @@ impl ProjectStore {
 
         self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
         Ok(())
     }
 
@@ -218,36 +210,25 @@ impl ProjectStore {
             "DELETE FROM todos WHERE status = ?1",
             params![TodoStatus::Done.as_str()],
         )?;
-        self.sync_todos_file_from_conn(&tx)?;
+        if deleted > 0 {
+            self.sync_todos_file_from_conn(&tx)?;
+        }
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
         Ok(deleted)
     }
 
     pub fn clean_completed_todos_with_commit(&self) -> Result<usize> {
-        let todos = self.list_todos()?;
-        let before = todos.len();
-        let retained = todos
-            .into_iter()
-            .filter(|todo| !(todo.status == TodoStatus::Done && todo.done_at_commit.is_some()))
-            .collect::<Vec<_>>();
-        self.persist_todo_list(&retained)?;
-        Ok(before.saturating_sub(retained.len()))
-    }
-
-    fn persist_todo_list(&self, todos: &[Todo]) -> Result<()> {
-        let todo_file = TodoFile {
-            todos: todos.iter().cloned().map(Todo::normalize).collect(),
-        };
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        for todo in todo_file.todos {
-            self.upsert_todo_row(&tx, &todo)?;
+        let deleted = tx.execute(
+            "DELETE FROM todos WHERE status = ?1 AND done_at_commit IS NOT NULL",
+            params![TodoStatus::Done.as_str()],
+        )?;
+        if deleted > 0 {
+            self.sync_todos_file_from_conn(&tx)?;
         }
-        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
-        self.auto_commit_todos_yaml()?;
-        Ok(())
+        Ok(deleted)
     }
 
     fn list_todos_with_conn(&self, conn: &Connection) -> Result<Vec<Todo>> {

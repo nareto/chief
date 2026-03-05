@@ -9,7 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod events;
-mod git_sync;
 mod parsing;
 mod readiness;
 mod runs;

@@ -48,9 +48,6 @@ impl ProjectStore {
             self.sync_todos_file_from_conn(&tx)?;
         }
         tx.commit()?;
-        if normalized_legacy > 0 || claimed.is_some() {
-            self.auto_commit_todos_yaml()?;
-        }
         Ok(claimed)
     }
 
@@ -99,9 +96,6 @@ impl ProjectStore {
             self.sync_todos_file_from_conn(&tx)?;
         }
         tx.commit()?;
-        if normalized_legacy > 0 || claimed.is_some() {
-            self.auto_commit_todos_yaml()?;
-        }
         Ok(claimed)
     }
 
