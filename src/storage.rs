@@ -144,6 +144,14 @@ impl ProjectStore {
         self.reset_in_progress_todos_to_pending()?;
         Ok(())
     }
+
+    pub fn reset_db(&self) -> Result<()> {
+        self.reset_db_file()?;
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("failed to open {} for reset", self.db_path.display()))?;
+        self.ensure_schema_ready(&conn)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

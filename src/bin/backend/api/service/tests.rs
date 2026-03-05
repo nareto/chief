@@ -7,7 +7,7 @@ use crate::api::types::{RunSuiteCheckRequest, StartProjectRequest, UpdateChiefYa
 use axum::body::to_bytes;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use chief::domain::{EventType, Todo, TodoStatus};
+use chief::domain::{EventType, Todo, TodoFile, TodoStatus};
 use chief::flow::SuiteCommandKind;
 use chief::git::GitOps;
 use chief::scheduler::Scheduler;
@@ -249,9 +249,11 @@ fn setup_service(initial_todos_yaml: &str) -> (TempDir, ApiService, String, Path
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
+    let todo_file: TodoFile =
+        serde_yaml::from_str(initial_todos_yaml).expect("initial todos fixture must be valid YAML");
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .replace_todos(todo_file.todos)
+        .expect("replace_todos should seed sqlite from fixture");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -428,8 +430,8 @@ suites:
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .sync_todos_from_file()
+        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -522,8 +524,8 @@ suites:
         .expect("failed to write runtime-only env file");
 
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .sync_todos_from_file()
+        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -624,8 +626,8 @@ suites:
         .expect("failed to write runtime-only env file");
 
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .sync_todos_from_file()
+        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -712,8 +714,8 @@ suites:
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .sync_todos_from_file()
+        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -802,8 +804,8 @@ async fn start_project_uses_latest_flow_from_chief_yaml_on_disk() {
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .sync_todos_from_file()
+        .expect("sync_todos_from_file should seed sqlite from todos.yaml");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");
@@ -1624,9 +1626,11 @@ fn setup_service_with_chief_yaml(
     run_git(&project_dir, &["add", "--all"]);
     run_git(&project_dir, &["commit", "-m", "chore: baseline"]);
 
+    let todo_file: TodoFile =
+        serde_yaml::from_str(initial_todos_yaml).expect("initial todos fixture must be valid YAML");
     store
-        .reset_db_from_todos_file()
-        .expect("reset_db_from_todos_file should seed sqlite from todos.yaml");
+        .replace_todos(todo_file.todos)
+        .expect("replace_todos should seed sqlite from fixture");
 
     let registry =
         ProjectRegistry::discover(&workspace.path, &[]).expect("project discovery should succeed");

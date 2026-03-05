@@ -168,7 +168,7 @@ fn run_with_db_reset_prompt() -> Result<()> {
                 return Ok(());
             }
             let store = ProjectStore::new(&cli.project_dir);
-            store.reset_db_from_todos_file()?;
+            store.reset_db()?;
             eprintln!("reset complete. retrying...\n");
             run(&cli)
         }
@@ -554,7 +554,7 @@ fn load_requirements_text(inline: &[String], files: &[PathBuf]) -> Result<String
 
 fn confirm_db_reset(db_path: &Path) -> Result<bool> {
     eprint!(
-        "Delete {} and rebuild from .chief/todos.yaml? [y/N]: ",
+        "Delete {} and rebuild empty schema? [y/N]: ",
         db_path.display()
     );
     io::stderr().flush()?;
