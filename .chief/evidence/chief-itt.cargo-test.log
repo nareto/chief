@@ -1,0 +1,284 @@
+warning: variable does not need to be mutable
+   --> src/flow/tests.rs:662:9
+    |
+662 |     let mut execution = FlowExecution {
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/flow/tests.rs:719:9
+    |
+719 |     let mut execution = FlowExecution {
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/flow/tests.rs:773:9
+    |
+773 |     let mut execution = FlowExecution {
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/flow/tests.rs:835:9
+    |
+835 |     let mut execution = FlowExecution {
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/flow/tests.rs:952:9
+    |
+952 |     let mut execution = FlowExecution {
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:1120:9
+     |
+1120 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:1384:9
+     |
+1384 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:1579:9
+     |
+1579 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:1840:9
+     |
+1840 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:1935:9
+     |
+1935 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:2028:9
+     |
+2028 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/flow/tests.rs:2129:9
+     |
+2129 |     let mut execution = FlowExecution {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: `chief` (lib test) generated 12 warnings (run `cargo fix --lib -p chief --tests` to apply 12 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/chief-83e4474714e7aa41)
+
+running 92 tests
+test agent::tests::claude_command_includes_model_from_config ... ok
+test agent::tests::codex_reasoning_effort_maps_xhigh_to_high ... ok
+test agent::tests::codex_command_uses_full_permissions_without_sandbox ... ok
+test agent::tests::claude_command_uses_full_permissions_mode ... ok
+test agent::tests::claude_command_prefers_runtime_model_override ... ok
+test config::tests::default_max_retries_is_2 ... ok
+test config::tests::parse_agent_timeout_nonzero_preserved ... ok
+test config::tests::parse_agent_timeout_zero_means_no_timeout ... ok
+test config::tests::parse_suite_cache_mode_defaults_to_copy ... ok
+test config::tests::parse_legacy_max_loop_alias ... ok
+test config::tests::parse_max_retries_default ... ok
+test config::tests::parse_max_loop_iterations_default ... ok
+test config::tests::parse_required_stable_iterations_override ... ok
+test config::tests::parse_cleanup_command ... ok
+test config::tests::parse_required_stable_iterations_default ... ok
+test flow::tests::build_flow_matches_kind ... ok
+test config::tests::parse_suite_cache_mode_symlink ... ok
+test flow::tests::loop_file_restarts_convergence_when_bd_has_ready_tickets ... ok
+test flow::tests::parses_known_flow_kinds ... ok
+test flow::tests::previous_attempt_detection_spans_runs_and_resets_on_retry_cleanup ... ok
+test flow::tests::previous_steps_log_excludes_history_when_execution_context_hash_changes ... ok
+test flow::tests::previous_steps_log_includes_command_and_truncated_output ... ok
+test flow::tests::loop_file_salvages_uncommitted_changes_with_harness_commit ... ok
+test flow::tests::previous_steps_log_orders_entries_oldest_first_within_limit ... ok
+test flow::tests::loop_file_agent_commit_with_clean_tree_does_not_count_as_stable ... ok
+test flow::tests::rejects_unknown_flow_kind ... ok
+test agent::tests::wait_with_timeout_handles_large_stdout_without_false_timeout ... ok
+test flow::tests::refactor_alternates_structural_and_mechanical_prompts ... ok
+test flow::tests::lint_fix_command_still_fails_when_recheck_fails ... ok
+test flow::tests::lint_fix_command_recovers_lint_failure ... ok
+test flow::tests::single_prompt_changed_files_retry_with_associated_suites_remains_failure_context ... ok
+test flow::tests::single_prompt_changed_files_retry_without_associated_suites_is_not_failure_context ... ok
+test flow::tests::single_prompt_failure_context_excludes_history_when_todo_context_hash_changes ... ok
+test flow::tests::single_prompt_failure_context_includes_all_latest_iteration_failures_in_order ... ok
+test flow::tests::run_test_and_lint_reloads_chief_yaml_suite_commands_between_iterations ... ok
+test flow::tests::single_prompt_failure_context_stops_at_retry_cleanup_reset_for_suite_history ... ok
+test flow::tests::single_prompt_failure_context_includes_failed_commands_and_output_tails ... ok
+test flow::tests::refactor_uses_todo_suites_in_prompt_when_todo_sets_subset ... ok
+test flow::tests::run_test_and_lint_runs_all_suites_and_returns_false_when_any_test_fails ... ok
+test flow::tests::touched_files_since_last_retry_reset_uses_all_runs_and_stops_at_latest_reset ... ok
+test flow::tests::single_prompt_failure_context_uses_latest_suite_failures_across_runs ... ok
+test git::tests::transient_lock_signature_matches_expected_git_error ... ok
+test orchestrator::tests::delay_policy_applies_and_can_be_observed ... ok
+test orchestrator::tests::delay_policy_can_stop_retries_early ... ok
+test orchestrator::tests::lock_io_retry_policy_runs_three_ten_second_backoffs_before_terminal_retryable ... ok
+test orchestrator::tests::retries_until_success ... ok
+test orchestrator::tests::unrecoverable_stops_immediately ... ok
+test scheduler::supervisor::tests::multi_agent_terminal_failure_cancels_peer_workers_and_stops_run ... ignored, placeholder until multi-agent supervisor refactor lands
+test git::tests::git_command_retry_recovers_after_lock_is_cleared ... ok
+test git::tests::git_command_retry_stops_after_retry_budget_exhausted ... ok
+test scheduler::worker::tests::lock_retry_exhaustion_in_executor_keeps_worker_terminal_state_and_error_details ... ok
+test scheduler::worker::tests::worker_worktree_dir_name_uses_chief_prefix ... ok
+test service::tests::chief_engine_start_run_requires_chief_yaml ... ok
+test scheduler::supervisor::tests::unrecoverable_worker_failure_stops_scheduler_and_sets_unrecoverable_run_status ... ok
+test scheduler::worker::tests::unrecoverable_worker_error_marks_job_failed_with_lock_details ... ok
+test service::tests::discover_dedupes_manual_project_already_in_projects_dir ... ok
+test service::tests::discover_errors_on_duplicate_project_names ... ok
+test service::tests::non_matching_runtime_failure_is_not_classified_as_transient_lock_contention ... ok
+test service::tests::discover_merges_projects_dir_and_manual_projects ... ok
+test service::tests::transient_io_retry_path_retries_three_times_with_ten_second_delays ... ok
+test service::tests::transient_lock_contention_io_error_kinds_are_detected ... ok
+test service::tests::transient_lock_contention_signature_is_detected ... ok
+test service::tests::transient_lock_retry_path_can_succeed_after_retries ... ok
+test service::tests::transient_lock_retry_path_retries_three_times_with_ten_second_delays ... ok
+test service::tests::worker_worktree_dir_name_uses_chief_prefix ... ok
+test service::tests::loop_file_flow_forces_single_outer_retry_attempt ... ok
+test storage::tests::claim_next_pending_todo_normalizes_legacy_attempted_status_before_claim ... ok
+test flow::tests::run_test_suite_executes_cleanup_command_even_on_test_failure ... ok
+test service::tests::run_todos_until_done_with_retries_stops_after_first_terminal_todo_failure ... ok
+test storage::tests::claim_next_pending_todo_respects_priority_then_id_order ... ok
+test storage::tests::claim_todo_updates_sqlite ... ok
+test storage::tests::delete_done_todos_removes_only_done_items ... ok
+test storage::tests::readiness_state_defaults_to_not_ready_before_any_check ... ok
+test storage::tests::delete_todo_removes_from_sqlite ... ok
+test storage::tests::inconsistent_db_requires_confirmation_before_reset ... ok
+test storage::tests::readiness_state_transitions_from_checking_to_ready ... ok
+test storage::tests::append_todo_does_not_auto_commit_when_repo_available ... ok
+test storage::tests::replace_todos_reconciles_add_update_remove_without_duplicates ... ok
+test storage::tests::replace_todos_with_empty_input_clears_sqlite_queue ... ok
+test storage::tests::update_todo_status_fails_for_missing_todo ... ok
+test worktree_cache::tests::file_content_md5_hashes_file_bytes ... ok
+test storage::tests::trim_events_keeps_only_latest_runs ... ok
+test worktree_cache::tests::prime_then_hydrate_copies_cache_by_default ... ok
+test worktree_cache::tests::suite_cache_inputs_hash_changes_when_lockfile_changes ... ok
+test storage::tests::replace_todos_does_not_auto_commit_when_repo_available ... ok
+test worktree_cache::tests::prime_then_hydrate_uses_symlink_mode_when_configured ... ok
+test flow::tests::run_test_and_lint_runs_tests_even_when_lint_fails ... ok
+test agent::tests::wait_with_timeout_honors_cancel_without_timeout ... ok
+test flow::tests::suite_preparation_commands_run_once_per_suite_per_execution ... ok
+test flow::tests::loop_file_runs_lint_and_tests_for_all_configured_suites ... ok
+test storage::tests::trim_events_reclaims_db_space ... ok
+test flow::tests::execute_suite_command_returns_timeout_exit_code ... ok
+
+test result: ok. 91 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+     Running unittests src/bin/chief.rs (target/debug/deps/chief-098cd203a1dc0b91)
+
+running 42 tests
+test api::service::tests::parse_todo_status_input_rejects_attempted ... ok
+test api::service::tests::resolve_last_done_todo_committed_at_deduplicates_hashes ... ok
+test api::service::tests::get_todos_reflects_sqlite_additions_without_refresh_side_effects ... ok
+test api::service::tests::get_todos_reflects_sqlite_deletions ... ok
+test api::service::tests::reset_project_workspace_logs_marker_even_when_worktree_is_already_clean ... ok
+test api::service::tests::get_state_ignores_unresolved_done_commit_hashes_and_returns_null_timestamp ... ok
+test api::service::tests::read_endpoints_reflect_sqlite_replacements_between_reads ... ok
+test api::service::tests::get_todos_and_get_state_reflect_sqlite_mutations_between_calls ... ok
+test api::service::tests::reset_project_workspace_discards_changes_and_logs_reset_markers_for_non_done_todos ... ok
+test api::service::tests::get_state_returns_latest_resolved_done_todo_commit_timestamp ... ok
+test api::service::tests::start_project_rejects_loop_file_flow_as_cli_only ... ok
+test api::service::tests::start_project_rejects_missing_chief_yaml_without_creating_run_or_job_records ... ok
+test api::service::tests::start_project_skips_pre_run_checks_when_last_success_matches_chief_yaml ... ok
+test api::service::tests::start_project_blocks_when_pre_run_checks_detect_broken_suite_command ... ok
+test api::service::tests::run_suite_check_uses_clean_worktree_without_untracked_files ... ok
+test tests::ensure_gitignore_entries_appends_only_missing_entries ... ok
+test tests::ensure_gitignore_entries_creates_file_when_missing ... ok
+test tests::ensure_gitignore_entries_is_idempotent ... ok
+test api::service::tests::start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_success ... ok
+test api::service::tests::start_project_reruns_pre_run_checks_when_previous_result_was_not_successful ... ok
+test api::service::tests::start_project_uses_latest_flow_from_chief_yaml_on_disk ... ok
+test tests::init_writes_full_default_chief_yaml_block ... ok
+test tests::migrate_moves_legacy_root_files_into_dot_chief ... ok
+test api::service::tests::update_chief_yaml_commits_changes_to_git ... ok
+test tests::parse_check_with_force_flag ... ok
+test api::service::tests::start_project_pre_run_checks_use_clean_worktree_without_untracked_files ... ok
+test tests::parse_loop_file_command ... ok
+test tests::parse_refactor_command ... ok
+test tests::parse_root_file_option ... ok
+test tests::parse_suite_lint_fix_with_dash_alias ... ok
+test tests::resolve_suite_command_replaces_target_placeholder ... ok
+test tests::loop_file_fails_when_input_file_is_missing ... ok
+test tests::parse_suite_lint_with_linting_alias ... ok
+test tests::parse_suite_test_init_with_underscore_name ... ok
+test tests::run_non_init_fails_fast_when_chief_yaml_is_missing ... ok
+test tests::git_commits_since_without_head_before_returns_recent_commits ... ok
+test tests::run_requires_file_when_loop_file_flow_is_selected ... ok
+test api::service::tests::update_chief_yaml_does_not_commit_other_dirty_files ... ok
+test tests::run_rejects_file_option_for_non_loop_file_flows ... ok
+test tests::git_commits_since_with_head_before_filters_history ... ok
+test api::service::tests::update_chief_yaml_noop_commit_when_content_unchanged ... ok
+test api::service::tests::start_project_persists_pre_run_check_result_if_request_future_is_dropped ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.69s
+
+     Running unittests src/bin/chief_backend.rs (target/debug/deps/chief_backend-1e8b5a016f20294e)
+
+running 26 tests
+test api::auth::tests::extracts_bearer_token ... ok
+test api::auth::tests::returns_none_when_no_supported_header ... ok
+test api::auth::tests::extracts_x_chief_token ... ok
+test api::service::tests::parse_todo_status_input_rejects_attempted ... ok
+test api::service::tests::resolve_last_done_todo_committed_at_deduplicates_hashes ... ok
+test api::service::tests::get_todos_reflects_sqlite_additions_without_refresh_side_effects ... ok
+test api::service::tests::get_todos_reflects_sqlite_deletions ... ok
+test api::service::tests::reset_project_workspace_logs_marker_even_when_worktree_is_already_clean ... ok
+test api::service::tests::get_state_ignores_unresolved_done_commit_hashes_and_returns_null_timestamp ... ok
+test api::service::tests::read_endpoints_reflect_sqlite_replacements_between_reads ... ok
+test api::service::tests::get_todos_and_get_state_reflect_sqlite_mutations_between_calls ... ok
+test api::service::tests::reset_project_workspace_discards_changes_and_logs_reset_markers_for_non_done_todos ... ok
+test api::service::tests::start_project_rejects_loop_file_flow_as_cli_only ... ok
+test api::service::tests::get_state_returns_latest_resolved_done_todo_commit_timestamp ... ok
+test api::service::tests::start_project_rejects_missing_chief_yaml_without_creating_run_or_job_records ... ok
+test api::service::tests::start_project_skips_pre_run_checks_when_last_success_matches_chief_yaml ... ok
+test api::service::tests::run_suite_check_uses_clean_worktree_without_untracked_files ... ok
+test api::service::tests::start_project_blocks_when_pre_run_checks_detect_broken_suite_command ... ok
+test api::service::tests::start_project_pre_run_checks_use_clean_worktree_without_untracked_files ... ok
+test api::service::tests::start_project_reruns_pre_run_checks_when_previous_result_was_not_successful ... ok
+test api::service::tests::start_project_reruns_pre_run_checks_when_chief_yaml_changes_after_success ... ok
+test api::service::tests::update_chief_yaml_commits_changes_to_git ... ok
+test api::service::tests::start_project_uses_latest_flow_from_chief_yaml_on_disk ... ok
+test api::service::tests::update_chief_yaml_does_not_commit_other_dirty_files ... ok
+test api::service::tests::update_chief_yaml_noop_commit_when_content_unchanged ... ok
+test api::service::tests::start_project_persists_pre_run_check_result_if_request_future_is_dropped ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.69s
+
+   Doc-tests chief
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
