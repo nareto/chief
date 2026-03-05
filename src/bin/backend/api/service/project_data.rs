@@ -45,7 +45,7 @@ impl ApiService {
         let engine = ChiefEngine::new(context.clone());
 
         let diff = tokio::task::spawn_blocking(move || {
-            engine.process_requirements(&payload.text, &context.store.todos_path, payload.model)
+            engine.process_requirements(&payload.text, payload.model)
         })
         .await
         .map_err(|err| ApiError::internal(anyhow!(err.to_string())))?

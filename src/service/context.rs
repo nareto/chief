@@ -57,7 +57,6 @@ impl ProjectContext {
 
     pub fn refresh(&mut self) -> Result<()> {
         self.chief_yaml = ChiefYaml::load_or_default(&self.config_path)?;
-        self.store.sync_todos_from_file()?;
         Ok(())
     }
 

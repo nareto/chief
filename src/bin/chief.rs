@@ -218,11 +218,7 @@ fn run(cli: &Cli) -> Result<()> {
     let requirements_text = load_requirements_text(&cli.requirements, &cli.requirements_file)?;
     if !requirements_text.trim().is_empty() {
         let engine = ChiefEngine::new(context.clone());
-        let diff = engine.process_requirements(
-            &requirements_text,
-            &context.store.todos_path,
-            cli.model.clone(),
-        )?;
+        let diff = engine.process_requirements(&requirements_text, cli.model.clone())?;
         println!("=== git diff HEAD ===");
         if diff.trim().is_empty() {
             println!("(no diff)");

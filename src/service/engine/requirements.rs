@@ -1,15 +1,13 @@
 use super::ChiefEngine;
-use crate::domain::{EventType, RunExitStatus, payload_from_json};
+use crate::domain::{EventType, RunExitStatus, TodoFile, payload_from_json};
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use anyhow::{Context, Result, anyhow};
-use std::path::Path;
 
 impl ChiefEngine {
     pub fn process_requirements(
         &self,
         requirements_text: &str,
-        todos_path: &Path,
         model_override: Option<String>,
     ) -> Result<String> {
         let run_id = self.start_run()?;
@@ -20,7 +18,6 @@ impl ChiefEngine {
                 "requirements.md",
                 &serde_json::json!({
                     "requirements_text": requirements_text,
-                    "todos_path": todos_path.display().to_string(),
                 }),
             )?;
             self.log_runtime_event(
@@ -90,9 +87,12 @@ impl ChiefEngine {
                 ));
             }
 
-            self.project.store.sync_todos_from_file().context(
-                "failed syncing todo DB from .chief/todos.yaml after requirements processing",
-            )?;
+            let todos = parse_requirements_todos(&response.merged_output)
+                .context("failed parsing requirements output into todos")?;
+            self.project
+                .store
+                .replace_todos(todos)
+                .context("failed applying requirements todos to sqlite queue")?;
 
             let diff = self
                 .project
@@ -112,4 +112,46 @@ impl ChiefEngine {
 
         out
     }
+}
+
+fn parse_requirements_todos(agent_output: &str) -> Result<Vec<crate::domain::Todo>> {
+    if let Ok(todo_file) = serde_yaml::from_str::<TodoFile>(agent_output) {
+        return Ok(todo_file.todos);
+    }
+
+    if let Some(block) = extract_first_yaml_code_block(agent_output) {
+        let todo_file = serde_yaml::from_str::<TodoFile>(&block)
+            .context("YAML code block must deserialize into { todos: [...] }")?;
+        return Ok(todo_file.todos);
+    }
+
+    Err(anyhow!(
+        "requirements output must be YAML with a top-level `todos:` list (raw YAML or fenced ```yaml block)"
+    ))
+}
+
+fn extract_first_yaml_code_block(text: &str) -> Option<String> {
+    let mut collecting = false;
+    let mut buffer = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !collecting {
+            if trimmed.starts_with("```yaml") || trimmed.starts_with("```yml") || trimmed == "```" {
+                collecting = true;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("```") {
+            if !buffer.is_empty() {
+                return Some(buffer.join("\n"));
+            }
+            collecting = false;
+            continue;
+        }
+        buffer.push(line);
+    }
+
+    None
 }

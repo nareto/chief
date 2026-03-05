@@ -9,8 +9,17 @@ Your task will be:
     - have a clear description on what needs to be achieved
     - be self-contained: include all the needed context, without refering to the general context outlined here nor to other specific todos
     - include, in the expectations field, examples of assertions regarding the todo that should hold (these will be used by the developer to write tests)
-5. Insert/update the todos in `{{ todos_path }}`.
-8. Set appropriate priorities for the new todos: 100 or above is DO NOW, 1 is do if there is nothing else to do.
+5. Return the todos as YAML in your final response using this exact top-level shape:
+```yaml
+todos:
+  - id: ...
+    todo: ...
+    expectations: ...
+    priority: ...
+    test_suites: []
+    status: pending
+```
+6. Set appropriate priorities for the new todos: 100 or above is DO NOW, 1 is do if there is nothing else to do.
 
 REQUIREMENTS:
 {{ requirements_text }}

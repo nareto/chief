@@ -57,6 +57,10 @@ impl ProjectStore {
 
     pub fn sync_todos_from_file(&self) -> Result<()> {
         let todos = self.load_todo_file()?.todos;
+        self.replace_todos(todos)
+    }
+
+    pub fn replace_todos(&self, todos: Vec<Todo>) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let todo_ids = todos
@@ -81,6 +85,7 @@ impl ProjectStore {
             )?;
         }
 
+        self.sync_todos_file_from_conn(&tx)?;
         tx.commit()?;
         Ok(())
     }

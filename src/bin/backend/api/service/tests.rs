@@ -3,7 +3,6 @@ use super::{
     ApiService, RETRY_CLEANUP_DISCARDED_MSG_PREFIX, is_internal_workspace_state_file,
     parse_todo_status_input, resolve_last_done_todo_committed_at,
 };
-use crate::api::error::ApiError;
 use crate::api::types::{RunSuiteCheckRequest, StartProjectRequest, UpdateChiefYamlRequest};
 use axum::body::to_bytes;
 use axum::http::StatusCode;
@@ -259,25 +258,6 @@ fn setup_service(initial_todos_yaml: &str) -> (TempDir, ApiService, String, Path
     let scheduler = Scheduler::new(registry, 4);
     let service = ApiService::new(scheduler, 1);
     (workspace, service, project_name, project_dir)
-}
-
-async fn assert_invalid_yaml_api_error(err: ApiError) {
-    let response = err.into_response();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("error response body should be readable");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("error response should be JSON");
-    let message = payload
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    assert!(
-        message.contains("invalid YAML in"),
-        "expected invalid YAML error, got: {message}"
-    );
 }
 
 #[tokio::test]
@@ -1073,7 +1053,7 @@ async fn start_project_reruns_pre_run_checks_when_previous_result_was_not_succes
 }
 
 #[tokio::test]
-async fn get_todos_refreshes_from_todos_yaml_without_db_reset() {
+async fn get_todos_ignores_manual_todos_yaml_additions_without_db_reset() {
     let (_workspace, service, project, project_dir) = setup_service(
         r#"todos:
   - id: todo-in-db
@@ -1107,13 +1087,22 @@ async fn get_todos_refreshes_from_todos_yaml_without_db_reset() {
         .expect("get_todos should succeed after manual todos.yaml edit");
 
     assert!(
-        response.todos.iter().any(|todo| todo.id == "manual-new"),
-        "new todo from todos.yaml should be visible via get_todos"
+        response.todos.iter().all(|todo| todo.id != "manual-new"),
+        "manual todos.yaml edits should not mutate sqlite-backed queue state"
+    );
+    assert_eq!(
+        response
+            .todos
+            .iter()
+            .map(|todo| todo.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-in-db"],
+        "get_todos should reflect sqlite state only"
     );
 }
 
 #[tokio::test]
-async fn get_todos_removes_items_deleted_from_todos_yaml() {
+async fn get_todos_ignores_manual_todos_yaml_removals() {
     let (_workspace, service, project, project_dir) = setup_service(
         r#"todos:
   - id: todo-keep
@@ -1144,19 +1133,15 @@ async fn get_todos_removes_items_deleted_from_todos_yaml() {
     let response = service
         .get_todos(&project)
         .await
-        .expect("get_todos should sync file removals");
+        .expect("get_todos should read sqlite without file refresh");
     assert_eq!(
         response.todos.len(),
-        1,
-        "response should exactly match todos.yaml after manual removal"
-    );
-    assert_eq!(
-        response.todos[0].id, "todo-keep",
-        "remaining todo should still be visible"
+        2,
+        "manual file removals should not alter sqlite-backed queue state"
     );
     assert!(
-        response.todos.iter().all(|todo| todo.id != "todo-remove"),
-        "removed todo should not be returned by get_todos"
+        response.todos.iter().any(|todo| todo.id == "todo-remove"),
+        "removed todo should still be returned by get_todos"
     );
 
     let store = ProjectStore::new(&project_dir);
@@ -1164,13 +1149,13 @@ async fn get_todos_removes_items_deleted_from_todos_yaml() {
         .list_todos()
         .expect("sqlite todos should be readable after sync");
     assert!(
-        sqlite_todos.iter().all(|todo| todo.id != "todo-remove"),
-        "removed todo should also be deleted from sqlite after refresh sync"
+        sqlite_todos.iter().any(|todo| todo.id == "todo-remove"),
+        "manual file edits should not mutate sqlite todo state"
     );
 }
 
 #[tokio::test]
-async fn get_todos_and_get_state_refresh_between_calls_after_manual_todo_edits() {
+async fn get_todos_and_get_state_ignore_manual_todos_yaml_edits_between_calls() {
     let (_workspace, service, project, project_dir) = setup_service(
         r#"todos:
   - id: todo-alpha
@@ -1246,40 +1231,40 @@ async fn get_todos_and_get_state_refresh_between_calls_after_manual_todo_edits()
     let todos = service
         .get_todos(&project)
         .await
-        .expect("get_todos should reflect manual todo edits");
+        .expect("get_todos should continue reading sqlite state");
     let edited = todos
         .todos
         .iter()
         .find(|todo| todo.id == "todo-alpha")
-        .expect("edited todo should exist");
-    assert_eq!(edited.todo, "Edited todo text from file");
-    assert_eq!(edited.expectations, "Edited expectations from file");
-    assert_eq!(edited.priority, 9);
-    assert_eq!(edited.done_at_commit.as_deref(), Some("manual-edit-commit"));
+        .expect("baseline todo should still exist");
+    assert_eq!(edited.todo, "Original todo text");
+    assert_eq!(edited.expectations, "Original expectations");
+    assert_eq!(edited.priority, 1);
+    assert_eq!(edited.done_at_commit, None);
     assert!(
-        todos.todos.iter().any(|todo| todo.id == "todo-gamma"),
-        "second get_todos should include manually added todos"
+        todos.todos.iter().all(|todo| todo.id != "todo-gamma"),
+        "second get_todos should not include manually added file todos"
     );
     assert!(
-        todos.todos.iter().all(|todo| todo.id != "todo-remove"),
-        "second get_todos should remove todos deleted from todos.yaml"
+        todos.todos.iter().any(|todo| todo.id == "todo-remove"),
+        "sqlite queue should keep todos removed only from file"
     );
 
     let state = service
         .get_state(&project)
         .await
-        .expect("get_state should refresh todos before progress calculation");
+        .expect("get_state should use sqlite state for progress calculation");
     assert_eq!(
         state.todos.total, 3,
-        "total todos should reflect file edits"
+        "total todos should remain unchanged from sqlite baseline"
     );
     assert_eq!(
-        state.todos.completed, 2,
-        "completed count should reflect edited todo status"
+        state.todos.completed, 1,
+        "completed count should remain unchanged from sqlite baseline"
     );
     assert_eq!(
-        state.todos.available, 1,
-        "available count should reflect add/update/remove reconciliation"
+        state.todos.available, 2,
+        "available count should remain unchanged from sqlite baseline"
     );
 }
 
@@ -1341,39 +1326,40 @@ async fn get_state_returns_latest_resolved_done_todo_commit_timestamp() {
         .with_timezone(&chrono::Utc)
         .to_rfc3339();
 
-    write_todos(
-        &project_dir,
-        &format!(
-            r#"todos:
-  - id: done-old
-    todo: done old
-    expectations: done old expectations
-    priority: 10
-    test_suites: []
-    status: done
-    done_at_commit: {older_commit}
-  - id: done-new
-    todo: done new
-    expectations: done new expectations
-    priority: 9
-    test_suites: []
-    status: done
-    done_at_commit: {newer_commit}
-  - id: done-new-duplicate
-    todo: done new duplicate
-    expectations: duplicate commit hash to verify dedupe path
-    priority: 8
-    test_suites: []
-    status: done
-    done_at_commit: {newer_commit}
-  - id: pending
-    todo: pending todo
-    expectations: pending expectations
-    priority: 7
-    test_suites: []
-    status: pending"#
-        ),
-    );
+    let store = ProjectStore::new(&project_dir);
+    store
+        .append_todo(Todo {
+            id: "done-old".to_owned(),
+            todo: "done old".to_owned(),
+            expectations: "done old expectations".to_owned(),
+            priority: 10,
+            test_suites: Vec::new(),
+            status: TodoStatus::Done,
+            done_at_commit: Some(older_commit.clone()),
+        })
+        .expect("done-old todo should be appended");
+    store
+        .append_todo(Todo {
+            id: "done-new".to_owned(),
+            todo: "done new".to_owned(),
+            expectations: "done new expectations".to_owned(),
+            priority: 9,
+            test_suites: Vec::new(),
+            status: TodoStatus::Done,
+            done_at_commit: Some(newer_commit.clone()),
+        })
+        .expect("done-new todo should be appended");
+    store
+        .append_todo(Todo {
+            id: "done-new-duplicate".to_owned(),
+            todo: "done new duplicate".to_owned(),
+            expectations: "duplicate commit hash to verify dedupe path".to_owned(),
+            priority: 8,
+            test_suites: Vec::new(),
+            status: TodoStatus::Done,
+            done_at_commit: Some(newer_commit.clone()),
+        })
+        .expect("duplicate done todo should be appended");
 
     let state = service
         .get_state(&project)
@@ -1408,30 +1394,29 @@ async fn get_state_ignores_unresolved_done_commit_hashes_and_returns_null_timest
     status: pending"#,
     );
 
-    write_todos(
-        &project_dir,
-        r#"todos:
-  - id: done-missing-1
-    todo: done with missing hash
-    expectations: unresolved hash should be ignored
-    priority: 5
-    test_suites: []
-    status: done
-    done_at_commit: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
-  - id: done-missing-2
-    todo: done with another missing hash
-    expectations: unresolved hash should be ignored
-    priority: 4
-    test_suites: []
-    status: done
-    done_at_commit: not-a-real-commit
-  - id: pending
-    todo: pending todo
-    expectations: keep counters unchanged
-    priority: 3
-    test_suites: []
-    status: pending"#,
-    );
+    let store = ProjectStore::new(&project_dir);
+    store
+        .append_todo(Todo {
+            id: "done-missing-1".to_owned(),
+            todo: "done with missing hash".to_owned(),
+            expectations: "unresolved hash should be ignored".to_owned(),
+            priority: 5,
+            test_suites: Vec::new(),
+            status: TodoStatus::Done,
+            done_at_commit: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned()),
+        })
+        .expect("first unresolved done todo should be appended");
+    store
+        .append_todo(Todo {
+            id: "done-missing-2".to_owned(),
+            todo: "done with another missing hash".to_owned(),
+            expectations: "unresolved hash should be ignored".to_owned(),
+            priority: 4,
+            test_suites: Vec::new(),
+            status: TodoStatus::Done,
+            done_at_commit: Some("not-a-real-commit".to_owned()),
+        })
+        .expect("second unresolved done todo should be appended");
 
     let state = service
         .get_state(&project)
@@ -1777,7 +1762,7 @@ async fn update_chief_yaml_does_not_commit_other_dirty_files() {
 }
 
 #[tokio::test]
-async fn read_endpoints_return_api_errors_for_invalid_todos_yaml() {
+async fn read_endpoints_ignore_invalid_todos_yaml_after_db_seed() {
     let (_workspace, service, project, project_dir) = setup_service(
         r#"todos:
   - id: valid-todo
@@ -1818,17 +1803,28 @@ async fn read_endpoints_return_api_errors_for_invalid_todos_yaml() {
     )
     .expect("failed to write invalid todos.yaml");
 
-    let todos_error = service
+    let todos_after_invalid_yaml = service
         .get_todos(&project)
         .await
-        .expect_err("get_todos should fail for invalid todos.yaml");
-    assert_invalid_yaml_api_error(todos_error).await;
+        .expect("get_todos should keep serving sqlite state");
+    assert_eq!(
+        todos_after_invalid_yaml
+            .todos
+            .iter()
+            .map(|todo| todo.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["valid-todo"],
+        "manual invalid todos.yaml should not impact sqlite-backed reads"
+    );
 
-    let state_error = service
+    let state_after_invalid_yaml = service
         .get_state(&project)
         .await
-        .expect_err("get_state should fail for invalid todos.yaml");
-    assert_invalid_yaml_api_error(state_error).await;
+        .expect("get_state should keep serving sqlite progress");
+    assert_eq!(
+        state_after_invalid_yaml.todos.total, 1,
+        "sqlite progress should remain intact after invalid file edits"
+    );
 
     write_todos(
         &project_dir,
@@ -1844,14 +1840,14 @@ async fn read_endpoints_return_api_errors_for_invalid_todos_yaml() {
     let recovered_todos = service
         .get_todos(&project)
         .await
-        .expect("get_todos should recover after restoring valid yaml");
+        .expect("get_todos should continue to serve sqlite state");
     assert_eq!(
         recovered_todos
             .todos
             .iter()
             .map(|todo| todo.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["recovered-todo"],
-        "post-recovery read should reflect latest synchronized file content"
+        vec!["valid-todo"],
+        "manual todos.yaml recovery should not mutate sqlite-backed queue content"
     );
 }
