@@ -227,64 +227,6 @@ impl LoopFilePhaseStrategy {
         )
     }
 
-    pub(super) fn ready_bd_ticket_count(
-        &self,
-        execution: &FlowExecution<'_>,
-    ) -> Result<Option<usize>> {
-        let local_bd = execution.project_dir.join("bd");
-        let bd_command = if local_bd.is_file() {
-            local_bd
-        } else {
-            std::path::PathBuf::from("bd")
-        };
-        let output = match std::process::Command::new(&bd_command)
-            .args(["ready", "--json"])
-            .current_dir(&execution.project_dir)
-            .output()
-        {
-            Ok(output) => output,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                execution.log_event(
-                    "warning",
-                    Some(Phase::LoopFile),
-                    EventType::PhaseChange,
-                    "loop_file: `bd` command was not found; skipping bd readiness check",
-                    BTreeMap::new(),
-                )?;
-                return Ok(None);
-            }
-            Err(err) => {
-                return Err(err).context("failed to run `bd ready --json` during loop_file");
-            }
-        };
-
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            execution.log_event(
-                "warning",
-                Some(Phase::LoopFile),
-                EventType::PhaseChange,
-                "loop_file: `bd ready --json` failed; skipping bd readiness check",
-                payload_from_json(json!({
-                    "status": output.status.to_string(),
-                    "stdout": stdout,
-                    "stderr": stderr,
-                })),
-            )?;
-            return Ok(None);
-        }
-
-        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .context("failed to parse `bd ready --json` output")?;
-        if let Some(entries) = parsed.as_array() {
-            return Ok(Some(entries.len()));
-        }
-        Err(anyhow!(
-            "unexpected `bd ready --json` output shape; expected a JSON array"
-        ))
-    }
-
     pub(super) fn reset_prompt_history(
         &mut self,
         execution: &FlowExecution<'_>,

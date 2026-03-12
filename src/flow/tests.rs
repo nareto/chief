@@ -2659,7 +2659,7 @@ fn loop_file_agent_commit_with_clean_tree_does_not_count_as_stable() {
 }
 
 #[test]
-fn loop_file_restarts_convergence_when_bd_has_ready_tickets() {
+fn loop_file_does_not_restart_from_global_bd_ready_tickets() {
     let project_dir = temp_project_dir();
     fs::create_dir_all(&project_dir).expect("project dir should be created");
     let store = ProjectStore::new(&project_dir);
@@ -2671,9 +2671,13 @@ fn loop_file_restarts_convergence_when_bd_has_ready_tickets() {
     .expect("chief config should be written");
 
     let bd_script = project_dir.join("bd");
+    let bd_called = project_dir.join(".bd_called");
     fs::write(
         &bd_script,
-        "#!/bin/sh\nset -eu\nstate=\".bd_ready_once\"\nif [ ! -f \"$state\" ]; then\n  printf '[{\"id\":\"chief-1\"}]\\n'\n  : > \"$state\"\nelse\n  printf '[]\\n'\nfi\n",
+        format!(
+            "#!/bin/sh\nset -eu\n: > \"{}\"\nprintf '[{{\"id\":\"chief-1\"}}]\\n'\n",
+            bd_called.display()
+        ),
     )
     .expect("bd script should be written");
     #[cfg(unix)]
@@ -2721,21 +2725,23 @@ fn loop_file_restarts_convergence_when_bd_has_ready_tickets() {
 
     let flow = build_flow(FlowKind::LoopFile, 4, 1);
     flow.run_todo(&mut execution)
-        .expect("loop_file flow should complete after bd restart");
+        .expect("loop_file flow should complete without a bd-driven restart");
 
     assert_eq!(
         agent.runs(),
-        4,
-        "loop_file should run two convergence passes (iteration + convergence each pass)"
+        2,
+        "loop_file should run one implementation pass and one convergence review"
     );
     assert_eq!(
         prompts.template_names(),
         vec![
             "loop_file_prompt.md".to_owned(),
             "loop_file_convergence.md".to_owned(),
-            "loop_file_prompt.md".to_owned(),
-            "loop_file_convergence.md".to_owned(),
         ],
+    );
+    assert!(
+        !bd_called.exists(),
+        "loop_file should not consult global bd readiness while converging a single file task"
     );
 
     let events = store
@@ -2745,12 +2751,12 @@ fn loop_file_restarts_convergence_when_bd_has_ready_tickets() {
         })
         .expect("event query should succeed");
     assert!(
-        events.iter().any(|event| {
-            event
+        events.iter().all(|event| {
+            !event
                 .msg
-                .starts_with("Retry cleanup: discarded local git changes before loop bd/")
+                .contains("ready bd ticket(s); restarting convergence loop")
         }),
-        "loop_file should log a retry-reset marker before restarting convergence after bd tickets"
+        "loop_file should not restart convergence from global bd ticket state"
     );
 
     let _ = fs::remove_dir_all(&project_dir);

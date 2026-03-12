@@ -67,24 +67,6 @@ impl ExecutionFlow for LoopFileFlow {
                 continue;
             }
 
-            let ready_bd_count = strategy.ready_bd_ticket_count(execution)?.unwrap_or(0);
-            if ready_bd_count > 0 {
-                execution.log_event(
-                    "warning",
-                    Some(Phase::LoopFile),
-                    EventType::PhaseChange,
-                    format!(
-                        "loop_file convergence check found {ready_bd_count} ready bd ticket(s); restarting convergence loop"
-                    ),
-                    payload_from_json(json!({
-                        "ready_bd_tickets": ready_bd_count,
-                        "convergence_pass": convergence_pass,
-                    })),
-                )?;
-                let reset_marker = format!("bd/{}/{}", convergence_pass, ready_bd_count);
-                strategy.reset_prompt_history(execution, reset_marker.as_str())?;
-                continue;
-            }
             break;
         }
 
