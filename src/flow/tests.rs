@@ -24,6 +24,7 @@ use uuid::Uuid;
 #[test]
 fn parses_known_flow_kinds() {
     assert_eq!(FlowKind::from_str("loop_file").unwrap(), FlowKind::LoopFile);
+    assert_eq!(FlowKind::from_str("bd").unwrap(), FlowKind::Bd);
     assert_eq!(FlowKind::from_str("refactor").unwrap(), FlowKind::Refactor);
     assert_eq!(
         FlowKind::from_str(" LOOP_FILE ").unwrap(),
@@ -44,9 +45,11 @@ fn rejects_unknown_flow_kind() {
 #[test]
 fn build_flow_matches_kind() {
     let loop_file = build_flow(FlowKind::LoopFile, 20, 2);
+    let bd = build_flow(FlowKind::Bd, 20, 2);
     let refactor = build_flow(FlowKind::Refactor, 20, 2);
 
     assert_eq!(loop_file.name(), "loop_file");
+    assert_eq!(bd.name(), "bd");
     assert_eq!(refactor.name(), "refactor");
 }
 
@@ -262,6 +265,67 @@ impl PromptStore for TemplateRecordingPromptStore {
             .lock()
             .expect("template names mutex poisoned")
             .push(template_name.to_owned());
+        Ok(format!("prompt:{template_name}"))
+    }
+
+    fn exists(&self, _template_name: &str) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+struct BdPromptRecordingStore {
+    template_names: Mutex<Vec<String>>,
+    rendered_bd_tickets: Mutex<Vec<String>>,
+    rendered_bd_ticket_counts: Mutex<Vec<usize>>,
+}
+
+impl BdPromptRecordingStore {
+    fn template_names(&self) -> Vec<String> {
+        self.template_names
+            .lock()
+            .expect("template names mutex poisoned")
+            .clone()
+    }
+
+    fn rendered_bd_tickets(&self) -> Vec<String> {
+        self.rendered_bd_tickets
+            .lock()
+            .expect("bd tickets mutex poisoned")
+            .clone()
+    }
+
+    fn rendered_bd_ticket_counts(&self) -> Vec<usize> {
+        self.rendered_bd_ticket_counts
+            .lock()
+            .expect("bd ticket counts mutex poisoned")
+            .clone()
+    }
+}
+
+impl PromptStore for BdPromptRecordingStore {
+    fn render_json(&self, template_name: &str, data: &Value) -> Result<String> {
+        self.template_names
+            .lock()
+            .expect("template names mutex poisoned")
+            .push(template_name.to_owned());
+        let bd_tickets = data
+            .get("bd_tickets")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let bd_ticket_count = data
+            .get("bd_ticket_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize;
+        self.rendered_bd_tickets
+            .lock()
+            .expect("bd tickets mutex poisoned")
+            .push(bd_tickets);
+        self.rendered_bd_ticket_counts
+            .lock()
+            .expect("bd ticket counts mutex poisoned")
+            .push(bd_ticket_count);
         Ok(format!("prompt:{template_name}"))
     }
 
@@ -2757,6 +2821,183 @@ fn loop_file_does_not_restart_from_global_bd_ready_tickets() {
                 .contains("ready bd ticket(s); restarting convergence loop")
         }),
         "loop_file should not restart convergence from global bd ticket state"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn bd_flow_uses_bd_prompt_and_stops_when_ready_queue_is_empty() {
+    let project_dir = temp_project_dir();
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+    fs::write(
+        crate::paths::chief_yaml_path(&project_dir),
+        "chief:\n  suite_command_timeout_seconds: 1800\n",
+    )
+    .expect("chief config should be written");
+
+    let bd_script = project_dir.join("bd");
+    let bd_calls = project_dir.join(".bd_calls");
+    fs::write(
+        &bd_script,
+        format!(
+            "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"{0}\" ]; then count=$(cat \"{0}\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"{0}\"\nif [ \"$count\" -eq 1 ]; then\n  printf '[{{\"id\":\"chief-1\",\"title\":\"First ticket\"}}]\\n'\nelse\n  printf '[]\\n'\nfi\n",
+            bd_calls.display()
+        ),
+    )
+    .expect("bd script should be written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bd_script)
+            .expect("metadata should be readable")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bd_script, perms).expect("script should be executable");
+    }
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "bd ready convergence".to_owned(),
+        expectations: "Resolve the ready bd tickets".to_owned(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = BdPromptRecordingStore::default();
+    let agent = CountingSuccessfulAgent::default();
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let outcome = build_flow(FlowKind::Bd, 4, 1)
+        .run_todo(&mut execution)
+        .expect("bd flow should complete once ready tickets are drained");
+
+    assert_eq!(agent.runs(), 1, "bd flow should run one agent iteration");
+    assert_eq!(outcome.commit_hash, None);
+    assert_eq!(prompts.template_names(), vec!["bd.md".to_owned()]);
+    assert_eq!(
+        prompts.rendered_bd_tickets(),
+        vec![r#"[{"id":"chief-1","title":"First ticket"}]"#.to_owned()],
+        "bd flow should pass the raw `bd ready --json` output into the prompt",
+    );
+    assert_eq!(prompts.rendered_bd_ticket_counts(), vec![1]);
+    assert_eq!(
+        fs::read_to_string(&bd_calls).expect("bd call counter should exist"),
+        "2",
+        "bd flow should check readiness before and after the agent iteration",
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn bd_flow_uses_max_loop_iterations_as_a_hard_cap() {
+    let project_dir = temp_project_dir();
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+    fs::write(
+        crate::paths::chief_yaml_path(&project_dir),
+        "chief:\n  suite_command_timeout_seconds: 1800\n",
+    )
+    .expect("chief config should be written");
+
+    let bd_script = project_dir.join("bd");
+    let bd_calls = project_dir.join(".bd_calls");
+    fs::write(
+        &bd_script,
+        format!(
+            "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"{0}\" ]; then count=$(cat \"{0}\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"{0}\"\nprintf '[{{\"id\":\"chief-1\"}}]\\n'\n",
+            bd_calls.display()
+        ),
+    )
+    .expect("bd script should be written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bd_script)
+            .expect("metadata should be readable")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bd_script, perms).expect("script should be executable");
+    }
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "bd ready convergence".to_owned(),
+        expectations: "Resolve the ready bd tickets".to_owned(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = BdPromptRecordingStore::default();
+    let agent = CountingSuccessfulAgent::default();
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+
+    let mut execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+    };
+
+    let err = build_flow(FlowKind::Bd, 2, 1)
+        .run_todo(&mut execution)
+        .expect_err("bd flow should fail once the hard cap is exhausted");
+
+    assert!(
+        err.to_string()
+            .contains("until-pass loop failed to reach success"),
+        "bd flow should fail through the hard-capped until-pass loop: {err:#}",
+    );
+    assert_eq!(
+        agent.runs(),
+        2,
+        "bd flow should stop at max_loop_iterations"
+    );
+    assert_eq!(
+        prompts.template_names(),
+        vec!["bd.md".to_owned(), "bd.md".to_owned()],
+    );
+    assert_eq!(
+        fs::read_to_string(&bd_calls).expect("bd call counter should exist"),
+        "3",
+        "bd flow should precheck once and then re-check readiness after each iteration",
     );
 
     let _ = fs::remove_dir_all(&project_dir);

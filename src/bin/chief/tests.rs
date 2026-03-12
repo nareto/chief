@@ -306,6 +306,15 @@ fn parse_loop_file_command() {
 }
 
 #[test]
+fn parse_bd_command() {
+    let cli = Cli::try_parse_from(["chief", "bd"]).expect("bd command should parse");
+
+    let Some(Commands::Bd) = cli.command else {
+        panic!("expected bd command");
+    };
+}
+
+#[test]
 fn parse_refactor_command() {
     let cli = Cli::try_parse_from(["chief", "refactor"]).expect("refactor command should parse");
 

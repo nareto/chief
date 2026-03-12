@@ -31,7 +31,7 @@ use std::sync::atomic::AtomicBool;
 struct Cli {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
-    /// Flow to run (`loop_file` or `refactor`). Defaults to `.chief/chief.yaml`.
+    /// Flow to run (`loop_file`, `bd`, or `refactor`). Defaults to `.chief/chief.yaml`.
     #[arg(long)]
     flow: Option<String>,
     #[arg(long)]
@@ -66,6 +66,8 @@ enum Commands {
     /// Execute one loop_file flow run from a markdown file.
     #[command(name = "loop_file", alias = "loop-file")]
     LoopFile(LoopFileArgs),
+    /// Run a bd-driven convergence loop using prompts/bd.md.
+    Bd,
     /// Run queued todos using the refactor flow.
     Refactor,
 }
@@ -185,6 +187,7 @@ fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
         Commands::TailEvents(args) => run_tail_events(cli, args),
         Commands::Suite(args) => suite_commands::run_suite_command(cli, args),
         Commands::LoopFile(args) => run_loop_file(cli, args),
+        Commands::Bd => run_bd(cli),
         Commands::Refactor => run_refactor(cli),
     }
 }
@@ -239,6 +242,9 @@ fn run(cli: &Cli) -> Result<()> {
     }
     if cli.file.is_some() {
         bail!("--file is only supported when flow resolves to 'loop_file'");
+    }
+    if matches!(flow_kind, FlowKind::Bd) {
+        return run_bd(cli);
     }
 
     run_todo_queue_flow(cli, context, flow_kind)
@@ -296,6 +302,84 @@ fn run_refactor(cli: &Cli) -> Result<()> {
     }
     let context = ProjectContext::load(&cli.project_dir)?;
     run_todo_queue_flow(cli, context, FlowKind::Refactor)
+}
+
+fn run_bd(cli: &Cli) -> Result<()> {
+    let mut context = ProjectContext::load(&cli.project_dir)?;
+    context.chief_yaml.chief.flow = FlowKind::Bd.as_str().to_owned();
+    println!("bd: started {}", context.project_dir.display());
+    let head_before = context.git.head_commit(&context.project_dir).ok();
+
+    let synthetic_todo = Todo {
+        id: Todo::compute_id("bd:ready", "prompts/bd.md"),
+        todo: "bd ready convergence".to_owned(),
+        expectations:
+            "Resolve the current ready bd tickets using prompts/bd.md until `bd ready --json` is empty."
+                .to_owned(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let engine = ChiefEngine::new(context.clone());
+    let run_id = engine.start_run()?;
+    let mut job = context.create_job(
+        &run_id,
+        1,
+        FlowKind::Bd,
+        Some(synthetic_todo.id.clone()),
+        None,
+    )?;
+    job = context.set_job_status(job, JobStatus::Running, None)?;
+
+    let result = engine.run_single_todo_with_retries(
+        &run_id,
+        &job.id,
+        1,
+        synthetic_todo,
+        FlowKind::Bd,
+        context.project_dir.clone(),
+        cli.model.clone(),
+        Arc::new(AtomicBool::new(false)),
+        1,
+        |attempt, total, err| {
+            println!("bd: retry {attempt}/{total} failed: {err:#}");
+        },
+    );
+
+    if let Err(err) =
+        print_cli_flow_summary(&context, Some(run_id.as_str()), head_before.as_deref())
+    {
+        eprintln!("warning: failed to print run summary: {err:#}");
+    }
+
+    match result {
+        Ok(outcome) => {
+            context.set_job_status(job, JobStatus::Completed, None)?;
+            engine.finish_run(&run_id, RunExitStatus::Success)?;
+            println!(
+                "completed bd {}{}",
+                outcome.todo_id,
+                outcome
+                    .commit_hash
+                    .as_deref()
+                    .map(|hash| format!(" @ {hash}"))
+                    .unwrap_or_default()
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let run_exit_status = if err.is_unrecoverable() {
+                RunExitStatus::UnrecoverableFailure
+            } else {
+                RunExitStatus::Failure
+            };
+            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
+            let _ = engine.finish_run(&run_id, run_exit_status);
+            Err(err.into_error()).context("bd execution failed")
+        }
+    }
 }
 
 fn run_clean_done(cli: &Cli) -> Result<()> {

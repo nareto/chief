@@ -152,6 +152,7 @@ pub(crate) fn parse_phase(value: &str) -> Result<Phase, ApiError> {
         "green" => Ok(Phase::Green),
         "single_prompt" => Ok(Phase::SinglePrompt),
         "loop_file" => Ok(Phase::LoopFile),
+        "bd" => Ok(Phase::Bd),
         "refactor" => Ok(Phase::Refactor),
         "post_green" => Ok(Phase::PostGreen),
         "exit" => Ok(Phase::Exit),
