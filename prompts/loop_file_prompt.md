@@ -11,8 +11,6 @@ Implement the task fully, including tests. Include essential documentation (both
 
 If needed, update chief.yaml, following format and instructions in chief.example.yaml. The harness will run all the linting commands and test suites defined there after you are done with your work. Please keep in mind that these tests passing is no measure of completeness of the task. The only source of truth is the difference between the task specified above and the existing codebase.
 
-If you need more context you can also check current and past bd tickets (via `bd list --all`) and git history.
-
 If you find the existing implementation and the tests to satisfy the task at 100%, in all details, it is very important you do not modify any files. By not modifying, you are notifying the harness that is calling this process that the task is properly done and we can move on. 
 
 When in doubt, do the modifications.
