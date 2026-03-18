@@ -6,7 +6,9 @@ This repo contains:
 
 - `chief`: the single-project CLI
 - `chief_backend`: the multi-project scheduler + HTTP/WebSocket API
-- `frontend/`: the Next.js dashboard and project cockpit
+- `frontend/`: the deprecated Next.js dashboard and project cockpit
+
+Frontend note: `frontend/` is deprecated and should be treated as unmaintained unless work is explicitly requested there.
 
 Chief stores state per target project in:
 
@@ -65,7 +67,7 @@ For `chief init` and the `bd` flow:
 
 - `bd` on `PATH`
 
-For the frontend:
+For the deprecated frontend:
 
 - Node.js 20+ and npm, or Docker
 
@@ -207,6 +209,7 @@ chief:
   suite_command_timeout_seconds: 1800
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
+  respect_limits: true
   use_agent_log_truncation_for_stdout_logs: false
 
 suites:
@@ -229,6 +232,7 @@ Current config details worth knowing:
 - `chief.agent` supports `codex` and `claude`.
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.
+- `chief.respect_limits` checks usage with `agentusage` before each call and waits when needed to stay under the slowest active limit.
 - `max_retries` is the queued-work retry budget used by the worktree scheduler.
 - `max_loop_iterations` and `required_stable_iterations` control convergence behavior.
 - `suite_command_timeout_seconds` is the default timeout for suite/readiness commands.

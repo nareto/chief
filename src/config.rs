@@ -70,6 +70,8 @@ pub struct ChiefConfig {
     pub agent_log_max_output_lines: usize,
     #[serde(default = "default_agent_log_max_output_chars")]
     pub agent_log_max_output_chars: usize,
+    #[serde(default = "default_respect_limits")]
+    pub respect_limits: bool,
     #[serde(default)]
     pub use_agent_log_truncation_for_stdout_logs: bool,
 }
@@ -89,6 +91,7 @@ impl Default for ChiefConfig {
             suite_command_timeout_seconds: default_suite_command_timeout_seconds(),
             agent_log_max_output_lines: default_agent_log_max_output_lines(),
             agent_log_max_output_chars: default_agent_log_max_output_chars(),
+            respect_limits: default_respect_limits(),
             use_agent_log_truncation_for_stdout_logs: false,
         }
     }
@@ -198,6 +201,10 @@ fn default_agent_log_max_output_chars() -> usize {
     1_500
 }
 
+fn default_respect_limits() -> bool {
+    true
+}
+
 fn default_test_root() -> String {
     ".".to_owned()
 }
@@ -267,6 +274,20 @@ mod tests {
         let yaml = "chief:\n  agent_timeout_seconds: 600\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.chief.agent_timeout_seconds, 600);
+    }
+
+    #[test]
+    fn respect_limits_defaults_to_true() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.chief.respect_limits);
+    }
+
+    #[test]
+    fn respect_limits_can_be_disabled() {
+        let yaml = "chief:\n  respect_limits: false\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert!(!parsed.chief.respect_limits);
     }
 
     #[test]

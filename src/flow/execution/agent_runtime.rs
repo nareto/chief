@@ -19,6 +19,7 @@ impl<'a> FlowExecution<'a> {
         prompt: String,
         disallowed_paths: Vec<String>,
     ) -> Result<AgentOutput> {
+        let permit = self.prepare_agent_call(phase)?;
         self.ensure_not_cancelled()?;
 
         let query_id = Uuid::new_v4().to_string();
@@ -52,6 +53,13 @@ impl<'a> FlowExecution<'a> {
         ) {
             agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
             return Err(err);
+        }
+
+        if let Some(decision) = permit.decision() {
+            if let Err(err) = self.log_agent_usage_event(phase, decision) {
+                agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
+                return Err(err);
+            }
         }
 
         let before_files = self
