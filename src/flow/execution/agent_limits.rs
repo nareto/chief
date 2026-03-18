@@ -7,8 +7,6 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-const AGENT_USAGE_EVENT_MSG: &str = "Agent usage limits before call";
-
 #[derive(Debug)]
 pub(super) struct AgentCallPermit {
     _guard: Option<MutexGuard<'static, ()>>,
@@ -127,18 +125,16 @@ impl<'a> FlowExecution<'a> {
         };
 
         let history = self.recent_agent_usage_history(&agent_name)?;
-        let decision = compute_agent_pacing(Utc::now(), current_snapshot, &history);
+        let now = Utc::now();
+        let decision = compute_agent_pacing(now, current_snapshot, &history);
 
         if !decision.wait_duration.is_zero() {
+            let wait_until = wait_until_timestamp(now, decision.wait_duration);
             self.log_event(
                 "info",
                 Some(phase),
                 EventType::Msg,
-                format!(
-                    "Waiting {} second(s) before calling {} to respect usage limits",
-                    duration_seconds_ceiling(decision.wait_duration),
-                    agent_name
-                ),
+                waiting_for_usage_limit_message(now, &agent_name, &decision),
                 payload_from_json(json!({
                     "agent_name": agent_name,
                     "respect_limits": true,
@@ -146,7 +142,9 @@ impl<'a> FlowExecution<'a> {
                         .desired_frequency
                         .map(|duration| duration.as_secs_f64()),
                     "wait_seconds": decision.wait_duration.as_secs_f64(),
+                    "wait_until": wait_until.map(|timestamp| timestamp.to_rfc3339()),
                     "limiting_usage_label": decision.limiting_usage_label,
+                    "usage_impact_estimation_basis": usage_impact_estimation_basis(&decision),
                 })),
             )?;
             self.sleep_with_cancellation(decision.wait_duration)?;
@@ -167,7 +165,7 @@ impl<'a> FlowExecution<'a> {
             "info",
             Some(phase),
             EventType::AgentCmd,
-            AGENT_USAGE_EVENT_MSG,
+            agent_usage_event_message(decision),
             payload_from_json(json!({
                 "agent_name": self.agent.name(),
                 "respect_limits": true,
@@ -182,6 +180,7 @@ impl<'a> FlowExecution<'a> {
                 "wait_seconds_applied": decision.wait_duration.as_secs_f64(),
                 "limiting_usage_label": decision.limiting_usage_label,
                 "average_usage_impact": decision.average_usage_impact,
+                "usage_impact_estimation_basis": usage_impact_estimation_basis(decision),
             })),
         )
     }
@@ -420,6 +419,65 @@ fn desired_frequency_for_limit(
     ))
 }
 
+fn usage_impact_estimation_basis(decision: &AgentPacingDecision) -> &'static str {
+    if decision.recent_call_count == 0 {
+        "first_project_run"
+    } else if decision
+        .average_usage_impact
+        .iter()
+        .any(|impact| impact.samples > 0)
+    {
+        "project_history"
+    } else {
+        "no_usable_samples"
+    }
+}
+
+fn agent_usage_event_message(decision: &AgentPacingDecision) -> &'static str {
+    match usage_impact_estimation_basis(decision) {
+        "first_project_run" => {
+            "Agent usage limits before call (first project-local run; per-call impact not estimated yet)"
+        }
+        "no_usable_samples" => {
+            "Agent usage limits before call (project history found, but no usable non-reset samples for per-call impact)"
+        }
+        "project_history" => {
+            "Agent usage limits before call (per-call impact estimated from recent project-local history)"
+        }
+        _ => unreachable!("usage impact estimation basis must be known"),
+    }
+}
+
+fn wait_until_timestamp(
+    now: chrono::DateTime<Utc>,
+    wait_duration: Duration,
+) -> Option<chrono::DateTime<Utc>> {
+    chrono::Duration::from_std(wait_duration)
+        .ok()
+        .and_then(|duration| now.checked_add_signed(duration))
+}
+
+fn waiting_for_usage_limit_message(
+    now: chrono::DateTime<Utc>,
+    agent_name: &str,
+    decision: &AgentPacingDecision,
+) -> String {
+    let wait_seconds = duration_seconds_ceiling(decision.wait_duration);
+    if let Some(wait_until) = wait_until_timestamp(now, decision.wait_duration) {
+        format!(
+            "Waiting until {} before calling {} to respect usage limits (~{} second(s))",
+            wait_until.to_rfc3339(),
+            agent_name,
+            wait_seconds
+        )
+    } else {
+        format!(
+            "Waiting {} second(s) before calling {} to respect usage limits",
+            wait_seconds, agent_name
+        )
+    }
+}
+
 fn duration_seconds_ceiling(duration: Duration) -> u64 {
     duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
 }
@@ -516,5 +574,80 @@ mod tests {
         .expect("exhausted limits should produce a wait");
 
         assert_eq!(duration_seconds_ceiling(frequency), 7_200);
+    }
+
+    #[test]
+    fn usage_impact_estimation_basis_marks_first_project_run() {
+        let decision = AgentPacingDecision {
+            current_snapshot: snapshot(&[("5h limit", 10, 90, 300)]),
+            recent_call_count: 0,
+            observed_average_frequency: None,
+            desired_frequency: None,
+            wait_duration: Duration::ZERO,
+            limiting_usage_label: None,
+            average_usage_impact: vec![AverageUsageImpact {
+                label: "5h limit".to_owned(),
+                average_percent_used_per_call: 0.0,
+                samples: 0,
+            }],
+        };
+
+        assert_eq!(
+            usage_impact_estimation_basis(&decision),
+            "first_project_run"
+        );
+        assert_eq!(
+            agent_usage_event_message(&decision),
+            "Agent usage limits before call (first project-local run; per-call impact not estimated yet)"
+        );
+    }
+
+    #[test]
+    fn usage_impact_estimation_basis_marks_history_without_usable_samples() {
+        let decision = AgentPacingDecision {
+            current_snapshot: snapshot(&[("5h limit", 10, 90, 300)]),
+            recent_call_count: 2,
+            observed_average_frequency: None,
+            desired_frequency: None,
+            wait_duration: Duration::ZERO,
+            limiting_usage_label: None,
+            average_usage_impact: vec![AverageUsageImpact {
+                label: "5h limit".to_owned(),
+                average_percent_used_per_call: 0.0,
+                samples: 0,
+            }],
+        };
+
+        assert_eq!(
+            usage_impact_estimation_basis(&decision),
+            "no_usable_samples"
+        );
+        assert_eq!(
+            agent_usage_event_message(&decision),
+            "Agent usage limits before call (project history found, but no usable non-reset samples for per-call impact)"
+        );
+    }
+
+    #[test]
+    fn waiting_message_includes_absolute_resume_timestamp() {
+        let now = Utc.with_ymd_and_hms(2025, 3, 18, 12, 0, 0).unwrap();
+        let decision = AgentPacingDecision {
+            current_snapshot: snapshot(&[("5h limit", 10, 90, 300)]),
+            recent_call_count: 1,
+            observed_average_frequency: None,
+            desired_frequency: None,
+            wait_duration: Duration::from_secs(75),
+            limiting_usage_label: Some("5h limit".to_owned()),
+            average_usage_impact: vec![AverageUsageImpact {
+                label: "5h limit".to_owned(),
+                average_percent_used_per_call: 5.0,
+                samples: 1,
+            }],
+        };
+
+        assert_eq!(
+            waiting_for_usage_limit_message(now, "codex", &decision),
+            "Waiting until 2025-03-18T12:01:15+00:00 before calling codex to respect usage limits (~75 second(s))"
+        );
     }
 }
