@@ -108,6 +108,27 @@ fn detect_query_in_stream(tail: &mut Vec<u8>, chunk: &[u8], query: &[u8]) -> boo
     found
 }
 
+fn tail_within_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if max_bytes == 0 {
+        return "";
+    }
+
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    let trim_from = text.len() - max_bytes;
+    let boundary = if text.is_char_boundary(trim_from) {
+        trim_from
+    } else {
+        text.char_indices()
+            .map(|(idx, _)| idx)
+            .find(|idx| *idx >= trim_from)
+            .unwrap_or(text.len())
+    };
+    &text[boundary..]
+}
+
 pub struct PtySession {
     pub name: String,
     master_fd: RawFd,
@@ -345,11 +366,7 @@ impl PtySession {
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "signal".to_string());
                     let exit_content = self.capture_pane().unwrap_or_else(|_| last_content.clone());
-                    let tail = if exit_content.len() > 4000 {
-                        exit_content[exit_content.len() - 4000..].to_string()
-                    } else {
-                        exit_content
-                    };
+                    let tail = tail_within_char_boundary(&exit_content, 4000).to_string();
                     if verbose && !tail.trim().is_empty() {
                         eprintln!("[verbose] Process exited. Captured output:\n{}", tail);
                     }
@@ -591,6 +608,16 @@ mod tests {
         let mut tail = Vec::new();
         let found = detect_query_in_stream(&mut tail, b"\x1b[5n", DSR_QUERY);
         assert!(found);
+    }
+
+    #[test]
+    fn test_tail_within_char_boundary_skips_partial_utf8_prefix() {
+        let text = format!("a{}{}", "─", "b".repeat(3998));
+        let tail = tail_within_char_boundary(&text, 4000);
+
+        assert_eq!(tail, "b".repeat(3998));
+        assert!(tail.is_char_boundary(0));
+        assert!(tail.len() <= 4000);
     }
 
     #[test]
