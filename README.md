@@ -1,324 +1,213 @@
-# Chief (Rust)
+# Chief
 
-**Chief** is an automated coding-agent orchestrator for file-driven loops and queued refactor work with reproducible checks.
+Chief is a Rust-based orchestration system for running coding-agent workflows against Git repositories.
 
-This is an implementation of the [Ralph Wiggum method](https://ghuntley.com/ralph/) from Geoffrey Huntley.
+This repo contains:
 
-## How It Works
+- `chief`: the single-project CLI
+- `chief_backend`: the multi-project scheduler + HTTP/WebSocket API
+- `frontend/`: the Next.js dashboard and project cockpit
 
-Chief supports two runtime flows:
+Chief stores state per target project in:
 
-1. **`loop_file`**: run one convergence loop from a markdown file (`--file`) and exit.
-2. **`refactor`**: claim queued work items from SQLite, run convergence iterations, and commit successful outcomes.
+- `.chief/chief.yaml`: project config
+- `.chief/chief.db`: SQLite state for todos, runs, jobs, events, and readiness
+- `.beads/`: bd state, when initialized with `chief init`
 
-Chief records prompts/responses, diffs, command output, and run metadata in `.chief/chief.db`.
+Queued execution happens in sibling Git worktrees under:
 
-### Convergence Loop
+- `../<project_name>__worktrees/chief_<job_id>`
 
-Chief uses convergence semantics:
+Successful worker branches are merged back into the project's current branch.
 
-- each iteration asks the agent to improve the current work
-- if files change, Chief runs another iteration
-- once there are no file changes for `required_stable_iterations` in a row, the run is considered stable and succeeds
+## Runtime flows
 
-## ⚠️ Potential Data Loss Warning
+Chief currently supports three flow kinds:
 
-**Chief performs destructive Git operations.**
+- `loop_file`: CLI-only. Runs a convergence loop from a Markdown task file.
+- `bd`: converges against the current `bd ready --json` queue using `prompts/bd.md`.
+- `refactor`: claims pending SQLite todos and runs the queued cleanup flow.
 
-To recover from failed convergence attempts, this tool may use `git reset --hard` and `git clean -fd` to revert local changes between retry loops. It assumes it is the sole actor in the repository during execution.
+Prompt templates live in this repo's [`prompts/`](./prompts) directory:
 
-- **Start Clean:** Ensure you have no uncommitted changes or untracked files before running.
-- **Hands Off:** Do not modify files manually while the script is active.
-- **Data Loss:** Any file created or modified manually during a Chief run runs a high risk of being deleted if the agent triggers a rollback.
+- `loop_file_prompt.md`
+- `loop_file_convergence.md`
+- `structural_cleanup.md`
+- `mechanical_cleanup.md`
+- `requirements.md`
+- `bd.md`
 
-## Rust Runtime Layout
+Requirements ingestion is separate from execution: it runs `prompts/requirements.md`, expects YAML shaped like `todos: [...]`, and replaces the SQLite todo queue for the target project.
 
-Chief is a Rust orchestration system with:
+## Safety notes
 
-- `chief` binary for single-project execution (current Chief flow).
-- `chief_backend` binary for multi-project orchestration + introspection API.
-- responsive frontend (`frontend/`) for operating the backend.
+Normal queued runs use isolated Git worktrees instead of mutating your main checkout directly.
 
-The system keeps **per-project** state local:
+There are still destructive operations in the system:
 
-- `.chief/chief.yaml`
-- `.chief/chief.db` (SQLite)
+- The backend `reset_workspace` action performs `git reset --hard HEAD` and `git clean -fd` in the target project.
+- The backend `reset_db` action recreates `.chief/chief.db`.
+- Worktree cleanup removes temporary worktrees with `git worktree remove --force` and deletes worker branches.
 
-There is no centralized database.
+`reset_workspace` preserves `.chief/chief.db` and its SQLite sidecar files, but it will discard other local changes. Use it only when you intend to throw away the target project's uncommitted work.
 
-## Architecture
+## Requirements
 
-Core library modules:
+For the CLI and backend:
 
-- `src/domain.rs`: strongly-typed core models (`Todo`, `EventRecord`, `JobRecord`, `Phase`, `TodoStatus`, etc).
-- `src/config.rs`: `.chief/chief.yaml` parsing for `chief` and `suites`.
-- `src/storage.rs`: per-project SQLite persistence for todos, events, jobs, and runs.
-- `src/prompt.rs`: prompt loading/rendering from `prompts/*.md` using Jinja syntax (`minijinja`).
-- `src/agent.rs`: coding-agent abstraction and concrete CLI agent adapters.
-- `src/git.rs`: git/worktree operations.
-- `src/flow.rs`: pluggable orchestration building blocks.
-- `src/service.rs`: project registry + execution engine.
-- `src/scheduler.rs`: multi-agent backend scheduler.
+- Rust toolchain with Cargo
+- Git
+- a supported coding-agent CLI on `PATH`
+  - `codex` is the default
+  - `claude` is also supported
 
-### Pluggable flow design
+For `chief init` and the `bd` flow:
 
-`src/flow.rs` is intentionally modular:
+- `bd` on `PATH`
 
-- `PhaseStrategy` trait: behavior for one flow phase.
-- `LoopPolicy` trait: convergence loop behavior.
-- `TodoFlow` trait: composition of phase strategies into full workflows.
+For the frontend:
 
-Included flows:
+- Node.js 20+ and npm, or Docker
 
-- `loop_file`: convergence loop driven by a markdown file loaded via `--file`.
-- `refactor`: convergence loop that alternates `structural_cleanup.md` and `mechanical_cleanup.md` for queued work items.
+## Quick start for a target project
 
-Adding a new strategy means implementing `TodoFlow` and (optionally) custom `PhaseStrategy` + `LoopPolicy` combinations.
+Build the binaries from this repo:
 
-## Multi-agent backend model
+```bash
+cargo build --bin chief --bin chief_backend
+```
 
-The backend manages multiple projects under one projects directory, plus optional manual project paths.
+Initialize a target project:
 
-For each project, the scheduler supports configurable parallel coding agents:
+```bash
+cargo run --bin chief -- \
+  --project-dir /path/to/project \
+  init \
+  --chief-root /path/to/chief
+```
 
-- default is `1` (single worker).
-- each claimed todo runs in a dedicated git worktree at `../<project_name>__worktrees/<job_id>`.
-- `agents` controls how many workers can run in parallel.
-- todo selection is serialized (one selector at a time) to reduce conflicts.
-- for workers after the first, selection considers both available and currently in-progress SQLite todos
-- each worker processes exactly one todo, exits, and then the scheduler spawns the next worker.
-- successful worker branches are merged back to mainline branch.
+Notes:
 
-## Prompts
+- `init` defaults `--chief-root` to `../chief`.
+- It creates `.chief/chief.yaml`.
+- It symlinks `.chief/chief.example.yaml` back to this repo's example file.
+- It runs `bd init --agents-template <chief_root>/bd_AGENTS.md` if `.beads/` does not already exist.
+- It appends these ignore entries if missing:
+  - `.chief/chief.db`
+  - `.chief/chief.example.yaml`
+  - `.beads`
 
-All prompts are Markdown templates with Jinja syntax under:
+If an older project still uses root-level `chief.yaml`, `chief.example.yaml`, or `chief.db`, migrate it with:
 
-- `prompts/loop_file_prompt.md`
-- `prompts/loop_file_convergence.md`
-- `prompts/structural_cleanup.md`
-- `prompts/mechanical_cleanup.md`
-- `prompts/requirements.md`
-
-Each project can own its own `prompts/` directory.
+```bash
+cargo run --bin chief -- --project-dir /path/to/project migrate
+```
 
 ## CLI usage
 
-Run one project directly:
+Without a subcommand, `chief` reads `.chief/chief.yaml` and resolves the flow from config. If that flow is `loop_file`, `--file` is required.
+
+Run a file-driven loop:
 
 ```bash
-cargo run --bin chief -- --project-dir /path/to/project
+cargo run --bin chief -- \
+  --project-dir /path/to/project \
+  --file docs/task.md
 ```
 
-Run one `loop_file` execution directly from a markdown plan/task file (no todo queueing):
+Equivalent explicit form:
 
 ```bash
-cargo run --bin chief -- --project-dir /path/to/project --file plan.md
-# equivalent explicit subcommand:
-# cargo run --bin chief -- --project-dir /path/to/project loop_file --file plan.md
+cargo run --bin chief -- \
+  --project-dir /path/to/project \
+  loop_file \
+  --file docs/task.md
 ```
 
-Notes for `loop_file`:
-
-- It always runs as a single todo execution (no outer todo queue).
-- Outer retries are effectively disabled (`max_retries = 1` for this flow).
-- If flow resolves to `loop_file`, `--file` is required when using the default `chief` command.
-- Default inner loop iterations are `20` (`chief.max_loop_iterations`).
-
-From inside a target project directory (with `chief` on `PATH`), initialize symlinked example files and minimal local configs:
+Run the `bd` convergence flow:
 
 ```bash
-chief init
+cargo run --bin chief -- --project-dir /path/to/project bd
 ```
 
-This assumes the chief repo is in `../chief`, otherwise specify it:
+Run the queued `refactor` flow:
 
 ```bash
-chief init --chief-root /path/to/chief
+cargo run --bin chief -- --project-dir /path/to/project refactor
 ```
 
-`init` is idempotent: existing files/symlinks are left unchanged and only missing ones are created.
-It creates `.chief/chief.yaml` and `.chief/chief.example.yaml`.
-
-For older projects that still have root-level `chief.yaml` / `chief.example.yaml` / `chief.db`, run:
-
-```bash
-chief migrate
-```
-
-Common options:
+Override the queued-flow retry budget or model at invocation time:
 
 ```bash
 cargo run --bin chief -- \
   --project-dir /path/to/project \
   --flow refactor \
+  --max-retries 4 \
   --model gpt-5
 ```
 
-Requirements -> todos mode:
+Process requirements into the SQLite todo queue:
 
 ```bash
 cargo run --bin chief -- \
   --project-dir /path/to/project \
-  --requirements "Add JWT auth and refresh token rotation"
+  --requirements "Add JWT auth and rotate refresh tokens"
 ```
 
-Tail events:
+Or load requirements from files:
 
 ```bash
-cargo run --bin chief -- --project-dir /path/to/project tail-events --limit 50
+cargo run --bin chief -- \
+  --project-dir /path/to/project \
+  --requirements-file docs/requirements.md \
+  --requirements-file docs/followups.md
 ```
 
-Clean completed todos:
+Useful maintenance commands:
 
 ```bash
+# run cached-or-fresh readiness checks used by backend start
+cargo run --bin chief -- --project-dir /path/to/project check
+cargo run --bin chief -- --project-dir /path/to/project check --force
+
+# print recent events from .chief/chief.db
+cargo run --bin chief -- --project-dir /path/to/project tail-events -n 50
+
+# remove completed todos that already have a commit hash
 cargo run --bin chief -- --project-dir /path/to/project clean-done
 ```
 
-Run suite commands directly for one configured suite:
+Run suite commands from `.chief/chief.yaml`:
 
 ```bash
-# test and lint commands support --target (for {target} placeholders)
+cargo run --bin chief -- --project-dir /path/to/project suite test --suite backend
 cargo run --bin chief -- --project-dir /path/to/project suite test --suite backend --target src/lib.rs
 cargo run --bin chief -- --project-dir /path/to/project suite lint --suite backend --target src
-
-# prepare/fix commands from chief.yaml
 cargo run --bin chief -- --project-dir /path/to/project suite test_init --suite backend
 cargo run --bin chief -- --project-dir /path/to/project suite test_setup --suite backend
 cargo run --bin chief -- --project-dir /path/to/project suite lint_fix --suite backend --target src
 ```
 
-## Backend usage
+## `.chief/chief.yaml`
 
-Run backend over a projects directory containing multiple git projects:
-
-```bash
-cargo run --bin chief_backend -- --projects-dir /path/to/projects --port 8000
-```
-
-Add extra projects outside that directory with one or more `--project` flags:
-
-```bash
-cargo run --bin chief_backend -- \
-  --projects-dir /path/to/projects \
-  --project /path/to/another/repo \
-  --project /path/to/one-more/repo \
-  --port 8000
-```
-
-Backend security flags/environment:
-
-- `CHIEF_API_TOKEN` (or `--api-token`): optional, but strongly recommended for deployment.
-- `--allow-origin`: CORS allowlist. Defaults to `http://localhost:3000`.
-- `--enable-terminal`: terminal websocket is disabled by default unless this flag is set.
-
-When `CHIEF_API_TOKEN` is set, sensitive routes require auth via one of:
-
-- `Authorization: Bearer <token>`
-- `X-Chief-Token: <token>`
-
-Sensitive routes include project control/write operations (start/stop/refresh, add todo, requirements, config updates, terminal websocket).
-
-Example production-style backend start:
-
-```bash
-CHIEF_API_TOKEN='replace-with-long-random-token' \
-cargo run --bin chief_backend -- \
-  --projects-dir /path/to/projects \
-  --project /path/to/another/repo \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --allow-origin https://chief.example.com
-```
-
-Example authenticated request:
-
-```bash
-curl -X POST http://localhost:8000/api/projects/myproj/start \
-  -H 'Authorization: Bearer <token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"agents":1,"flow":"refactor"}'
-```
-
-Frontend is a Next.js app (`frontend/`) and calls backend APIs for:
-
-- project status and runtime controls
-- start/stop project schedulers
-- job list and todo table
-- event tape queries (`/events`)
-- requirements ingestion
-- websocket terminal command execution
-- per-project state (`/state`)
-- file diffs (`/file_diff`)
-
-## Docker compose
-
-Build and run:
-
-```bash
-docker compose up --build
-```
-
-Projects mount is generic in `docker-compose.yml`:
-
-```bash
-CHIEF_PROJECTS_DIR=/absolute/path/to/projects docker compose up --build
-```
-
-For deployment, create a `.env` file (or export env vars) and include at minimum:
-
-```dotenv
-CHIEF_PROJECTS_DIR=/absolute/path/to/projects
-CHIEF_API_TOKEN=replace-with-long-random-token
-```
-
-Then run:
-
-```bash
-docker compose up --build
-```
-
-Compose automatically loads `.env` from the project root. Keep this file out of source control.
-
-Terminal websocket in compose:
-
-- Disabled by default (backend starts without `--enable-terminal`).
-- To enable it, add a local `docker-compose.override.yml` command override:
-
-```yaml
-services:
-  backend:
-    command:
-      - --projects-dir
-      - /workspace/projects
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --enable-terminal
-```
-
-For machine-specific setup (for example NFS), use `docker-compose.override.yml` locally. That file is gitignored.
-
-Services:
-
-- `backend` on `http://localhost:8000`
-- `frontend` on `http://localhost:3000`
-
-`frontend` rewrites `/api/*` to backend. Terminal websocket defaults to `ws://localhost:8000` (configurable with `NEXT_PUBLIC_CHIEF_WS_BASE`).
-
-## Config (`.chief/chief.yaml`) quick example
+The shipped example file is `.chief/chief.example.yaml`. A minimal current config looks like this:
 
 ```yaml
 chief:
-  flow: refactor # queued SQLite work-item processing
-  # flow: loop_file # file-driven run; requires `--file`
+  flow: loop_file
+  # flow: refactor
   agent: codex
-  model: gpt-5
-  max_retries: 10
-  max_loop_iterations: 20 # shared by all flows
+  # model: gpt-5
+  # model_reasoning_effort: high
+  agent_extra_args: []
+  max_retries: 2
+  max_loop_iterations: 20
   required_stable_iterations: 2
   agent_timeout_seconds: 2700
   suite_command_timeout_seconds: 1800
+  agent_log_max_output_lines: 10
+  agent_log_max_output_chars: 1500
+  use_agent_log_truncation_for_stdout_logs: false
 
 suites:
   - name: backend
@@ -327,14 +216,188 @@ suites:
     test_root: .
     test_command: cargo test
     target_type: project
+    default_target: .
+    file_patterns: []
     lint_command: cargo clippy
     post_green_command: cargo test
+    env: {}
+    strip_root_from_target: true
 ```
 
-See `.chief/chief.example.yaml` for more patterns.
-Backend runtime settings are configured on the `chief_backend` command line (see `just backend`).
+Current config details worth knowing:
 
-## Current status
+- `chief.agent` supports `codex` and `claude`.
+- `chief.agent_extra_args` is passed directly to the agent CLI invocation.
+- `chief.model_reasoning_effort` currently affects the `codex` adapter.
+- `max_retries` is the queued-work retry budget used by the worktree scheduler.
+- `max_loop_iterations` and `required_stable_iterations` control convergence behavior.
+- `suite_command_timeout_seconds` is the default timeout for suite/readiness commands.
+- Each suite can override timeout with `command_timeout_seconds`.
+- Suites can also define `test_init`, `test_setup`, `lint_fix_command`, `cleanup_command`, `cache_paths`, `cache_key_files`, `cache_mode`, `default_target`, `file_patterns`, and `env`.
 
-- Rust library and both binaries compile (`cargo check`).
-- Legacy Python implementation has been removed.
+The example file also includes ready-to-adapt Rust, Python, TypeScript, and Playwright suite patterns.
+
+## Backend
+
+`chief_backend` manages multiple projects at once.
+
+Project discovery works like this:
+
+- every direct child directory under `--projects-dir` that contains `.git` is considered a project
+- additional project paths can be added with repeated `--project` flags
+
+Start the backend:
+
+```bash
+cargo run --bin chief_backend -- \
+  --projects-dir /path/to/projects \
+  --project /path/to/extra/repo \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --default-agents-per-project 1 \
+  --max-agents-per-project 8 \
+  --enable-terminal \
+  --allow-origin http://localhost:3000
+```
+
+Important runtime behavior:
+
+- backend start only supports `bd` and `refactor`
+- `loop_file` is intentionally CLI-only
+- project start runs readiness checks unless the caller sets `start_anyway`
+- terminal WebSocket routes are only mounted when `--enable-terminal` is set
+- if `CHIEF_API_TOKEN` or `--api-token` is set, write/control routes require auth
+
+Accepted auth headers:
+
+- `Authorization: Bearer <token>`
+- `X-Chief-Token: <token>`
+
+Current API surface includes:
+
+- dashboard project listing and refresh
+- start, pause, and stop controls
+- todo CRUD and delete-done
+- jobs, logs, state, events, and event streaming
+- requirements ingestion
+- file diff lookup
+- `.chief/chief.yaml` read/write
+- suite checks and suite-check streaming
+- DB reset and DB trim
+- workspace reset
+- terminal WebSocket access when enabled
+
+## Frontend
+
+The UI in [`frontend/`](./frontend) is a Next.js 14 app backed by the backend API.
+
+It currently provides:
+
+- a dashboard of discovered projects
+- per-project cockpit views
+- live event streaming
+- interactive terminal access
+- todo management
+- requirements submission
+- readiness status and streaming output
+- suite-check execution
+- diff inspection
+- project settings editing for `.chief/chief.yaml`
+
+Runtime configuration:
+
+- `CHIEF_BACKEND_URL` controls the frontend's `/api/*` rewrite target
+- `NEXT_PUBLIC_CHIEF_WS_BASE` controls WebSocket base URLs
+
+## Local development
+
+The repo's `justfile` is the quickest way to run the current dev setup.
+
+Frontend only:
+
+```bash
+just frontend
+```
+
+This:
+
+- syncs `frontend/node_modules` with `docker compose run --rm --no-deps frontend npm ci` when needed
+- starts the frontend container on `http://localhost:3000`
+
+Backend only:
+
+```bash
+export PROJECTS_DIR=/absolute/path/to/projects
+export PROJECT=/absolute/path/to/one/project
+export FRONTEND_HOST=127.0.0.1
+
+just backend
+```
+
+Combined local dev:
+
+```bash
+just dev-full
+```
+
+Other useful recipes:
+
+```bash
+just dev      # alias for frontend only
+just down     # stop compose services
+just logs     # tail frontend logs
+```
+
+Current Compose behavior is intentionally limited:
+
+- `docker-compose.yml` defines only the `frontend` service
+- that container expects a backend already running on the host at `http://host.docker.internal:8000`
+- it exposes the frontend on `http://localhost:3000`
+
+You can also run the frontend without Docker:
+
+```bash
+cd frontend
+npm install
+CHIEF_BACKEND_URL=http://localhost:8000 \
+NEXT_PUBLIC_CHIEF_WS_BASE=ws://localhost:8000 \
+npm run dev
+```
+
+## Testing and utility scripts
+
+Rust:
+
+```bash
+cargo check
+cargo test
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm test
+```
+
+There is also a small helper for recording per-ticket Rust test evidence:
+
+```bash
+ops/per_ticket_cargo_test.sh <ticket-id> [ticket-id...]
+```
+
+It writes logs and a TSV summary under `.chief/evidence/`.
+
+## Repository layout
+
+- `src/bin/chief.rs`: single-project CLI
+- `src/bin/chief_backend.rs`: backend entry point
+- `src/bin/backend/`: backend API, routing, and readiness logic
+- `src/service/`: project context, registry, and engine
+- `src/scheduler/`: multi-worker scheduling and worktree lifecycle
+- `src/flow/`: flow definitions, loop policy, prompt phases, and suite execution
+- `src/storage/` and `src/storage.rs`: SQLite persistence
+- `src/agent/`: `codex` and `claude` process adapters
+- `prompts/`: Markdown/Jinja prompt templates
+- `frontend/`: Next.js dashboard
+- `ops/`: small operational scripts and config fragments
