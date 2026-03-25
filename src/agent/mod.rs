@@ -1,8 +1,11 @@
-use crate::config::ChiefConfig;
+mod mcp;
+
+use crate::config::{ChiefConfig, McpServerConfig};
 use crate::domain::{AgentOutput, WaitState};
 use crate::flow::{configure_process_group, terminate_process_tree};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -48,6 +51,7 @@ pub struct CodexAgent {
     model: Option<String>,
     model_reasoning_effort: Option<String>,
     extra_args: Vec<String>,
+    mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
 }
 
 impl CodexAgent {
@@ -56,6 +60,7 @@ impl CodexAgent {
             model: model_override.or_else(|| config.model.clone()),
             model_reasoning_effort: config.model_reasoning_effort.clone(),
             extra_args: config.agent_extra_args.clone(),
+            mcp_servers: config.mcp_servers.clone(),
         }
     }
 }
@@ -64,6 +69,7 @@ impl CodexAgent {
 pub struct ClaudeAgent {
     model: Option<String>,
     extra_args: Vec<String>,
+    mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
 }
 
 impl ClaudeAgent {
@@ -71,12 +77,34 @@ impl ClaudeAgent {
         Self {
             model: model_override.or_else(|| config.model.clone()),
             extra_args: config.agent_extra_args.clone(),
+            mcp_servers: config.mcp_servers.clone(),
+        }
+    }
+}
+
+struct PreparedAgentLaunch {
+    command: Vec<String>,
+    env: BTreeMap<String, String>,
+    scratch_dir: Option<mcp::AgentScratchDir>,
+}
+
+impl PreparedAgentLaunch {
+    fn new(command: Vec<String>) -> Self {
+        Self {
+            command,
+            env: BTreeMap::new(),
+            scratch_dir: None,
         }
     }
 }
 
 trait CommandBackedAgent {
     fn build_command(&self, disallowed_paths: &[String]) -> Vec<String>;
+    fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        Ok(PreparedAgentLaunch::new(
+            self.build_command(&request.disallowed_paths),
+        ))
+    }
     fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String;
 }
 
@@ -102,6 +130,19 @@ impl CommandBackedAgent for CodexAgent {
         }
         cmd.push("-".to_owned());
         cmd
+    }
+
+    fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        let mut launch = PreparedAgentLaunch::new(self.build_command(&request.disallowed_paths));
+        if let Some(servers) = &self.mcp_servers {
+            let runtime = mcp::prepare_codex_mcp_runtime(servers, &request.cwd)?;
+            launch.env.insert(
+                "CODEX_HOME".to_owned(),
+                runtime.home_dir.display().to_string(),
+            );
+            launch.scratch_dir = Some(runtime.scratch_dir);
+        }
+        Ok(launch)
     }
 
     fn parse_output(&self, raw_stdout: &str, _raw_stderr: &str) -> String {
@@ -131,6 +172,20 @@ impl CommandBackedAgent for ClaudeAgent {
         cmd
     }
 
+    fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        let mut launch = PreparedAgentLaunch::new(self.build_command(&request.disallowed_paths));
+        if let Some(servers) = &self.mcp_servers {
+            let runtime = mcp::prepare_claude_mcp_runtime(servers)?;
+            launch.command.extend([
+                "--mcp-config".to_owned(),
+                runtime.config_path.display().to_string(),
+                "--strict-mcp-config".to_owned(),
+            ]);
+            launch.scratch_dir = Some(runtime.scratch_dir);
+        }
+        Ok(launch)
+    }
+
     fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
         if raw_stdout.trim().is_empty() {
             raw_stderr.trim().to_owned()
@@ -144,13 +199,15 @@ fn run_command_backed_agent(
     agent: &impl CommandBackedAgent,
     request: AgentRequest,
 ) -> Result<AgentOutput> {
-    let command = agent.build_command(&request.disallowed_paths);
-    if command.is_empty() {
+    let launch = agent.prepare_launch(&request)?;
+    if launch.command.is_empty() {
         return Err(anyhow!("agent command is empty"));
     }
+    let command = launch.command.clone();
 
     let mut process = Command::new(&command[0]);
     process.args(&command[1..]);
+    process.envs(&launch.env);
     process.current_dir(&request.cwd);
     process.stdin(Stdio::piped());
     process.stdout(Stdio::piped());

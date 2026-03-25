@@ -5,6 +5,22 @@ chief:
   # model: gpt-5
   # model_reasoning_effort: high
   agent_extra_args: []
+  # When omitted, chief leaves MCP loading to the underlying CLI.
+  # Set to {} to force no MCP servers, or define servers below to let chief
+  # translate the same config for either Claude or Codex.
+  # mcp_servers: {}
+  # mcp_servers:
+  #   context7:
+  #     transport: stdio
+  #     command: npx
+  #     args: ["-y", "@upstash/context7-mcp"]
+  #     env: {}
+  #   sentry:
+  #     transport: streamable_http
+  #     url: https://mcp.sentry.dev/mcp
+  #     auth:
+  #       type: jwt
+  #       token_env_var: SENTRY_TOKEN
   max_retries: 2
   max_loop_iterations: 20 # shared inner-loop cap used by all flows
   required_stable_iterations: 2 # convergence loops require this many consecutive stable iterations

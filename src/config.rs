@@ -56,6 +56,8 @@ pub struct ChiefConfig {
     pub model_reasoning_effort: Option<String>,
     #[serde(default)]
     pub agent_extra_args: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
     #[serde(default = "default_max_retries")]
     pub max_retries: usize,
     #[serde(default = "default_max_loop_iterations", alias = "max_loop")]
@@ -84,6 +86,7 @@ impl Default for ChiefConfig {
             model: None,
             model_reasoning_effort: None,
             agent_extra_args: Vec::new(),
+            mcp_servers: None,
             max_retries: default_max_retries(),
             max_loop_iterations: default_max_loop_iterations(),
             required_stable_iterations: default_required_stable_iterations(),
@@ -95,6 +98,35 @@ impl Default for ChiefConfig {
             use_agent_log_truncation_for_stdout_logs: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum McpServerConfig {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+    #[serde(alias = "http")]
+    StreamableHttp {
+        url: String,
+        #[serde(default)]
+        auth: Option<McpServerAuthConfig>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerAuthConfig {
+    Jwt {
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        token_env_var: Option<String>,
+    },
 }
 
 fn default_flow() -> String {
@@ -288,6 +320,53 @@ mod tests {
         let yaml = "chief:\n  respect_limits: false\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
         assert!(!parsed.chief.respect_limits);
+    }
+
+    #[test]
+    fn mcp_servers_default_to_unmanaged() {
+        let parsed: ChiefYaml = serde_yaml::from_str("chief: {}\n").unwrap();
+        assert!(parsed.chief.mcp_servers.is_none());
+    }
+
+    #[test]
+    fn parse_empty_mcp_server_map() {
+        let yaml = "chief:\n  mcp_servers: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.mcp_servers, Some(BTreeMap::new()));
+    }
+
+    #[test]
+    fn parse_mcp_stdio_and_http_servers() {
+        let yaml = r#"chief:
+  mcp_servers:
+    docs:
+      transport: stdio
+      command: npx
+      args: ["-y", "@acme/docs-mcp"]
+      env:
+        DOCS_TOKEN: secret
+    sentry:
+      transport: streamable_http
+      url: https://mcp.sentry.dev/mcp
+      auth:
+        type: jwt
+        token_env_var: SENTRY_TOKEN
+"#;
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        let servers = parsed.chief.mcp_servers.expect("mcp servers should parse");
+
+        assert!(matches!(
+            servers.get("docs"),
+            Some(McpServerConfig::Stdio { command, args, env })
+                if command == "npx"
+                    && args == &vec!["-y".to_owned(), "@acme/docs-mcp".to_owned()]
+                    && env.get("DOCS_TOKEN") == Some(&"secret".to_owned())
+        ));
+        assert!(matches!(
+            servers.get("sentry"),
+            Some(McpServerConfig::StreamableHttp { url, auth: Some(McpServerAuthConfig::Jwt { token: None, token_env_var: Some(token_env_var) }) })
+                if url == "https://mcp.sentry.dev/mcp" && token_env_var == "SENTRY_TOKEN"
+        ));
     }
 
     #[test]

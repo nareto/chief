@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::{McpServerAuthConfig, McpServerConfig};
 
 #[test]
 fn codex_command_uses_full_permissions_without_sandbox() {
@@ -6,6 +7,7 @@ fn codex_command_uses_full_permissions_without_sandbox() {
         model: None,
         model_reasoning_effort: None,
         extra_args: Vec::new(),
+        mcp_servers: None,
     };
 
     let command = agent.build_command(&["src".to_owned()]);
@@ -29,6 +31,7 @@ fn codex_reasoning_effort_maps_xhigh_to_high() {
         model: Some("gpt-5".to_owned()),
         model_reasoning_effort: Some("xhigh".to_owned()),
         extra_args: Vec::new(),
+        mcp_servers: None,
     };
 
     let command = agent.build_command(&[]);
@@ -45,6 +48,7 @@ fn claude_command_uses_full_permissions_mode() {
     let agent = ClaudeAgent {
         model: None,
         extra_args: Vec::new(),
+        mcp_servers: None,
     };
 
     let command = agent.build_command(&["src".to_owned()]);
@@ -97,6 +101,47 @@ fn claude_command_prefers_runtime_model_override() {
             .windows(2)
             .any(|window| window == ["--model", "opus"]),
         "claude command should not include config model when runtime override is present: {command:?}"
+    );
+}
+
+#[test]
+fn claude_prepare_launch_uses_strict_mcp_config_when_managed() {
+    let agent = ClaudeAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: Some(BTreeMap::from([(
+            "sentry".to_owned(),
+            McpServerConfig::StreamableHttp {
+                url: "https://mcp.sentry.dev/mcp".to_owned(),
+                auth: Some(McpServerAuthConfig::Jwt {
+                    token: None,
+                    token_env_var: Some("SENTRY_TOKEN".to_owned()),
+                }),
+            },
+        )])),
+    };
+    let request = AgentRequest {
+        prompt: "test".to_owned(),
+        cwd: std::env::temp_dir(),
+        timeout_seconds: Some(1),
+        disallowed_paths: Vec::new(),
+        cancel_signal: None,
+        on_chunk: None,
+    };
+
+    let launch = agent
+        .prepare_launch(&request)
+        .expect("launch should prepare");
+    assert!(
+        launch
+            .command
+            .iter()
+            .any(|arg| arg == "--strict-mcp-config")
+    );
+    assert!(launch.command.iter().any(|arg| arg == "--mcp-config"));
+    assert!(
+        launch.scratch_dir.is_some(),
+        "managed Claude MCP should keep scratch files alive"
     );
 }
 
