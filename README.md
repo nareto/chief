@@ -202,7 +202,7 @@ chief:
   # model: gpt-5
   # model_reasoning_effort: high
   agent_extra_args: []
-  # mcp_servers: {} # optional: when set, chief manages MCP directly; {} means no MCP servers
+  mcp_servers: {} # default from `chief init`; remove this key to use personal agent MCP config
   max_retries: 2
   max_loop_iterations: 20
   required_stable_iterations: 2
@@ -232,7 +232,8 @@ Current config details worth knowing:
 
 - `chief.agent` supports `codex` and `claude`.
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
-- `chief.mcp_servers` is agent-independent. Omit it to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for either agent.
+- `chief init` writes `mcp_servers: {}` by default, so new projects do not inherit personal Claude/Codex MCP servers unless you add them to `chief.yaml`.
+- `chief.mcp_servers` is agent-independent. Omit the key entirely to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for either agent.
 - `chief.mcp_servers` supports `stdio` and `streamable_http` transports. HTTP servers support JWT bearer auth with either `token` or `token_env_var`.
 - When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config and Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.
