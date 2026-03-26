@@ -8,6 +8,7 @@ mod suite_commands;
 #[path = "chief/tests.rs"]
 mod tests;
 
+use agentusage::{ApprovalPolicy, UsageConfig, run_claude, run_codex};
 use anyhow::{Context, Result, bail};
 use chief::domain::{JobStatus, RunExitStatus, Todo, TodoStatus};
 use chief::flow::FlowKind;
@@ -17,13 +18,18 @@ use chief::paths;
 use chief::scheduler::Scheduler;
 use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry};
 use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use rusqlite::OptionalExtension;
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
@@ -250,7 +256,9 @@ fn run(cli: &Cli) -> Result<()> {
     run_todo_queue_flow(cli, context, flow_kind)
 }
 
-fn run_todo_queue_flow(cli: &Cli, context: ProjectContext, flow_kind: FlowKind) -> Result<()> {
+fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKind) -> Result<()> {
+    let report_started_at = Utc::now();
+    context.chief_yaml.chief.flow = flow_kind.as_str().to_owned();
     let engine = ChiefEngine::new(context.clone());
     let max_retries = cli
         .max_retries
@@ -282,29 +290,52 @@ fn run_todo_queue_flow(cli: &Cli, context: ProjectContext, flow_kind: FlowKind) 
     let run_id = latest_run_after
         .as_deref()
         .filter(|candidate| latest_run_before.as_deref() != Some(*candidate));
-    if let Err(err) = print_cli_flow_summary(&context, run_id, head_before.as_deref()) {
-        eprintln!("warning: failed to print run summary: {err:#}");
+
+    let exit_status = match &queue_result {
+        Ok(()) => RunExitStatus::Success,
+        Err(OrchestratorError::Retryable(_)) => RunExitStatus::Failure,
+        Err(OrchestratorError::Unrecoverable(_)) => RunExitStatus::UnrecoverableFailure,
+    };
+    let exit_reason = match &queue_result {
+        Ok(()) => Some("todo queue drained".to_owned()),
+        Err(OrchestratorError::Retryable(err)) => Some(err.to_string()),
+        Err(OrchestratorError::Unrecoverable(err)) => Some(err.to_string()),
+    };
+
+    match &queue_result {
+        Ok(()) => {
+            println!("all todos are done");
+        }
+        Err(_) => {}
+    }
+    if let Err(err) = print_cli_run_report(
+        &context,
+        run_id,
+        head_before.as_deref(),
+        report_started_at,
+        exit_status,
+        exit_reason.as_deref(),
+    ) {
+        eprintln!("warning: failed to print run report: {err:#}");
     }
 
     match queue_result {
-        Ok(()) => {
-            println!("all todos are done");
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(OrchestratorError::Retryable(err)) => Err(err).context("maximum retry count reached"),
         Err(OrchestratorError::Unrecoverable(err)) => Err(err).context("unrecoverable failure"),
     }
 }
 
 fn run_refactor(cli: &Cli) -> Result<()> {
+    let context = ProjectContext::load(&cli.project_dir)?;
     if cli.file.is_some() {
         bail!("--file is only supported when flow resolves to 'loop_file'");
     }
-    let context = ProjectContext::load(&cli.project_dir)?;
     run_todo_queue_flow(cli, context, FlowKind::Refactor)
 }
 
 fn run_bd(cli: &Cli) -> Result<()> {
+    let report_started_at = Utc::now();
     let mut context = ProjectContext::load(&cli.project_dir)?;
     context.chief_yaml.chief.flow = FlowKind::Bd.as_str().to_owned();
     println!("bd: started {}", context.project_dir.display());
@@ -348,37 +379,59 @@ fn run_bd(cli: &Cli) -> Result<()> {
         },
     );
 
-    if let Err(err) =
-        print_cli_flow_summary(&context, Some(run_id.as_str()), head_before.as_deref())
-    {
-        eprintln!("warning: failed to print run summary: {err:#}");
+    let exit_status = if let Err(err) = &result {
+        if err.is_unrecoverable() {
+            RunExitStatus::UnrecoverableFailure
+        } else {
+            RunExitStatus::Failure
+        }
+    } else {
+        RunExitStatus::Success
+    };
+    let exit_reason = result
+        .as_ref()
+        .err()
+        .map(|err| err.to_string())
+        .or_else(|| Some("bd flow completed".to_owned()));
+    let finalize_result = match &result {
+        Ok(_) => context
+            .set_job_status(job, JobStatus::Completed, None)
+            .and_then(|_| engine.finish_run(&run_id, RunExitStatus::Success)),
+        Err(err) => {
+            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
+            engine.finish_run(&run_id, exit_status)
+        }
+    };
+
+    if let Ok(outcome) = &result {
+        println!(
+            "completed bd {}{}",
+            outcome.todo_id,
+            outcome
+                .commit_hash
+                .as_deref()
+                .map(|hash| format!(" @ {hash}"))
+                .unwrap_or_default()
+        );
     }
+    if let Err(err) = &finalize_result {
+        eprintln!("warning: failed to finalize bd run state: {err:#}");
+    }
+    if let Err(err) = print_cli_run_report(
+        &context,
+        Some(run_id.as_str()),
+        head_before.as_deref(),
+        report_started_at,
+        exit_status,
+        exit_reason.as_deref(),
+    ) {
+        eprintln!("warning: failed to print run report: {err:#}");
+    }
+    finalize_result?;
 
     match result {
-        Ok(outcome) => {
-            context.set_job_status(job, JobStatus::Completed, None)?;
-            engine.finish_run(&run_id, RunExitStatus::Success)?;
-            println!(
-                "completed bd {}{}",
-                outcome.todo_id,
-                outcome
-                    .commit_hash
-                    .as_deref()
-                    .map(|hash| format!(" @ {hash}"))
-                    .unwrap_or_default()
-            );
-            Ok(())
-        }
-        Err(err) => {
-            let run_exit_status = if err.is_unrecoverable() {
-                RunExitStatus::UnrecoverableFailure
-            } else {
-                RunExitStatus::Failure
-            };
-            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
-            let _ = engine.finish_run(&run_id, run_exit_status);
-            Err(err.into_error()).context("bd execution failed")
-        }
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.into_error()).context("bd execution failed"),
     }
 }
 
@@ -528,6 +581,7 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
 }
 
 fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
+    let report_started_at = Utc::now();
     let mut context = ProjectContext::load(&cli.project_dir)?;
     let file_path = if args.file.is_absolute() {
         args.file.clone()
@@ -582,37 +636,59 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         },
     );
 
-    if let Err(err) =
-        print_cli_flow_summary(&context, Some(run_id.as_str()), head_before.as_deref())
-    {
-        eprintln!("warning: failed to print run summary: {err:#}");
+    let exit_status = if let Err(err) = &result {
+        if err.is_unrecoverable() {
+            RunExitStatus::UnrecoverableFailure
+        } else {
+            RunExitStatus::Failure
+        }
+    } else {
+        RunExitStatus::Success
+    };
+    let exit_reason = result
+        .as_ref()
+        .err()
+        .map(|err| err.to_string())
+        .or_else(|| Some("loop_file flow completed".to_owned()));
+    let finalize_result = match &result {
+        Ok(_) => context
+            .set_job_status(job, JobStatus::Completed, None)
+            .and_then(|_| engine.finish_run(&run_id, RunExitStatus::Success)),
+        Err(err) => {
+            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
+            engine.finish_run(&run_id, exit_status)
+        }
+    };
+
+    if let Ok(outcome) = &result {
+        println!(
+            "completed loop_file {}{}",
+            outcome.todo_id,
+            outcome
+                .commit_hash
+                .as_deref()
+                .map(|hash| format!(" @ {hash}"))
+                .unwrap_or_default()
+        );
     }
+    if let Err(err) = &finalize_result {
+        eprintln!("warning: failed to finalize loop_file run state: {err:#}");
+    }
+    if let Err(err) = print_cli_run_report(
+        &context,
+        Some(run_id.as_str()),
+        head_before.as_deref(),
+        report_started_at,
+        exit_status,
+        exit_reason.as_deref(),
+    ) {
+        eprintln!("warning: failed to print run report: {err:#}");
+    }
+    finalize_result?;
 
     match result {
-        Ok(outcome) => {
-            context.set_job_status(job, JobStatus::Completed, None)?;
-            engine.finish_run(&run_id, RunExitStatus::Success)?;
-            println!(
-                "completed loop_file {}{}",
-                outcome.todo_id,
-                outcome
-                    .commit_hash
-                    .as_deref()
-                    .map(|hash| format!(" @ {hash}"))
-                    .unwrap_or_default()
-            );
-            Ok(())
-        }
-        Err(err) => {
-            let run_exit_status = if err.is_unrecoverable() {
-                RunExitStatus::UnrecoverableFailure
-            } else {
-                RunExitStatus::Failure
-            };
-            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
-            let _ = engine.finish_run(&run_id, run_exit_status);
-            Err(err.into_error()).context("loop_file execution failed")
-        }
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.into_error()).context("loop_file execution failed"),
     }
 }
 
@@ -726,21 +802,145 @@ fn latest_run_id(store: &ProjectStore) -> Result<Option<String>> {
         .context("failed to read latest run id")
 }
 
-fn convergence_iteration_count(store: &ProjectStore, run_id: &str) -> Result<usize> {
+#[derive(Debug, Clone)]
+struct ReportRunRecord {
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    exit_status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ReportEventRecord {
+    level: String,
+    msg: String,
+    event_type: String,
+    payload: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StableIterationProgress {
+    current: usize,
+    required: usize,
+    converged: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ReportAgentUsageLimit {
+    label: String,
+    percent_used: u32,
+    percent_remaining: u32,
+    reset_info: String,
+    #[serde(default)]
+    reset_minutes: Option<i64>,
+    #[serde(default)]
+    spent: Option<String>,
+    #[serde(default)]
+    requests: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ReportAgentUsageSnapshot {
+    provider: String,
+    limits: Vec<ReportAgentUsageLimit>,
+}
+
+#[derive(Debug, Clone)]
+struct CliRunReport {
+    flow_name: String,
+    project_dir: PathBuf,
+    run_id: Option<String>,
+    status: String,
+    exit_reason: String,
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+    iterations: usize,
+    stable_progress: Option<StableIterationProgress>,
+    agent_calls: usize,
+    warning_count: usize,
+    lint_passed: usize,
+    lint_failed: usize,
+    test_passed: usize,
+    test_failed: usize,
+    wait_seconds_applied: f64,
+    commits: Vec<String>,
+    agent_name: String,
+    usage_snapshot: Option<ReportAgentUsageSnapshot>,
+    usage_source: Option<&'static str>,
+}
+
+fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .with_context(|| format!("invalid RFC3339 timestamp '{value}'"))
+}
+
+fn load_run_record(store: &ProjectStore, run_id: &str) -> Result<Option<ReportRunRecord>> {
     let conn = rusqlite::Connection::open(&store.db_path)
         .with_context(|| format!("failed to open {}", store.db_path.display()))?;
     let mut stmt = conn
         .prepare(
-            "SELECT COUNT(*) FROM events
+            "SELECT started_at, ended_at, exit_status
+             FROM runs
              WHERE run_id = ?1
-               AND event_type = 'phase_change'
-               AND msg LIKE 'convergence loop iteration %'",
+             LIMIT 1",
         )
-        .context("failed to prepare iteration count query")?;
-    let count: i64 = stmt
-        .query_row([run_id], |row| row.get(0))
-        .context("failed to query convergence iteration count")?;
-    Ok(count.max(0) as usize)
+        .context("failed to prepare run record query")?;
+    stmt.query_row([run_id], |row| {
+        let started_at: String = row.get(0)?;
+        let ended_at: Option<String> = row.get(1)?;
+        let exit_status: Option<String> = row.get(2)?;
+        Ok((started_at, ended_at, exit_status))
+    })
+    .optional()
+    .context("failed to query run record")?
+    .map(|(started_at, ended_at, exit_status)| {
+        Ok(ReportRunRecord {
+            started_at: parse_rfc3339_utc(&started_at)?,
+            ended_at: ended_at.as_deref().map(parse_rfc3339_utc).transpose()?,
+            exit_status,
+        })
+    })
+    .transpose()
+}
+
+fn load_run_events(store: &ProjectStore, run_id: &str) -> Result<Vec<ReportEventRecord>> {
+    let conn = rusqlite::Connection::open(&store.db_path)
+        .with_context(|| format!("failed to open {}", store.db_path.display()))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT level, msg, event_type, payload
+             FROM events
+             WHERE run_id = ?1
+             ORDER BY id ASC",
+        )
+        .context("failed to prepare run event query")?;
+    let rows = stmt
+        .query_map([run_id], |row| {
+            let payload_text: Option<String> = row.get(3)?;
+            Ok((
+                row.get::<_, Option<String>>(0)?
+                    .unwrap_or_else(|| "info".to_owned()),
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                payload_text,
+            ))
+        })
+        .context("failed to query run events")?;
+
+    rows.map(|row| {
+        let (level, msg, event_type, payload_text) = row?;
+        let payload = payload_text
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<BTreeMap<String, Value>>(text).ok())
+            .unwrap_or_default();
+        Ok(ReportEventRecord {
+            level,
+            msg,
+            event_type,
+            payload,
+        })
+    })
+    .collect::<Result<Vec<_>>>()
 }
 
 fn git_commits_since(project_dir: &Path, head_before: Option<&str>) -> Result<Vec<String>> {
@@ -766,27 +966,476 @@ fn git_commits_since(project_dir: &Path, head_before: Option<&str>) -> Result<Ve
         .collect())
 }
 
-fn print_cli_flow_summary(
+fn parse_stable_iteration_progress(msg: &str) -> Option<StableIterationProgress> {
+    let (converged, tail) = if let Some((_, tail)) = msg.rsplit_once("stable result ") {
+        (true, tail)
+    } else if let Some((_, tail)) = msg.rsplit_once("phase stable ") {
+        (false, tail)
+    } else {
+        return None;
+    };
+
+    let ratio = tail
+        .split([';', ' '])
+        .find(|segment| segment.contains('/'))?
+        .trim();
+    let (current, required) = ratio.split_once('/')?;
+    Some(StableIterationProgress {
+        current: current.parse().ok()?,
+        required: required.parse().ok()?,
+        converged,
+    })
+}
+
+fn duration_from_datetimes(started_at: DateTime<Utc>, ended_at: DateTime<Utc>) -> Duration {
+    ended_at
+        .signed_duration_since(started_at)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn should_use_color_stdout() -> bool {
+    if let Ok(force) = std::env::var("CLICOLOR_FORCE")
+        && force.trim() != "0"
+        && !force.trim().is_empty()
+    {
+        return true;
+    }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    io::stdout().is_terminal()
+}
+
+fn style(text: &str, code: &str, enabled: bool) -> String {
+    if !enabled {
+        return text.to_owned();
+    }
+    format!("{code}{text}\x1b[0m")
+}
+
+fn format_status_label(status: &str, enabled: bool) -> String {
+    match status {
+        "success" => style("SUCCESS", "\x1b[32m", enabled),
+        "failure" => style("FAILURE", "\x1b[31m", enabled),
+        "unrecoverable_failure" => style("UNRECOVERABLE", "\x1b[31;1m", enabled),
+        other => style(&other.to_ascii_uppercase(), "\x1b[33m", enabled),
+    }
+}
+
+fn format_report_key(key: &str, enabled: bool) -> String {
+    style(key, "\x1b[36m", enabled)
+}
+
+fn format_report_header(enabled: bool) -> String {
+    style("CHIEF RUN REPORT", "\x1b[1;37m", enabled)
+}
+
+fn format_usage_snapshot_lines(snapshot: &ReportAgentUsageSnapshot) -> Vec<String> {
+    snapshot
+        .limits
+        .iter()
+        .map(|limit| {
+            let mut line = format!(
+                "{}: {}% remaining, {}% used, {}",
+                limit.label, limit.percent_remaining, limit.percent_used, limit.reset_info
+            );
+            if let Some(requests) = &limit.requests {
+                line.push_str(&format!(", requests {requests}"));
+            }
+            if let Some(spent) = &limit.spent {
+                line.push_str(&format!(", spent {spent}"));
+            }
+            line
+        })
+        .collect()
+}
+
+fn derive_exit_reason(
+    status: &str,
+    events: &[ReportEventRecord],
+    fallback: Option<&str>,
+) -> String {
+    if status != "success" {
+        if let Some(event) = events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "phase_failure" || event.level == "error")
+        {
+            return event.msg.clone();
+        }
+        return fallback
+            .map(str::to_owned)
+            .unwrap_or_else(|| "run failed".to_owned());
+    }
+
+    if let Some(progress) = events
+        .iter()
+        .rev()
+        .find_map(|event| parse_stable_iteration_progress(&event.msg))
+        && progress.converged
+    {
+        return format!(
+            "converged after {} stable iteration(s) out of {} required",
+            progress.current, progress.required
+        );
+    }
+
+    if let Some(event) = events.iter().rev().find(|event| {
+        event.msg.contains("phase done on iteration")
+            || event
+                .msg
+                .contains("found no ready tickets during pre-check")
+            || event.msg.contains("skipping commit")
+            || event.msg.contains("loop done; preparing commit")
+    }) {
+        return event.msg.clone();
+    }
+
+    fallback
+        .map(str::to_owned)
+        .unwrap_or_else(|| "run completed successfully".to_owned())
+}
+
+fn probe_current_agent_usage(
+    agent_name: &str,
+    project_dir: &Path,
+) -> Result<ReportAgentUsageSnapshot> {
+    let config = UsageConfig {
+        timeout: 45,
+        verbose: false,
+        approval_policy: ApprovalPolicy::Fail,
+        directory: Some(project_dir.display().to_string()),
+    };
+
+    let usage = if agent_name.eq_ignore_ascii_case("claude") {
+        run_claude(&config)?
+    } else if agent_name.eq_ignore_ascii_case("codex") {
+        run_codex(&config)?
+    } else {
+        bail!("unsupported agent '{}' for usage reporting", agent_name);
+    };
+
+    Ok(ReportAgentUsageSnapshot {
+        provider: usage.provider,
+        limits: usage
+            .entries
+            .into_iter()
+            .map(|entry| ReportAgentUsageLimit {
+                label: entry.label,
+                percent_used: entry.percent_used,
+                percent_remaining: entry.percent_remaining,
+                reset_info: entry.reset_info,
+                reset_minutes: entry.reset_minutes,
+                spent: entry.spent,
+                requests: entry.requests,
+            })
+            .collect(),
+    })
+}
+
+fn build_cli_run_report(
     context: &ProjectContext,
     run_id: Option<&str>,
     head_before: Option<&str>,
-) -> Result<()> {
-    let iterations = match run_id {
-        Some(run_id) => convergence_iteration_count(&context.store, run_id)?,
-        None => 0,
+    started_at_fallback: DateTime<Utc>,
+    exit_status_fallback: RunExitStatus,
+    exit_reason_fallback: Option<&str>,
+) -> Result<CliRunReport> {
+    let run_record = match run_id {
+        Some(run_id) => load_run_record(&context.store, run_id)?,
+        None => None,
     };
+    let events = match run_id {
+        Some(run_id) => load_run_events(&context.store, run_id)?,
+        None => Vec::new(),
+    };
+    let ended_at_fallback = Utc::now();
+    let status = run_record
+        .as_ref()
+        .and_then(|record| record.exit_status.clone())
+        .unwrap_or_else(|| exit_status_fallback.as_str().to_owned());
     let commits = git_commits_since(&context.project_dir, head_before)?;
-
-    println!("run summary:");
-    println!("iterations: {iterations}");
-    println!("commits: {}", commits.len());
-    println!("git log --oneline:");
-    if commits.is_empty() {
-        println!("(no new commits)");
+    let started_at = run_record
+        .as_ref()
+        .map(|record| record.started_at)
+        .unwrap_or(started_at_fallback);
+    let ended_at = run_record
+        .as_ref()
+        .and_then(|record| record.ended_at)
+        .unwrap_or(ended_at_fallback);
+    let stable_progress = events
+        .iter()
+        .rev()
+        .find_map(|event| parse_stable_iteration_progress(&event.msg));
+    let usage_snapshot_from_events = events.iter().rev().find_map(|event| {
+        event
+            .payload
+            .get("usage")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ReportAgentUsageSnapshot>(value).ok())
+    });
+    let (usage_snapshot, usage_source) =
+        match probe_current_agent_usage(&context.chief_yaml.chief.agent, &context.project_dir) {
+            Ok(snapshot) => (Some(snapshot), Some("live")),
+            Err(_) => (usage_snapshot_from_events, Some("cached")),
+        };
+    let usage_source = if usage_snapshot.is_some() {
+        usage_source
     } else {
-        for commit in commits {
-            println!("{commit}");
+        None
+    };
+
+    let mut lint_passed = 0usize;
+    let mut lint_failed = 0usize;
+    let mut test_passed = 0usize;
+    let mut test_failed = 0usize;
+    let mut wait_seconds_applied = 0.0f64;
+
+    for event in &events {
+        match event.event_type.as_str() {
+            "lint" => {
+                if event
+                    .payload
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1)
+                    == 0
+                {
+                    lint_passed += 1;
+                } else {
+                    lint_failed += 1;
+                }
+            }
+            "test_run" => {
+                if event
+                    .payload
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1)
+                    == 0
+                {
+                    test_passed += 1;
+                } else {
+                    test_failed += 1;
+                }
+            }
+            "agent_cmd" => {
+                wait_seconds_applied += event
+                    .payload
+                    .get("wait_seconds_applied")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+            }
+            _ => {}
         }
     }
+
+    Ok(CliRunReport {
+        flow_name: context.chief_yaml.chief.flow.clone(),
+        project_dir: context.project_dir.clone(),
+        run_id: run_id.map(str::to_owned),
+        status: status.clone(),
+        exit_reason: derive_exit_reason(&status, &events, exit_reason_fallback),
+        started_at,
+        ended_at,
+        iterations: events
+            .iter()
+            .filter(|event| {
+                event.event_type == "phase_change" && event.msg.contains(" loop iteration ")
+            })
+            .count(),
+        stable_progress,
+        agent_calls: events
+            .iter()
+            .filter(|event| event.event_type == "agent_prompt")
+            .count(),
+        warning_count: events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.level.to_ascii_lowercase().as_str(),
+                    "warning" | "warn" | "error"
+                )
+            })
+            .count(),
+        lint_passed,
+        lint_failed,
+        test_passed,
+        test_failed,
+        wait_seconds_applied,
+        commits,
+        agent_name: context.chief_yaml.chief.agent.clone(),
+        usage_snapshot,
+        usage_source,
+    })
+}
+
+fn render_cli_run_report(report: &CliRunReport) -> String {
+    let color = should_use_color_stdout();
+    let mut lines = Vec::new();
+    let divider = style(
+        "================================================================",
+        "\x1b[90m",
+        color,
+    );
+    lines.push(divider.clone());
+    lines.push(format_report_header(color));
+    lines.push(divider.clone());
+    lines.push(format!(
+        "{} {}",
+        format_report_key("status", color),
+        format_status_label(&report.status, color)
+    ));
+    lines.push(format!(
+        "{} {}",
+        format_report_key("reason", color),
+        report.exit_reason
+    ));
+    lines.push(format!(
+        "{} {}",
+        format_report_key("flow", color),
+        report.flow_name
+    ));
+    if let Some(run_id) = &report.run_id {
+        lines.push(format!("{} {}", format_report_key("run_id", color), run_id));
+    }
+    lines.push(format!(
+        "{} {}",
+        format_report_key("project", color),
+        report.project_dir.display()
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {}",
+        format_report_key("started_at", color),
+        report.started_at.to_rfc3339()
+    ));
+    lines.push(format!(
+        "{} {}",
+        format_report_key("ended_at", color),
+        report.ended_at.to_rfc3339()
+    ));
+    lines.push(format!(
+        "{} {}",
+        format_report_key("duration", color),
+        format_duration(duration_from_datetimes(report.started_at, report.ended_at))
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {}",
+        format_report_key("iterations", color),
+        report.iterations
+    ));
+    if let Some(progress) = &report.stable_progress {
+        lines.push(format!(
+            "{} {}/{}{}",
+            format_report_key("stable_iterations", color),
+            progress.current,
+            progress.required,
+            if progress.converged {
+                " (converged)"
+            } else {
+                ""
+            }
+        ));
+    }
+    lines.push(format!(
+        "{} {}",
+        format_report_key("agent_calls", color),
+        report.agent_calls
+    ));
+    lines.push(format!(
+        "{} {}",
+        format_report_key("warnings", color),
+        report.warning_count
+    ));
+    lines.push(format!(
+        "{} {} passed, {} failed",
+        format_report_key("lint", color),
+        report.lint_passed,
+        report.lint_failed
+    ));
+    lines.push(format!(
+        "{} {} passed, {} failed",
+        format_report_key("tests", color),
+        report.test_passed,
+        report.test_failed
+    ));
+    lines.push(format!(
+        "{} {}",
+        format_report_key("limit_wait", color),
+        format_duration(Duration::from_secs_f64(
+            report.wait_seconds_applied.max(0.0)
+        ))
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {}",
+        format_report_key("commits", color),
+        report.commits.len()
+    ));
+    if report.commits.is_empty() {
+        lines.push("  (no new commits)".to_owned());
+    } else {
+        for commit in &report.commits {
+            lines.push(format!("  {commit}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {}",
+        format_report_key("agent", color),
+        report.agent_name
+    ));
+    match (&report.usage_snapshot, report.usage_source) {
+        (Some(snapshot), Some(source)) => {
+            lines.push(format!(
+                "{} {} ({source})",
+                format_report_key("usage_provider", color),
+                snapshot.provider
+            ));
+            for line in format_usage_snapshot_lines(snapshot) {
+                lines.push(format!("  {line}"));
+            }
+        }
+        _ => lines.push(format!("{} unavailable", format_report_key("usage", color))),
+    }
+    lines.push(divider);
+    lines.join("\n")
+}
+
+fn print_cli_run_report(
+    context: &ProjectContext,
+    run_id: Option<&str>,
+    head_before: Option<&str>,
+    started_at_fallback: DateTime<Utc>,
+    exit_status_fallback: RunExitStatus,
+    exit_reason_fallback: Option<&str>,
+) -> Result<()> {
+    let report = build_cli_run_report(
+        context,
+        run_id,
+        head_before,
+        started_at_fallback,
+        exit_status_fallback,
+        exit_reason_fallback,
+    )?;
+    println!("{}", render_cli_run_report(&report));
     Ok(())
 }

@@ -1,6 +1,9 @@
 use super::*;
 use chief::config::TestSuiteConfig;
-use chief::domain::TargetType;
+use chief::domain::{EventType, Phase, RunExitStatus, TargetType};
+use chief::service::ProjectContext;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use uuid::Uuid;
@@ -99,6 +102,13 @@ fn write_chief_yaml(project_dir: &std::path::Path, content: &str) {
         .expect(".chief directory should be created");
     fs::write(chief::paths::chief_yaml_path(project_dir), content)
         .expect("chief.yaml should be written");
+}
+
+fn json_object_payload(value: serde_json::Value) -> BTreeMap<String, Value> {
+    match value {
+        Value::Object(map) => map.into_iter().collect(),
+        _ => BTreeMap::new(),
+    }
 }
 
 #[test]
@@ -540,6 +550,186 @@ fn init_skips_bd_init_when_beads_directory_already_exists() {
     assert!(
         !bd_log.exists(),
         "init should not invoke bd init when .beads already exists"
+    );
+}
+
+#[test]
+fn parse_stable_iteration_progress_handles_pending_and_converged_states() {
+    assert_eq!(
+        parse_stable_iteration_progress("LOOP_FILE phase stable 1/2; retrying to confirm"),
+        Some(StableIterationProgress {
+            current: 1,
+            required: 2,
+            converged: false,
+        })
+    );
+    assert_eq!(
+        parse_stable_iteration_progress("REFACTOR phase done after stable result 2/2"),
+        Some(StableIterationProgress {
+            current: 2,
+            required: 2,
+            converged: true,
+        })
+    );
+    assert_eq!(parse_stable_iteration_progress("unrelated"), None);
+}
+
+#[test]
+fn build_cli_run_report_counts_until_pass_iterations_and_uses_cached_usage_snapshot() {
+    let temp = TempDir::new("run-report");
+    init_git_repo(&temp.path);
+    write_chief_yaml(
+        &temp.path,
+        "chief:\n  flow: loop_file\n  agent: unsupported\n",
+    );
+
+    let context = ProjectContext::load(&temp.path).expect("project context should load");
+    let run_id = "run-report-1";
+    context
+        .store
+        .start_run(run_id)
+        .expect("run should start for report test");
+
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::PhaseChange,
+            "convergence loop iteration 1/50",
+            BTreeMap::new(),
+        )
+        .expect("convergence iteration should be recorded");
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::Bd),
+            EventType::PhaseChange,
+            "until_pass loop iteration 2/50",
+            BTreeMap::new(),
+        )
+        .expect("until_pass iteration should be recorded");
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::PhaseChange,
+            "LOOP_FILE phase stable 1/2; retrying to confirm",
+            BTreeMap::new(),
+        )
+        .expect("stable progress should be recorded");
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::AgentPrompt,
+            "Agent prompt (loop_file)",
+            BTreeMap::new(),
+        )
+        .expect("agent prompt should be recorded");
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "warning",
+            Some(Phase::LoopFile),
+            EventType::Lint,
+            "Lint failed (backend)",
+            json_object_payload(serde_json::json!({
+                "exit_code": 1,
+                "command": "cargo clippy",
+            })),
+        )
+        .expect("lint event should be recorded");
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::TestRun,
+            "Test run passed (backend)",
+            json_object_payload(serde_json::json!({
+                "exit_code": 0,
+                "command": "cargo test",
+            })),
+        )
+        .expect("test event should be recorded");
+    context
+        .log_project_event(
+            run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::AgentCmd,
+            "Agent usage limits before call",
+            json_object_payload(serde_json::json!({
+                "wait_seconds_applied": 12.0,
+                "usage": {
+                    "provider": "codex",
+                    "limits": [{
+                        "label": "5h limit",
+                        "percent_used": 70,
+                        "percent_remaining": 30,
+                        "reset_info": "resets in 80 minutes"
+                    }]
+                }
+            })),
+        )
+        .expect("agent usage event should be recorded");
+    context
+        .store
+        .finish_run(run_id, RunExitStatus::Success)
+        .expect("run should finish for report test");
+
+    let report = build_cli_run_report(
+        &context,
+        Some(run_id),
+        None,
+        chrono::Utc::now(),
+        RunExitStatus::Success,
+        Some("fallback reason"),
+    )
+    .expect("report should build from persisted data");
+
+    assert_eq!(report.iterations, 2, "both loop policies should count");
+    assert_eq!(
+        report.stable_progress,
+        Some(StableIterationProgress {
+            current: 1,
+            required: 2,
+            converged: false,
+        })
+    );
+    assert_eq!(report.agent_calls, 1);
+    assert_eq!(report.lint_passed, 0);
+    assert_eq!(report.lint_failed, 1);
+    assert_eq!(report.test_passed, 1);
+    assert_eq!(report.test_failed, 0);
+    assert_eq!(report.wait_seconds_applied, 12.0);
+    assert_eq!(report.usage_source, Some("cached"));
+    assert_eq!(
+        report
+            .usage_snapshot
+            .as_ref()
+            .expect("cached usage snapshot should be used")
+            .limits[0]
+            .percent_remaining,
+        30
     );
 }
 
