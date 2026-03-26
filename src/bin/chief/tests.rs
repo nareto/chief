@@ -178,7 +178,7 @@ fn ensure_gitignore_entries_creates_file_when_missing() {
     assert!(changed);
     assert_eq!(
         fs::read_to_string(gitignore_path).expect("gitignore should exist"),
-        ".chief/chief.db\n.chief/chief.example.yaml\n.beads\n"
+        ".chief/chief.db\n.chief/chief.example.yaml\n.chief/codex-home\n.beads\n"
     );
 }
 
@@ -196,7 +196,7 @@ fn ensure_gitignore_entries_appends_only_missing_entries() {
     assert!(changed);
     assert_eq!(
         fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
-        "target/\n.chief/chief.db\n.chief/chief.example.yaml\n.beads\n"
+        "target/\n.chief/chief.db\n.chief/chief.example.yaml\n.chief/codex-home\n.beads\n"
     );
 }
 
@@ -206,7 +206,7 @@ fn ensure_gitignore_entries_is_idempotent() {
     let gitignore_path = temp.path.join(".gitignore");
     fs::write(
         &gitignore_path,
-        "/.chief/chief.db\n./.chief/chief.example.yaml\n.beads\n",
+        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/codex-home\n.beads\n",
     )
     .expect("seed gitignore should be written");
 
@@ -217,7 +217,7 @@ fn ensure_gitignore_entries_is_idempotent() {
     assert!(!changed);
     assert_eq!(
         fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
-        "/.chief/chief.db\n./.chief/chief.example.yaml\n.beads\n"
+        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/codex-home\n.beads\n"
     );
 }
 

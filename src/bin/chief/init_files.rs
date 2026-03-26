@@ -8,8 +8,12 @@ use std::process::{Command, Stdio};
 
 const BD_AGENTS_TEMPLATE_FILE_NAME: &str = "bd_AGENTS.md";
 
-pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] =
-    [".chief/chief.db", ".chief/chief.example.yaml", ".beads"];
+pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 4] = [
+    ".chief/chief.db",
+    ".chief/chief.example.yaml",
+    ".chief/codex-home",
+    ".beads",
+];
 pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   flow: loop_file
   # flow: refactor # uncomment to run queued workflow

@@ -1,4 +1,5 @@
 use crate::config::{McpServerAuthConfig, McpServerConfig};
+use crate::paths;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -17,11 +18,18 @@ pub(super) struct AgentScratchDir {
 
 impl AgentScratchDir {
     pub(super) fn new(prefix: &str) -> Result<Self> {
-        let path = env::temp_dir().join(format!(
+        Self::new_at(env::temp_dir().join(format!(
             "chief-{prefix}-{}-{}",
             std::process::id(),
             Uuid::new_v4()
-        ));
+        )))
+    }
+
+    pub(super) fn new_at(path: PathBuf) -> Result<Self> {
+        if path.exists() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to reset scratch dir {}", path.display()))?;
+        }
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to create scratch dir {}", path.display()))?;
         #[cfg(unix)]
@@ -99,7 +107,7 @@ fn prepare_codex_mcp_runtime_with_source_home(
     cwd: &Path,
     source_home: Option<&Path>,
 ) -> Result<CodexMcpRuntime> {
-    let scratch_dir = AgentScratchDir::new("codex-home")?;
+    let scratch_dir = AgentScratchDir::new_at(paths::codex_home_path(cwd))?;
     let config_text = build_codex_config(source_home, servers, cwd)?;
     scratch_dir.write_text_file("config.toml", &config_text)?;
     copy_codex_auth_json(source_home, scratch_dir.path())?;
@@ -424,6 +432,10 @@ args = ["-y", "user-server"]
             .expect("auth file should be written");
 
         let cwd = TempDir::new("codex-project");
+        fs::create_dir_all(cwd.path.join(".chief/codex-home"))
+            .expect("existing codex home should be created");
+        fs::write(cwd.path.join(".chief/codex-home/stale.txt"), "stale")
+            .expect("stale codex home file should be written");
         let servers = BTreeMap::from([(
             "context7".to_owned(),
             McpServerConfig::Stdio {
@@ -442,11 +454,16 @@ args = ["-y", "user-server"]
         let rendered = fs::read_to_string(runtime.home_dir.join("config.toml"))
             .expect("generated Codex config should be readable");
 
+        assert_eq!(runtime.home_dir, paths::codex_home_path(&cwd.path));
         assert!(rendered.contains("model = \"gpt-5\""));
         assert!(rendered.contains("[mcp_servers.context7]"));
         assert!(!rendered.contains("user_defined"));
         assert!(rendered.contains("trust_level = \"untrusted\""));
         assert!(runtime.home_dir.join("auth.json").is_file());
+        assert!(
+            !runtime.home_dir.join("stale.txt").exists(),
+            "fixed codex home should be reset before each run"
+        );
     }
 
     #[test]
