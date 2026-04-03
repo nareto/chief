@@ -57,12 +57,17 @@ pub(super) fn run_init_with_bd_command(
     };
     let chief_example_source = paths::chief_example_path(&chief_root_for_checks);
     if !chief_example_source.is_file() {
-        bail!("example file not found: {}", chief_example_source.display());
+        bail!(
+            "example file not found: {}\n\
+             hint: use `chief init --chief-root <path>` to point to the chief repo directory",
+            chief_example_source.display()
+        );
     }
     let bd_agents_template_source = chief_root_for_checks.join(BD_AGENTS_TEMPLATE_FILE_NAME);
     if !bd_agents_template_source.is_file() {
         bail!(
-            "bd agents template not found: {}",
+            "bd agents template not found: {}\n\
+             hint: use `chief init --chief-root <path>` to point to the chief repo directory",
             bd_agents_template_source.display()
         );
     }
