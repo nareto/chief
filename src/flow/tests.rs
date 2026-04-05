@@ -737,6 +737,7 @@ fn run_test_and_lint_runs_all_suites_and_returns_false_when_any_test_fails() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let suites = vec![
@@ -794,6 +795,7 @@ fn run_test_suite_executes_cleanup_command_even_on_test_failure() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let mut suite = suite_named_with_test_command("frontend", "exit 1");
@@ -848,6 +850,7 @@ fn suite_preparation_commands_run_once_per_suite_per_execution() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let marker_file = project_dir.join("suite-setup.log");
@@ -910,6 +913,7 @@ fn previous_steps_log_orders_entries_oldest_first_within_limit() {
         todo: todo.clone(),
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     execution
@@ -1027,6 +1031,7 @@ fn previous_steps_log_includes_command_and_truncated_output() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let mut payload = BTreeMap::new();
@@ -1109,6 +1114,7 @@ fn previous_steps_log_excludes_history_when_execution_context_hash_changes() {
         todo: todo.clone(),
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let mut payload = BTreeMap::new();
@@ -1142,6 +1148,7 @@ fn previous_steps_log_excludes_history_when_execution_context_hash_changes() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let log = new_execution
@@ -1195,6 +1202,7 @@ fn single_prompt_failure_context_includes_failed_commands_and_output_tails() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let mut lint_payload = BTreeMap::new();
@@ -1351,6 +1359,7 @@ fn single_prompt_failure_context_excludes_history_when_todo_context_hash_changes
         todo: todo_old,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     old_execution
@@ -1396,6 +1405,7 @@ fn single_prompt_failure_context_excludes_history_when_todo_context_hash_changes
         todo: todo_new,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let context = new_execution
@@ -1459,6 +1469,7 @@ fn single_prompt_failure_context_includes_all_latest_iteration_failures_in_order
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     // Older iteration failures should be ignored once we hit the latest iteration boundary.
@@ -1654,6 +1665,7 @@ fn single_prompt_failure_context_uses_latest_suite_failures_across_runs() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
     let todo_context_hash = execution.todo_context_hash();
     let execution_context_hash = execution.execution_context_hash();
@@ -1915,6 +1927,7 @@ fn single_prompt_failure_context_stops_at_retry_cleanup_reset_for_suite_history(
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
     let todo_context_hash = execution.todo_context_hash();
     let execution_context_hash = execution.execution_context_hash();
@@ -2010,6 +2023,7 @@ fn single_prompt_changed_files_retry_without_associated_suites_is_not_failure_co
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     execution
@@ -2103,6 +2117,7 @@ fn single_prompt_changed_files_retry_with_associated_suites_remains_failure_cont
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     execution
@@ -2204,6 +2219,7 @@ fn touched_files_since_last_retry_reset_uses_all_runs_and_stops_at_latest_reset(
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
     let todo_context_hash = execution.todo_context_hash();
     let execution_context_hash = execution.execution_context_hash();
@@ -2358,6 +2374,7 @@ fn previous_attempt_detection_spans_runs_and_resets_on_retry_cleanup() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
     let todo_context_hash = execution.todo_context_hash();
     let execution_context_hash = execution.execution_context_hash();
@@ -2454,6 +2471,7 @@ fn refactor_uses_todo_suites_in_prompt_when_todo_sets_subset() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let flow = build_flow(FlowKind::Refactor, 6, 2);
@@ -2528,6 +2546,7 @@ fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let flow = build_flow(FlowKind::LoopFile, 4, 1);
@@ -2595,6 +2614,7 @@ fn loop_file_salvages_uncommitted_changes_with_harness_commit() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let flow = build_flow(FlowKind::LoopFile, 4, 1);
@@ -2665,6 +2685,7 @@ fn loop_file_agent_commit_with_clean_tree_does_not_count_as_stable() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let flow = build_flow(FlowKind::LoopFile, 4, 1);
@@ -2785,6 +2806,7 @@ fn loop_file_does_not_restart_from_global_bd_ready_tickets() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let flow = build_flow(FlowKind::LoopFile, 4, 1);
@@ -2888,6 +2910,7 @@ fn bd_flow_uses_bd_prompt_and_stops_when_ready_queue_is_empty() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let outcome = build_flow(FlowKind::Bd, 4, 1)
@@ -2974,6 +2997,7 @@ fn bd_flow_uses_max_loop_iterations_as_a_hard_cap() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let err = build_flow(FlowKind::Bd, 2, 1)
@@ -3040,6 +3064,7 @@ fn refactor_alternates_structural_and_mechanical_prompts() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let flow = build_flow(FlowKind::Refactor, 4, 2);
@@ -3096,6 +3121,7 @@ fn run_test_and_lint_runs_tests_even_when_lint_fails() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let first_marker = project_dir.join("first-suite-test-ran.txt");
@@ -3160,6 +3186,7 @@ fn lint_fix_command_recovers_lint_failure() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     // The lint command fails on first run but the fix command creates a marker
@@ -3217,6 +3244,7 @@ fn lint_fix_command_still_fails_when_recheck_fails() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     // Fix command succeeds but lint still fails on re-check.
@@ -3286,6 +3314,7 @@ fn run_test_and_lint_reloads_chief_yaml_suite_commands_between_iterations() {
         todo,
         cancel_signal: Arc::new(AtomicBool::new(false)),
         prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
     };
 
     let first_ok = super::run_test_and_lint(

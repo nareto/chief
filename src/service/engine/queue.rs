@@ -126,6 +126,7 @@ impl ChiefEngine {
             flow_kind,
             work_dir.clone(),
             model_override,
+            Vec::new(),
             Arc::new(AtomicBool::new(false)),
             max_retries.max(1),
             |attempt, total, err| on_retry(attempt, total, err),

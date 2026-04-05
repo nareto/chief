@@ -47,6 +47,9 @@ struct Cli {
     /// Markdown file used when running flow=loop_file via the default `chief` command.
     #[arg(long)]
     file: Option<PathBuf>,
+    /// Scope convergence to these paths only (repeatable). Ignored for non-loop_file flows.
+    #[arg(long = "watch-only")]
+    watch_only: Vec<String>,
     #[arg(long = "requirements")]
     requirements: Vec<String>,
     #[arg(long = "requirements-file")]
@@ -83,6 +86,9 @@ struct InitArgs {
     /// Path to the Chief repo root that contains *.example.yaml files.
     #[arg(long, default_value = "../chief")]
     chief_root: PathBuf,
+    /// Initialize beads integration (runs `bd init`).
+    #[arg(long, default_value_t = false)]
+    beads: bool,
 }
 
 #[derive(Debug, Args)]
@@ -150,6 +156,10 @@ struct LoopFileArgs {
     /// Markdown file path to load as the loop_file task body.
     #[arg(long)]
     file: PathBuf,
+    /// Scope convergence to these paths only (repeatable). When set, an iteration
+    /// is considered stable only if none of the specified paths were modified.
+    #[arg(long = "watch-only")]
+    watch_only: Vec<String>,
 }
 
 fn main() {
@@ -244,7 +254,7 @@ fn run(cli: &Cli) -> Result<()> {
                 "flow 'loop_file' requires --file <path> (or use `chief loop_file --file <path>`)"
             )
         })?;
-        return run_loop_file(cli, &LoopFileArgs { file });
+        return run_loop_file(cli, &LoopFileArgs { file, watch_only: cli.watch_only.clone() });
     }
     if cli.file.is_some() {
         bail!("--file is only supported when flow resolves to 'loop_file'");
@@ -372,6 +382,7 @@ fn run_bd(cli: &Cli) -> Result<()> {
         FlowKind::Bd,
         context.project_dir.clone(),
         cli.model.clone(),
+        Vec::new(),
         Arc::new(AtomicBool::new(false)),
         1,
         |attempt, total, err| {
@@ -629,6 +640,7 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         FlowKind::LoopFile,
         context.project_dir.clone(),
         cli.model.clone(),
+        args.watch_only.clone(),
         Arc::new(AtomicBool::new(false)),
         1,
         |attempt, total, err| {

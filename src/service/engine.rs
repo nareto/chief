@@ -66,6 +66,7 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
+        convergence_watch_paths: Vec<String>,
         cancel_signal: Arc<AtomicBool>,
     ) -> OrchestratorResult<TodoOutcome> {
         if cancel_signal.load(Ordering::SeqCst) {
@@ -95,6 +96,7 @@ impl ChiefEngine {
             todo,
             cancel_signal,
             prepared_suites: RefCell::new(std::collections::BTreeSet::new()),
+            convergence_watch_paths,
         };
 
         flow.run_todo(&mut execution)
@@ -110,6 +112,7 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
+        convergence_watch_paths: Vec<String>,
         cancel_signal: Arc<AtomicBool>,
     ) -> Result<TodoOutcome> {
         self.run_single_todo_once(
@@ -120,6 +123,7 @@ impl ChiefEngine {
             flow_kind,
             work_dir,
             model_override,
+            convergence_watch_paths,
             cancel_signal,
         )
         .map_err(OrchestratorError::into_error)
@@ -134,6 +138,7 @@ impl ChiefEngine {
         flow_kind: FlowKind,
         work_dir: PathBuf,
         model_override: Option<String>,
+        convergence_watch_paths: Vec<String>,
         cancel_signal: Arc<AtomicBool>,
         max_retries: usize,
         mut on_retry: F,
@@ -221,6 +226,7 @@ impl ChiefEngine {
                     flow_kind,
                     work_dir.clone(),
                     model_override.clone(),
+                    convergence_watch_paths.clone(),
                     cancel_signal.clone(),
                 );
 
@@ -242,6 +248,7 @@ impl ChiefEngine {
                             flow_kind,
                             work_dir.clone(),
                             model_override.clone(),
+                            convergence_watch_paths.clone(),
                             cancel_signal.clone(),
                         )
                     },

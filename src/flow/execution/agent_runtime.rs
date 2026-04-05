@@ -149,7 +149,15 @@ impl<'a> FlowExecution<'a> {
         let after = self.working_tree_snapshot()?;
         let head_commit_after = self.git.head_commit(&self.project_dir)?;
         let touched_files = changed_paths_between_snapshots(&before, &after);
-        let had_git_changes = !touched_files.is_empty();
+        let had_git_changes = if self.convergence_watch_paths.is_empty() {
+            !touched_files.is_empty()
+        } else {
+            touched_files.iter().any(|f| {
+                self.convergence_watch_paths.iter().any(|p| {
+                    f == p || f.starts_with(&format!("{p}/"))
+                })
+            })
+        };
         let head_commit_changed = head_commit_before != head_commit_after;
 
         self.log_event(

@@ -20,6 +20,9 @@ pub struct FlowExecution<'a> {
     pub todo: Todo,
     pub cancel_signal: Arc<AtomicBool>,
     pub(crate) prepared_suites: RefCell<BTreeSet<String>>,
+    /// When non-empty, convergence is gated on changes to these paths only.
+    /// Each entry is matched as an exact file path or directory prefix.
+    pub convergence_watch_paths: Vec<String>,
 }
 
 impl<'a> FlowExecution<'a> {

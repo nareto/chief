@@ -45,6 +45,7 @@ pub(super) fn run_worker(
                 flow_kind,
                 work_dir,
                 model_override,
+                Vec::new(),
                 cancel_signal,
                 max_retries,
                 |_attempt, _total, _err| {},
