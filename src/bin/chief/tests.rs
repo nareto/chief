@@ -178,7 +178,7 @@ fn ensure_gitignore_entries_creates_file_when_missing() {
     assert!(changed);
     assert_eq!(
         fs::read_to_string(gitignore_path).expect("gitignore should exist"),
-        ".chief/chief.db\n.chief/chief.example.yaml\n.chief/codex-home\n.beads\n"
+        ".chief/chief.db\n.chief/chief.example.yaml\n.chief/codex-home\n"
     );
 }
 
@@ -196,7 +196,7 @@ fn ensure_gitignore_entries_appends_only_missing_entries() {
     assert!(changed);
     assert_eq!(
         fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
-        "target/\n.chief/chief.db\n.chief/chief.example.yaml\n.chief/codex-home\n.beads\n"
+        "target/\n.chief/chief.db\n.chief/chief.example.yaml\n.chief/codex-home\n"
     );
 }
 
@@ -206,7 +206,7 @@ fn ensure_gitignore_entries_is_idempotent() {
     let gitignore_path = temp.path.join(".gitignore");
     fs::write(
         &gitignore_path,
-        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/codex-home\n.beads\n",
+        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/codex-home\n",
     )
     .expect("seed gitignore should be written");
 
@@ -217,7 +217,7 @@ fn ensure_gitignore_entries_is_idempotent() {
     assert!(!changed);
     assert_eq!(
         fs::read_to_string(&gitignore_path).expect("gitignore should be readable"),
-        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/codex-home\n.beads\n"
+        "/.chief/chief.db\n./.chief/chief.example.yaml\n.chief/codex-home\n"
     );
 }
 
@@ -384,8 +384,6 @@ fn init_writes_full_default_chief_yaml_block() {
         "chief: {}\n",
     )
     .expect("chief.example.yaml should be created");
-    fs::write(chief_root.join("bd_AGENTS.md"), "# bd agents\n")
-        .expect("bd_AGENTS.md should be created");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -397,6 +395,7 @@ fn init_writes_full_default_chief_yaml_block() {
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
             chief_root: chief_root.clone(),
+            beads: false,
         })),
     };
 
@@ -404,18 +403,6 @@ fn init_writes_full_default_chief_yaml_block() {
         Some(Commands::Init(args)) => args,
         _ => panic!("expected init command"),
     };
-    #[cfg(unix)]
-    let bd_script = {
-        let script = temp.path.join("mock-bd");
-        write_executable_script(
-            &script,
-            "#!/bin/sh\nset -eu\ncat >/dev/null\nmkdir -p .beads\n",
-        );
-        script
-    };
-    #[cfg(unix)]
-    init_files::run_init_with_bd_command(&cli, args, &bd_script).expect("init should succeed");
-    #[cfg(not(unix))]
     init_files::run_init(&cli, args).expect("init should succeed");
 
     let chief_yaml = fs::read_to_string(chief::paths::chief_yaml_path(&temp.path))
@@ -472,6 +459,7 @@ fn init_runs_bd_init_and_ignores_beads_directory() {
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
             chief_root: PathBuf::from("chief-root"),
+            beads: true,
         })),
     };
 
@@ -538,6 +526,7 @@ fn init_skips_bd_init_when_beads_directory_already_exists() {
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
             chief_root: PathBuf::from("chief-root"),
+            beads: true,
         })),
     };
 

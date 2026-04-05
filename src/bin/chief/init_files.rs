@@ -8,11 +8,10 @@ use std::process::{Command, Stdio};
 
 const BD_AGENTS_TEMPLATE_FILE_NAME: &str = "bd_AGENTS.md";
 
-pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 4] = [
+pub(super) const INIT_GITIGNORE_ENTRIES: [&str; 3] = [
     ".chief/chief.db",
     ".chief/chief.example.yaml",
     ".chief/codex-home",
-    ".beads",
 ];
 pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   flow: loop_file
@@ -63,13 +62,15 @@ pub(super) fn run_init_with_bd_command(
             chief_example_source.display()
         );
     }
-    let bd_agents_template_source = chief_root_for_checks.join(BD_AGENTS_TEMPLATE_FILE_NAME);
-    if !bd_agents_template_source.is_file() {
-        bail!(
-            "bd agents template not found: {}\n\
-             hint: use `chief init --chief-root <path>` to point to the chief repo directory",
-            bd_agents_template_source.display()
-        );
+    if args.beads {
+        let bd_agents_template_source = chief_root_for_checks.join(BD_AGENTS_TEMPLATE_FILE_NAME);
+        if !bd_agents_template_source.is_file() {
+            bail!(
+                "bd agents template not found: {}\n\
+                 hint: use `chief init --chief-root <path>` to point to the chief repo directory",
+                bd_agents_template_source.display()
+            );
+        }
     }
 
     let chief_dir = paths::chief_dir(project_dir);
@@ -78,7 +79,6 @@ pub(super) fn run_init_with_bd_command(
 
     let chief_example_link = paths::chief_example_path(project_dir);
     let chief_yaml_path = paths::chief_yaml_path(project_dir);
-    let bd_agents_template_arg = args.chief_root.join(BD_AGENTS_TEMPLATE_FILE_NAME);
 
     let mut created = 0usize;
     let mut skipped = 0usize;
@@ -94,8 +94,13 @@ pub(super) fn run_init_with_bd_command(
         skipped += 1;
     }
 
-    run_bd_init_if_needed(project_dir, &bd_agents_template_arg, bd_command)?;
-    ensure_gitignore_entries(&project_dir.join(".gitignore"), &INIT_GITIGNORE_ENTRIES)?;
+    let mut gitignore_entries: Vec<&str> = INIT_GITIGNORE_ENTRIES.to_vec();
+    if args.beads {
+        let bd_agents_template_arg = args.chief_root.join(BD_AGENTS_TEMPLATE_FILE_NAME);
+        run_bd_init_if_needed(project_dir, &bd_agents_template_arg, bd_command)?;
+        gitignore_entries.push(".beads");
+    }
+    ensure_gitignore_entries(&project_dir.join(".gitignore"), &gitignore_entries)?;
 
     println!(
         "initialized chief files in {} (created {created}, skipped {skipped})",
