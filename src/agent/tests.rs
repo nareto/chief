@@ -132,12 +132,10 @@ fn claude_prepare_launch_uses_strict_mcp_config_when_managed() {
     let launch = agent
         .prepare_launch(&request)
         .expect("launch should prepare");
-    assert!(
-        launch
-            .command
-            .iter()
-            .any(|arg| arg == "--strict-mcp-config")
-    );
+    assert!(launch
+        .command
+        .iter()
+        .any(|arg| arg == "--strict-mcp-config"));
     assert!(launch.command.iter().any(|arg| arg == "--mcp-config"));
     assert!(
         launch.scratch_dir.is_some(),
@@ -191,4 +189,115 @@ fn wait_with_timeout_honors_cancel_without_timeout() {
         !output.status.success(),
         "cancelled process should not report success"
     );
+}
+
+#[test]
+fn opencode_command_uses_json_format() {
+    let agent = OpencodeAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: None,
+    };
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command.iter().any(|arg| arg == "--format"),
+        "opencode command should include --format flag: {command:?}"
+    );
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--format", "json"]),
+        "opencode command should specify json format: {command:?}"
+    );
+}
+
+#[test]
+fn opencode_command_includes_model_from_config() {
+    let config = ChiefConfig {
+        model: Some("anthropic/claude-sonnet-4-20250514".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = OpencodeAgent::from_config(&config, None);
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["-m", "anthropic/claude-sonnet-4-20250514"]),
+        "opencode command should include configured model: {command:?}"
+    );
+}
+
+#[test]
+fn opencode_command_prefers_runtime_model_override() {
+    let config = ChiefConfig {
+        model: Some("anthropic/claude-sonnet-4-20250514".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = OpencodeAgent::from_config(&config, Some("openai/gpt-4o".to_owned()));
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["-m", "openai/gpt-4o"]),
+        "opencode command should include runtime model override: {command:?}"
+    );
+    assert!(
+        !command
+            .windows(2)
+            .any(|window| window == ["-m", "anthropic/claude-sonnet-4-20250514"]),
+        "opencode command should not include config model when runtime override is present: {command:?}"
+    );
+}
+
+#[test]
+fn opencode_command_includes_stdin_dash() {
+    let agent = OpencodeAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: None,
+    };
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command.iter().any(|arg| arg == "-"),
+        "opencode command should include stdin dash: {command:?}"
+    );
+    assert!(
+        command.first() == Some(&"opencode".to_owned()),
+        "opencode command should start with 'opencode': {command:?}"
+    );
+    assert!(
+        command.get(1) == Some(&"run".to_owned()),
+        "opencode command should have 'run' as second arg: {command:?}"
+    );
+}
+
+#[test]
+fn parse_opencode_json_output_extracts_text_parts() {
+    let output = r#"{"type":"step_start","timestamp":123}
+{"type":"text","part":{"text":"Hello "}}
+{"type":"text","part":{"text":"world!"}}
+{"type":"step_finish"}"#;
+
+    let result = parse_opencode_json_output(output);
+    assert_eq!(result, "Hello world!");
+}
+
+#[test]
+fn parse_opencode_json_output_handles_empty_input() {
+    let result = parse_opencode_json_output("");
+    assert_eq!(result, "");
+}
+
+#[test]
+fn parse_opencode_json_output_handles_invalid_json() {
+    let output = r#"not valid json at all
+also not json
+{"type":"text","part":{"text":"but this is"}}"#;
+
+    let result = parse_opencode_json_output(output);
+    assert_eq!(result, "but this is");
 }

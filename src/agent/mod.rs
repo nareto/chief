@@ -82,6 +82,23 @@ impl ClaudeAgent {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct OpencodeAgent {
+    model: Option<String>,
+    extra_args: Vec<String>,
+    mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+}
+
+impl OpencodeAgent {
+    pub fn from_config(config: &ChiefConfig, model_override: Option<String>) -> Self {
+        Self {
+            model: model_override.or_else(|| config.model.clone()),
+            extra_args: config.agent_extra_args.clone(),
+            mcp_servers: config.mcp_servers.clone(),
+        }
+    }
+}
+
 struct PreparedAgentLaunch {
     command: Vec<String>,
     env: BTreeMap<String, String>,
@@ -195,6 +212,33 @@ impl CommandBackedAgent for ClaudeAgent {
     }
 }
 
+impl CommandBackedAgent for OpencodeAgent {
+    fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
+        let mut cmd = vec![
+            "opencode".to_owned(),
+            "run".to_owned(),
+            "-".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ];
+        cmd.extend(self.extra_args.iter().cloned());
+        if let Some(model) = &self.model {
+            cmd.push("-m".to_owned());
+            cmd.push(model.clone());
+        }
+        cmd
+    }
+
+    fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
+        let parsed = parse_opencode_json_output(raw_stdout);
+        if parsed.trim().is_empty() {
+            raw_stderr.trim().to_owned()
+        } else {
+            parsed
+        }
+    }
+}
+
 fn run_command_backed_agent(
     agent: &impl CommandBackedAgent,
     request: AgentRequest,
@@ -282,6 +326,16 @@ impl CodingAgent for ClaudeAgent {
     }
 }
 
+impl CodingAgent for OpencodeAgent {
+    fn name(&self) -> &str {
+        "opencode"
+    }
+
+    fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
+        run_command_backed_agent(self, request)
+    }
+}
+
 fn normalize_codex_reasoning_effort(raw: &str) -> &str {
     match raw.trim().to_ascii_lowercase().as_str() {
         "xhigh" => "high",
@@ -358,6 +412,24 @@ fn parse_codex_json_output(output: &str) -> String {
             if let Some(text) = value.get(key).and_then(Value::as_str) {
                 parts.push(text.to_owned());
                 break;
+            }
+        }
+    }
+
+    parts.join("")
+}
+
+fn parse_opencode_json_output(output: &str) -> String {
+    let mut parts = Vec::new();
+
+    for line in output.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+
+        if value.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(text) = value.get("part").and_then(|p| p.get("text")).and_then(Value::as_str) {
+                parts.push(text.to_owned());
             }
         }
     }

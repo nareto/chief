@@ -1,4 +1,4 @@
-use crate::agent::{ClaudeAgent, CodexAgent, CodingAgent};
+use crate::agent::{ClaudeAgent, CodexAgent, CodingAgent, OpencodeAgent};
 use crate::config::ChiefYaml;
 use crate::domain::{EventRecord, EventType, JobRecord, JobStatus, Phase, Todo};
 use crate::flow::FlowKind;
@@ -6,7 +6,7 @@ use crate::git::ShellGitOps;
 use crate::paths;
 use crate::prompt::FsPromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -71,16 +71,20 @@ impl ProjectContext {
     }
 
     pub fn build_agent(&self, model_override: Option<String>) -> Arc<dyn CodingAgent> {
-        if self.chief_yaml.chief.agent.eq_ignore_ascii_case("claude") {
-            Arc::new(ClaudeAgent::from_config(
+        let agent_name = self.chief_yaml.chief.agent.to_lowercase();
+        match agent_name.as_str() {
+            "claude" => Arc::new(ClaudeAgent::from_config(
                 &self.chief_yaml.chief,
                 model_override,
-            ))
-        } else {
-            Arc::new(CodexAgent::from_config(
+            )),
+            "opencode" => Arc::new(OpencodeAgent::from_config(
                 &self.chief_yaml.chief,
                 model_override,
-            ))
+            )),
+            _ => Arc::new(CodexAgent::from_config(
+                &self.chief_yaml.chief,
+                model_override,
+            )),
         }
     }
 
