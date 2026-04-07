@@ -1,5 +1,6 @@
 use super::*;
 use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
 
 fn mirror_agent_chunk_to_stdout(text: &str) {
     if text.is_empty() {
@@ -160,15 +161,7 @@ impl<'a> FlowExecution<'a> {
         let after = self.working_tree_snapshot()?;
         let head_commit_after = self.git.head_commit(&self.project_dir)?;
         let touched_files = changed_paths_between_snapshots(&before, &after);
-        let had_git_changes = if self.convergence_watch_paths.is_empty() {
-            !touched_files.is_empty()
-        } else {
-            touched_files.iter().any(|f| {
-                self.convergence_watch_paths
-                    .iter()
-                    .any(|p| f == p || f.starts_with(&format!("{p}/")))
-            })
-        };
+        let had_git_changes = !touched_files.is_empty();
         let head_commit_changed = head_commit_before != head_commit_after;
 
         self.log_event(
@@ -196,14 +189,20 @@ impl<'a> FlowExecution<'a> {
     }
 
     fn working_tree_snapshot(&self) -> Result<BTreeMap<String, String>> {
+        if !self.convergence_watch_paths.is_empty() {
+            return self.watch_path_snapshot();
+        }
+
+        self.git_changed_files_snapshot()
+    }
+
+    fn git_changed_files_snapshot(&self) -> Result<BTreeMap<String, String>> {
         let files = self.git.changed_files(&self.project_dir)?;
         let mut snapshot = BTreeMap::new();
         for file in files {
             let path = self.project_dir.join(&file);
             let signature = if path.is_file() {
-                let content = fs::read(&path)
-                    .with_context(|| format!("failed reading changed file {}", path.display()))?;
-                format!("file:{:x}", md5::compute(content))
+                file_signature(&path)?
             } else if path.is_dir() {
                 "dir".to_owned()
             } else {
@@ -214,10 +213,131 @@ impl<'a> FlowExecution<'a> {
         Ok(snapshot)
     }
 
+    fn watch_path_snapshot(&self) -> Result<BTreeMap<String, String>> {
+        let mut snapshot = BTreeMap::new();
+        let mut seen_watch_paths = BTreeSet::new();
+
+        for raw_watch_path in &self.convergence_watch_paths {
+            let Some((watch_key, watch_path)) =
+                normalize_watch_path(raw_watch_path, &self.project_dir)
+            else {
+                continue;
+            };
+
+            if !seen_watch_paths.insert(watch_key.clone()) {
+                continue;
+            }
+
+            capture_path_signature(&watch_key, &watch_path, &mut snapshot)?;
+        }
+
+        Ok(snapshot)
+    }
+
     pub(super) fn ensure_not_cancelled(&self) -> Result<()> {
         if self.cancel_signal.load(Ordering::SeqCst) {
             return Err(anyhow!(AgentCancelledError));
         }
         Ok(())
     }
+}
+
+fn file_signature(path: &Path) -> Result<String> {
+    let content = fs::read(path)
+        .with_context(|| format!("failed reading changed file {}", path.display()))?;
+    Ok(format!("file:{:x}", md5::compute(content)))
+}
+
+fn capture_path_signature(
+    key: &str,
+    path: &Path,
+    snapshot: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            snapshot.insert(key.to_owned(), "missing".to_owned());
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed reading watched path metadata {}", path.display())
+            });
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path)
+            .map(|value| value.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        snapshot.insert(key.to_owned(), format!("symlink:{target}"));
+        return Ok(());
+    }
+
+    if metadata.is_file() {
+        snapshot.insert(key.to_owned(), file_signature(path)?);
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        snapshot.insert(key.to_owned(), "dir".to_owned());
+        capture_directory_signatures(key, path, snapshot)?;
+        return Ok(());
+    }
+
+    snapshot.insert(key.to_owned(), "other".to_owned());
+    Ok(())
+}
+
+fn capture_directory_signatures(
+    prefix: &str,
+    directory: &Path,
+    snapshot: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed reading watched directory {}", directory.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed reading entry in watched directory {}",
+                directory.display()
+            )
+        })?;
+        let child_name = entry.file_name().to_string_lossy().to_string();
+        let child_key = format!("{prefix}/{child_name}");
+        let child_path = entry.path();
+        capture_path_signature(&child_key, &child_path, snapshot)?;
+    }
+
+    Ok(())
+}
+
+fn normalize_watch_path(raw_path: &str, project_dir: &Path) -> Option<(String, PathBuf)> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let raw = Path::new(trimmed);
+    let relative = if raw.is_absolute() {
+        raw.strip_prefix(project_dir).ok()?.to_path_buf()
+    } else {
+        raw.to_path_buf()
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return None;
+    }
+
+    let key = normalized.to_string_lossy().replace('\\', "/");
+    Some((key, project_dir.join(normalized)))
 }
