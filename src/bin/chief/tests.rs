@@ -120,6 +120,8 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: None,
@@ -153,16 +155,21 @@ fn run_requires_file_when_loop_file_flow_is_selected() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: None,
     };
 
-    let err = run(&cli).expect_err("run should require --file when loop_file flow is selected");
+    let err = run(&cli)
+        .expect_err("run should require --file or --prompt when loop_file flow is selected");
     let rendered = err.to_string();
     assert!(
-        rendered.contains("requires --file"),
-        "error should direct users to provide --file: {rendered}"
+        rendered.contains("requires either --file")
+            || rendered.contains("requires --file")
+            || rendered.contains("requires --prompt"),
+        "error should direct users to provide --file or --prompt: {rendered}"
     );
 }
 
@@ -325,7 +332,7 @@ fn parse_loop_file_command() {
     let Some(Commands::LoopFile(args)) = cli.command else {
         panic!("expected loop_file command");
     };
-    assert_eq!(args.file, PathBuf::from("plan.md"));
+    assert_eq!(args.file, Some(PathBuf::from("plan.md")));
 }
 
 #[test]
@@ -358,10 +365,14 @@ fn loop_file_fails_when_input_file_is_missing() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::LoopFile(LoopFileArgs {
-            file: PathBuf::from("missing-plan.md"),
+            file: Some(PathBuf::from("missing-plan.md")),
+            prompt: None,
+            watch_only: Vec::new(),
         })),
     };
 
@@ -391,6 +402,8 @@ fn init_writes_full_default_chief_yaml_block() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
@@ -455,6 +468,8 @@ fn init_runs_bd_init_and_ignores_beads_directory() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
@@ -522,6 +537,8 @@ fn init_skips_bd_init_when_beads_directory_already_exists() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
@@ -734,6 +751,8 @@ fn run_rejects_file_option_for_non_loop_file_flows() {
         model: None,
         max_retries: None,
         file: Some(PathBuf::from("plan.md")),
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: None,
@@ -743,7 +762,7 @@ fn run_rejects_file_option_for_non_loop_file_flows() {
     let rendered = err.to_string();
     assert!(
         rendered.contains("only supported"),
-        "error should explain that --file is flow-specific: {rendered}"
+        "error should explain that --file and --prompt are flow-specific: {rendered}"
     );
 }
 
@@ -785,6 +804,8 @@ fn migrate_moves_legacy_root_files_into_dot_chief() {
         model: None,
         max_retries: None,
         file: None,
+        prompt: None,
+        watch_only: Vec::new(),
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::Migrate),

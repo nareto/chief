@@ -47,6 +47,10 @@ struct Cli {
     /// Markdown file used when running flow=loop_file via the default `chief` command.
     #[arg(long)]
     file: Option<PathBuf>,
+    /// Prompt text used when running flow=loop_file via the default `chief` command.
+    /// Mutually exclusive with --file.
+    #[arg(long)]
+    prompt: Option<String>,
     /// Scope convergence to these paths only (repeatable). Ignored for non-loop_file flows.
     #[arg(long = "watch-only")]
     watch_only: Vec<String>,
@@ -155,7 +159,11 @@ struct SuiteRunNoTargetArgs {
 struct LoopFileArgs {
     /// Markdown file path to load as the loop_file task body.
     #[arg(long)]
-    file: PathBuf,
+    file: Option<PathBuf>,
+    /// Prompt text for the loop_file task body.
+    /// Mutually exclusive with --file.
+    #[arg(long)]
+    prompt: Option<String>,
     /// Scope convergence to these paths only (repeatable). When set, an iteration
     /// is considered stable only if none of the specified paths were modified.
     #[arg(long = "watch-only")]
@@ -249,15 +257,18 @@ fn run(cli: &Cli) -> Result<()> {
     }
 
     if matches!(flow_kind, FlowKind::LoopFile) {
-        let file = cli.file.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "flow 'loop_file' requires --file <path> (or use `chief loop_file --file <path>`)"
-            )
-        })?;
-        return run_loop_file(cli, &LoopFileArgs { file, watch_only: cli.watch_only.clone() });
+        let file = cli.file.clone();
+        let prompt = cli.prompt.clone();
+        if file.is_none() && prompt.is_none() {
+            bail!("flow 'loop_file' requires either --file <path> or --prompt <text> (or use `chief loop_file --file <path>` or `chief loop_file --prompt <text>`)");
+        }
+        if file.is_some() && prompt.is_some() {
+            bail!("--file and --prompt are mutually exclusive for loop_file flow");
+        }
+        return run_loop_file(cli, &LoopFileArgs { file, prompt, watch_only: cli.watch_only.clone() });
     }
-    if cli.file.is_some() {
-        bail!("--file is only supported when flow resolves to 'loop_file'");
+    if cli.file.is_some() || cli.prompt.is_some() {
+        bail!("--file and --prompt are only supported when flow resolves to 'loop_file'");
     }
     if matches!(flow_kind, FlowKind::Bd) {
         return run_bd(cli);
@@ -338,8 +349,8 @@ fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKi
 
 fn run_refactor(cli: &Cli) -> Result<()> {
     let context = ProjectContext::load(&cli.project_dir)?;
-    if cli.file.is_some() {
-        bail!("--file is only supported when flow resolves to 'loop_file'");
+    if cli.file.is_some() || cli.prompt.is_some() {
+        bail!("--file and --prompt are only supported when flow resolves to 'loop_file'");
     }
     run_todo_queue_flow(cli, context, FlowKind::Refactor)
 }
@@ -594,28 +605,34 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
 fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     let report_started_at = Utc::now();
     let mut context = ProjectContext::load(&cli.project_dir)?;
-    let file_path = if args.file.is_absolute() {
-        args.file.clone()
+
+    let (source_desc, expectations): (String, String) = if let Some(ref file) = args.file {
+        let file_path = if file.is_absolute() {
+            file.clone()
+        } else {
+            context.project_dir.join(file)
+        };
+        let contents = fs::read_to_string(&file_path)
+            .with_context(|| format!("failed to read loop_file input {}", file_path.display()))?;
+        (file_path.display().to_string(), contents)
+    } else if let Some(ref prompt) = args.prompt {
+        ("cli-prompt".to_string(), prompt.clone())
     } else {
-        context.project_dir.join(&args.file)
+        bail!("loop_file requires either --file or --prompt");
     };
-    let file_contents = fs::read_to_string(&file_path)
-        .with_context(|| format!("failed to read loop_file input {}", file_path.display()))?;
 
     context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();
-    println!("loop_file: started {}", file_path.display());
+    println!("loop_file: started {}", source_desc);
     let head_before = context.git.head_commit(&context.project_dir).ok();
 
     let synthetic_todo = Todo {
         id: Todo::compute_id(
-            &format!("loop_file:{}", file_path.display()),
-            file_contents.as_str(),
+            &format!("loop_file:{}", source_desc),
+            expectations.as_str(),
         ),
-        todo: format!("loop_file: {}", file_path.display()),
-        expectations: file_contents,
+        todo: format!("loop_file: {}", source_desc),
+        expectations,
         priority: 1,
-        // Keep loop_file detached from todo queue semantics. Suite checks are
-        // resolved from the active .chief/chief.yaml during each iteration.
         test_suites: Vec::new(),
         status: TodoStatus::Pending,
         done_at_commit: None,
