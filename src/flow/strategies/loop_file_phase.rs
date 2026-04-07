@@ -95,44 +95,12 @@ impl LoopFilePhaseStrategy {
         execution: &mut FlowExecution<'_>,
         run: AgentRunWithGitChanges,
         phase_failure_msg: &str,
-        salvage_iteration: usize,
+        _salvage_iteration: usize,
     ) -> Result<LoopDecision> {
         let suites_for_checks = Self::reload_configured_suites(execution)?;
         for suite in &suites_for_checks {
             self.involved_suite_names.insert(suite.name.clone());
         }
-
-        let pending_files = execution
-            .git
-            .changed_files(&execution.project_dir)
-            .context("failed to inspect git working tree after loop_file iteration")?;
-        let salvaged_uncommitted_changes = if pending_files.is_empty() {
-            false
-        } else {
-            let commit_message = format!(
-                "chief(loop_file salvage): {} (iteration {})",
-                execution.work_item_title(),
-                salvage_iteration
-            );
-            let commit_hash = execution
-                .git
-                .commit_and_tag(&execution.project_dir, &commit_message)
-                .context("failed to salvage uncommitted loop_file iteration changes")?;
-
-            execution.log_event(
-                "warning",
-                Some(Phase::LoopFile),
-                EventType::GitOp,
-                "loop_file: harness committed uncommitted iteration changes",
-                payload_from_json(json!({
-                    "iteration": salvage_iteration,
-                    "pending_files": pending_files,
-                    "commit_hash": commit_hash,
-                    "commit_message": commit_message,
-                })),
-            )?;
-            true
-        };
 
         if suites_for_checks.is_empty() {
             execution.log_event(
@@ -166,14 +134,9 @@ impl LoopFilePhaseStrategy {
             return Ok(LoopDecision::Retry);
         }
 
-        if run.had_git_changes || run.head_commit_changed || salvaged_uncommitted_changes {
+        if run.had_git_changes || run.head_commit_changed {
             let has_associated_test_suites = !suites_for_checks.is_empty();
-            let mut touched_files = run.touched_files.clone();
-            for file in &pending_files {
-                if !touched_files.contains(file) {
-                    touched_files.push(file.clone());
-                }
-            }
+            let touched_files = run.touched_files.clone();
             execution.log_event(
                 "warning",
                 Some(Phase::LoopFile),
@@ -184,7 +147,7 @@ impl LoopFilePhaseStrategy {
                     "head_commit_before": run.head_commit_before,
                     "head_commit_after": run.head_commit_after,
                     "head_commit_changed": run.head_commit_changed,
-                    "harness_salvaged_uncommitted_changes": salvaged_uncommitted_changes,
+                    "harness_salvaged_uncommitted_changes": false,
                     (SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY): SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES,
                     (SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY): has_associated_test_suites,
                 })),

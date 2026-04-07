@@ -1,8 +1,8 @@
 use super::{
-    FlowExecution, FlowKind, SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+    build_flow, FlowExecution, FlowKind, TestSuiteConfig,
+    SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
     SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
     SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES, SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY,
-    TestSuiteConfig, build_flow,
 };
 use crate::agent::{AgentRequest, CodingAgent};
 use crate::config::ChiefConfig;
@@ -10,7 +10,7 @@ use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2653,7 +2653,7 @@ fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
 }
 
 #[test]
-fn loop_file_salvages_uncommitted_changes_with_harness_commit() {
+fn loop_file_leaves_uncommitted_changes_until_final_harness_commit() {
     let project_dir = temp_project_dir();
     fs::create_dir_all(&project_dir).expect("project dir should be created");
     let store = ProjectStore::new(&project_dir);
@@ -2696,28 +2696,19 @@ fn loop_file_salvages_uncommitted_changes_with_harness_commit() {
     let flow = build_flow(FlowKind::LoopFile, 4, 1);
     let outcome = flow
         .run_todo(&mut execution)
-        .expect("loop_file flow should salvage and complete");
+        .expect("loop_file flow should complete");
 
     assert_eq!(outcome.commit_hash.as_deref(), Some("mock-commit-1"));
 
     let commit_messages = git.commit_messages();
     assert_eq!(
         commit_messages.len(),
-        2,
-        "flow should create one salvage commit attempt and one final harness commit attempt"
+        1,
+        "flow should leave uncommitted changes until the final harness commit attempt"
     );
     assert_eq!(
         commit_messages[0],
-        format!("chief(loop_file salvage): {todo_title} (iteration 1)")
-    );
-    assert_eq!(
-        commit_messages[1],
         format!("chief(loop_file): {todo_title}")
-    );
-
-    assert!(
-        !dirty_flag.load(Ordering::SeqCst),
-        "harness salvage commit should leave no pending changes"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
