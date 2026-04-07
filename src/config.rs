@@ -44,7 +44,7 @@ impl ChiefYaml {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChiefConfig {
     #[serde(default = "default_flow")]
     pub flow: String,
@@ -78,6 +78,25 @@ pub struct ChiefConfig {
     pub use_agent_log_truncation_for_stdout_logs: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChiefConfigOverrides {
+    pub flow: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+    pub agent_extra_args: Option<Vec<String>>,
+    pub mcp_servers: Option<Option<BTreeMap<String, McpServerConfig>>>,
+    pub max_retries: Option<usize>,
+    pub max_loop_iterations: Option<usize>,
+    pub required_stable_iterations: Option<usize>,
+    pub agent_timeout_seconds: Option<u64>,
+    pub suite_command_timeout_seconds: Option<u64>,
+    pub agent_log_max_output_lines: Option<usize>,
+    pub agent_log_max_output_chars: Option<usize>,
+    pub respect_limits: Option<bool>,
+    pub use_agent_log_truncation_for_stdout_logs: Option<bool>,
+}
+
 impl Default for ChiefConfig {
     fn default() -> Self {
         Self {
@@ -96,6 +115,111 @@ impl Default for ChiefConfig {
             agent_log_max_output_chars: default_agent_log_max_output_chars(),
             respect_limits: default_respect_limits(),
             use_agent_log_truncation_for_stdout_logs: false,
+        }
+    }
+}
+
+impl ChiefConfig {
+    pub fn into_overrides(self) -> ChiefConfigOverrides {
+        let Self {
+            flow,
+            agent,
+            model,
+            model_reasoning_effort,
+            agent_extra_args,
+            mcp_servers,
+            max_retries,
+            max_loop_iterations,
+            required_stable_iterations,
+            agent_timeout_seconds,
+            suite_command_timeout_seconds,
+            agent_log_max_output_lines,
+            agent_log_max_output_chars,
+            respect_limits,
+            use_agent_log_truncation_for_stdout_logs,
+        } = self;
+
+        ChiefConfigOverrides {
+            flow: Some(flow),
+            agent: Some(agent),
+            model,
+            model_reasoning_effort,
+            agent_extra_args: Some(agent_extra_args),
+            mcp_servers: Some(mcp_servers),
+            max_retries: Some(max_retries),
+            max_loop_iterations: Some(max_loop_iterations),
+            required_stable_iterations: Some(required_stable_iterations),
+            agent_timeout_seconds: Some(agent_timeout_seconds),
+            suite_command_timeout_seconds: Some(suite_command_timeout_seconds),
+            agent_log_max_output_lines: Some(agent_log_max_output_lines),
+            agent_log_max_output_chars: Some(agent_log_max_output_chars),
+            respect_limits: Some(respect_limits),
+            use_agent_log_truncation_for_stdout_logs: Some(
+                use_agent_log_truncation_for_stdout_logs,
+            ),
+        }
+    }
+
+    pub fn apply_overrides(self, overrides: ChiefConfigOverrides) -> Self {
+        let Self {
+            flow,
+            agent,
+            model,
+            model_reasoning_effort,
+            agent_extra_args,
+            mcp_servers,
+            max_retries,
+            max_loop_iterations,
+            required_stable_iterations,
+            agent_timeout_seconds,
+            suite_command_timeout_seconds,
+            agent_log_max_output_lines,
+            agent_log_max_output_chars,
+            respect_limits,
+            use_agent_log_truncation_for_stdout_logs,
+        } = self;
+
+        let ChiefConfigOverrides {
+            flow: flow_override,
+            agent: agent_override,
+            model: model_override,
+            model_reasoning_effort: model_reasoning_effort_override,
+            agent_extra_args: agent_extra_args_override,
+            mcp_servers: mcp_servers_override,
+            max_retries: max_retries_override,
+            max_loop_iterations: max_loop_iterations_override,
+            required_stable_iterations: required_stable_iterations_override,
+            agent_timeout_seconds: agent_timeout_seconds_override,
+            suite_command_timeout_seconds: suite_command_timeout_seconds_override,
+            agent_log_max_output_lines: agent_log_max_output_lines_override,
+            agent_log_max_output_chars: agent_log_max_output_chars_override,
+            respect_limits: respect_limits_override,
+            use_agent_log_truncation_for_stdout_logs:
+                use_agent_log_truncation_for_stdout_logs_override,
+        } = overrides;
+
+        Self {
+            flow: flow_override.unwrap_or(flow),
+            agent: agent_override.unwrap_or(agent),
+            model: model_override.or(model),
+            model_reasoning_effort: model_reasoning_effort_override.or(model_reasoning_effort),
+            agent_extra_args: agent_extra_args_override.unwrap_or(agent_extra_args),
+            mcp_servers: mcp_servers_override.unwrap_or(mcp_servers),
+            max_retries: max_retries_override.unwrap_or(max_retries),
+            max_loop_iterations: max_loop_iterations_override.unwrap_or(max_loop_iterations),
+            required_stable_iterations: required_stable_iterations_override
+                .unwrap_or(required_stable_iterations),
+            agent_timeout_seconds: agent_timeout_seconds_override.unwrap_or(agent_timeout_seconds),
+            suite_command_timeout_seconds: suite_command_timeout_seconds_override
+                .unwrap_or(suite_command_timeout_seconds),
+            agent_log_max_output_lines: agent_log_max_output_lines_override
+                .unwrap_or(agent_log_max_output_lines),
+            agent_log_max_output_chars: agent_log_max_output_chars_override
+                .unwrap_or(agent_log_max_output_chars),
+            respect_limits: respect_limits_override.unwrap_or(respect_limits),
+            use_agent_log_truncation_for_stdout_logs:
+                use_agent_log_truncation_for_stdout_logs_override
+                    .unwrap_or(use_agent_log_truncation_for_stdout_logs),
         }
     }
 }
@@ -410,5 +534,52 @@ mod tests {
             parsed.suites[0].cleanup_command.as_deref(),
             Some("pkill -f vitest || true")
         );
+    }
+
+    #[test]
+    fn chief_config_into_overrides_round_trips_every_field() {
+        let config = ChiefConfig {
+            flow: "refactor".to_owned(),
+            agent: "claude".to_owned(),
+            model: Some("sonnet".to_owned()),
+            model_reasoning_effort: Some("high".to_owned()),
+            agent_extra_args: vec!["--dangerously-skip-permissions".to_owned()],
+            mcp_servers: Some(BTreeMap::from([(
+                "docs".to_owned(),
+                McpServerConfig::Stdio {
+                    command: "npx".to_owned(),
+                    args: vec!["-y".to_owned(), "@acme/docs-mcp".to_owned()],
+                    env: BTreeMap::new(),
+                },
+            )])),
+            max_retries: 5,
+            max_loop_iterations: 7,
+            required_stable_iterations: 3,
+            agent_timeout_seconds: 111,
+            suite_command_timeout_seconds: 222,
+            agent_log_max_output_lines: 33,
+            agent_log_max_output_chars: 444,
+            respect_limits: false,
+            use_agent_log_truncation_for_stdout_logs: true,
+        };
+
+        let overrides = config.clone().into_overrides();
+        let applied = ChiefConfig::default().apply_overrides(overrides);
+        assert_eq!(applied, config);
+    }
+
+    #[test]
+    fn chief_config_apply_overrides_supports_mcp_personal_mode() {
+        let config = ChiefConfig {
+            mcp_servers: Some(BTreeMap::new()),
+            ..ChiefConfig::default()
+        };
+        let overrides = ChiefConfigOverrides {
+            mcp_servers: Some(None),
+            ..ChiefConfigOverrides::default()
+        };
+
+        let applied = config.apply_overrides(overrides);
+        assert_eq!(applied.mcp_servers, None);
     }
 }

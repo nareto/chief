@@ -1,4 +1,4 @@
-use super::{Cli, SuiteArgs, SuiteCommand};
+use super::{Cli, SuiteArgs, SuiteCommand, apply_cli_overrides_to_context};
 use anyhow::{Result, bail};
 use chief::config::TestSuiteConfig;
 use chief::flow::{
@@ -77,6 +77,7 @@ fn run_suite_command_kind(
 ) -> Result<()> {
     let mut context = ProjectContext::load(&cli.project_dir)?;
     context.refresh()?;
+    apply_cli_overrides_to_context(&mut context, cli)?;
 
     let suite_name = suite_name.trim();
     if suite_name.is_empty() {

@@ -1,11 +1,16 @@
 chief:
-  flow: loop_file # default file-driven workflow; requires `chief --file <path>` (or `chief loop_file --file <path>`)
-  # flow: refactor # uncomment to run queued SQLite work-item workflow
+  # Flow to run (`loop_file`, `bd`, or `refactor`).
+  flow: loop_file # loop_file requires `chief --file <path>` (or `chief loop_file --file <path>`)
+  # Agent binary to use (`codex`, `claude`, or `opencode`).
   agent: codex
+  # Model override passed to the selected agent.
   # model: gpt-5
+  # Reasoning effort for model adapters that support it.
   # model_reasoning_effort: high
+  # Extra CLI args forwarded to the selected agent (YAML/JSON string list).
   agent_extra_args: []
-  # Default from `chief init`: Chief owns the MCP set and starts with none.
+  # MCP server config (`personal` or YAML/JSON object; `{}` means no servers).
+  # Default from `chief init`: chief owns the MCP set and starts with none.
   # Delete this key entirely to let Claude/Codex use your personal MCP config.
   mcp_servers: {}
   # Define servers below to let chief translate the same config for either
@@ -22,13 +27,23 @@ chief:
   #     auth:
   #       type: jwt
   #       token_env_var: SENTRY_TOKEN
+  # Retry budget for queued todo flows (minimum effective value is 1).
   max_retries: 2
-  max_loop_iterations: 20 # shared inner-loop cap used by all flows
-  required_stable_iterations: 2 # convergence loops require this many consecutive stable iterations
-  agent_timeout_seconds: 2700 # set to 0 for no timeout
+  # Maximum convergence iterations for loop-style flows.
+  max_loop_iterations: 20
+  # Consecutive stable iterations required before convergence is done.
+  required_stable_iterations: 2
+  # Per-agent invocation timeout in seconds (0 disables timeout).
+  agent_timeout_seconds: 2700
+  # Default timeout in seconds for suite/readiness commands.
   suite_command_timeout_seconds: 1800
+  # Tail line count kept when truncating agent output in logs.
   agent_log_max_output_lines: 10
+  # Tail character count kept when truncating agent output in logs.
   agent_log_max_output_chars: 1500
+  # When true, wait for agentusage limits before launching agent calls.
+  respect_limits: true
+  # When true, apply agent log truncation to stdout log output too.
   use_agent_log_truncation_for_stdout_logs: false
 
 suites:

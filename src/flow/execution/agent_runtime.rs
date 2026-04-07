@@ -153,9 +153,9 @@ impl<'a> FlowExecution<'a> {
             !touched_files.is_empty()
         } else {
             touched_files.iter().any(|f| {
-                self.convergence_watch_paths.iter().any(|p| {
-                    f == p || f.starts_with(&format!("{p}/"))
-                })
+                self.convergence_watch_paths
+                    .iter()
+                    .any(|p| f == p || f.starts_with(&format!("{p}/")))
             })
         };
         let head_commit_changed = head_commit_before != head_commit_after;

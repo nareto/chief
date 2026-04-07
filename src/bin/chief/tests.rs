@@ -1,9 +1,10 @@
 use super::*;
-use chief::config::TestSuiteConfig;
+use chief::config::{ChiefConfig, TestSuiteConfig};
 use chief::domain::{EventType, Phase, RunExitStatus, TargetType};
 use chief::service::ProjectContext;
+use clap::CommandFactory;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
 use uuid::Uuid;
@@ -116,9 +117,7 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
     let temp = TempDir::new("run-missing-chief-yaml");
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),
@@ -151,9 +150,7 @@ fn run_requires_file_when_loop_file_flow_is_selected() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),
@@ -354,6 +351,88 @@ fn parse_refactor_command() {
 }
 
 #[test]
+fn cli_exposes_every_chief_config_key_as_a_flag() {
+    let config_keys: BTreeSet<String> =
+        match serde_json::to_value(ChiefConfig::default()).expect("ChiefConfig should serialize") {
+            Value::Object(map) => map.keys().cloned().collect(),
+            other => panic!("ChiefConfig should serialize to object, got {other:?}"),
+        };
+
+    let cli_keys: BTreeSet<String> = Cli::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_long())
+        .map(|name| name.replace('-', "_"))
+        .collect();
+
+    let missing: Vec<String> = config_keys.difference(&cli_keys).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "CLI is missing flags for ChiefConfig keys: {missing:?}"
+    );
+}
+
+#[test]
+fn cli_help_text_matches_chief_example_comments() {
+    let mut command = Cli::command();
+    let mut help_buffer = Vec::new();
+    command
+        .write_long_help(&mut help_buffer)
+        .expect("long help should render");
+    let help = String::from_utf8(help_buffer).expect("help should be UTF-8");
+    let example_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".chief/chief.example.yaml");
+    let example = fs::read_to_string(&example_path).expect("chief.example.yaml should be readable");
+
+    for spec in chief_option_help::SPECS {
+        assert!(
+            help.contains(spec.help),
+            "CLI help should include '{}' for key '{}'; help output:\n{}",
+            spec.help,
+            spec.key,
+            help
+        );
+
+        let expected_comment = format!("# {}", spec.help);
+        assert!(
+            example.contains(&expected_comment),
+            "chief.example.yaml should include comment '{}' for key '{}'; file: {}",
+            expected_comment,
+            spec.key,
+            example_path.display()
+        );
+
+        let expected_key = format!("{}:", spec.key);
+        assert!(
+            example.contains(&expected_key),
+            "chief.example.yaml should include key '{}'",
+            spec.key
+        );
+    }
+}
+
+#[test]
+fn cli_chief_overrides_parse_complex_fields() {
+    let cli = Cli::try_parse_from([
+        "chief",
+        "--agent-extra-args",
+        r#"["--sandbox","workspace-write"]"#,
+        "--mcp-servers",
+        "personal",
+    ])
+    .expect("CLI should parse complex override flags");
+
+    let overrides = cli
+        .chief
+        .to_config_overrides()
+        .expect("CLI overrides should convert");
+
+    assert_eq!(
+        overrides.agent_extra_args,
+        Some(vec!["--sandbox".to_owned(), "workspace-write".to_owned()])
+    );
+    assert_eq!(overrides.mcp_servers, Some(None));
+}
+
+#[test]
 fn loop_file_fails_when_input_file_is_missing() {
     let temp = TempDir::new("loop-file-missing-input");
     init_git_repo(&temp.path);
@@ -361,9 +440,7 @@ fn loop_file_fails_when_input_file_is_missing() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),
@@ -398,9 +475,7 @@ fn init_writes_full_default_chief_yaml_block() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),
@@ -464,9 +539,7 @@ fn init_runs_bd_init_and_ignores_beads_directory() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),
@@ -533,9 +606,7 @@ fn init_skips_bd_init_when_beads_directory_already_exists() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),
@@ -747,9 +818,10 @@ fn run_rejects_file_option_for_non_loop_file_flows() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: Some("refactor".to_owned()),
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides {
+            flow: Some("refactor".to_owned()),
+            ..CliChiefOverrides::default()
+        },
         file: Some(PathBuf::from("plan.md")),
         prompt: None,
         watch_only: Vec::new(),
@@ -800,9 +872,7 @@ fn migrate_moves_legacy_root_files_into_dot_chief() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
-        flow: None,
-        model: None,
-        max_retries: None,
+        chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
         watch_only: Vec::new(),

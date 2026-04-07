@@ -10,6 +10,7 @@ mod tests;
 
 use agentusage::{ApprovalPolicy, UsageConfig, run_claude, run_codex};
 use anyhow::{Context, Result, bail};
+use chief::config::{ChiefConfigOverrides, McpServerConfig};
 use chief::domain::{JobStatus, RunExitStatus, Todo, TodoStatus};
 use chief::flow::FlowKind;
 use chief::git::GitOps;
@@ -31,19 +32,151 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+mod chief_option_help {
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct ChiefOptionHelpSpec {
+        pub key: &'static str,
+        pub help: &'static str,
+    }
+
+    pub(super) const FLOW: &str = "Flow to run (`loop_file`, `bd`, or `refactor`).";
+    pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, or `opencode`).";
+    pub(super) const MODEL: &str = "Model override passed to the selected agent.";
+    pub(super) const MODEL_REASONING_EFFORT: &str =
+        "Reasoning effort for model adapters that support it.";
+    pub(super) const AGENT_EXTRA_ARGS: &str =
+        "Extra CLI args forwarded to the selected agent (YAML/JSON string list).";
+    pub(super) const MCP_SERVERS: &str =
+        "MCP server config (`personal` or YAML/JSON object; `{}` means no servers).";
+    pub(super) const MAX_RETRIES: &str =
+        "Retry budget for queued todo flows (minimum effective value is 1).";
+    pub(super) const MAX_LOOP_ITERATIONS: &str =
+        "Maximum convergence iterations for loop-style flows.";
+    pub(super) const REQUIRED_STABLE_ITERATIONS: &str =
+        "Consecutive stable iterations required before convergence is done.";
+    pub(super) const AGENT_TIMEOUT_SECONDS: &str =
+        "Per-agent invocation timeout in seconds (0 disables timeout).";
+    pub(super) const SUITE_COMMAND_TIMEOUT_SECONDS: &str =
+        "Default timeout in seconds for suite/readiness commands.";
+    pub(super) const AGENT_LOG_MAX_OUTPUT_LINES: &str =
+        "Tail line count kept when truncating agent output in logs.";
+    pub(super) const AGENT_LOG_MAX_OUTPUT_CHARS: &str =
+        "Tail character count kept when truncating agent output in logs.";
+    pub(super) const RESPECT_LIMITS: &str =
+        "When true, wait for agentusage limits before launching agent calls.";
+    pub(super) const USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS: &str =
+        "When true, apply agent log truncation to stdout log output too.";
+
+    pub(super) const SPECS: [ChiefOptionHelpSpec; 15] = [
+        ChiefOptionHelpSpec {
+            key: "flow",
+            help: FLOW,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent",
+            help: AGENT,
+        },
+        ChiefOptionHelpSpec {
+            key: "model",
+            help: MODEL,
+        },
+        ChiefOptionHelpSpec {
+            key: "model_reasoning_effort",
+            help: MODEL_REASONING_EFFORT,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent_extra_args",
+            help: AGENT_EXTRA_ARGS,
+        },
+        ChiefOptionHelpSpec {
+            key: "mcp_servers",
+            help: MCP_SERVERS,
+        },
+        ChiefOptionHelpSpec {
+            key: "max_retries",
+            help: MAX_RETRIES,
+        },
+        ChiefOptionHelpSpec {
+            key: "max_loop_iterations",
+            help: MAX_LOOP_ITERATIONS,
+        },
+        ChiefOptionHelpSpec {
+            key: "required_stable_iterations",
+            help: REQUIRED_STABLE_ITERATIONS,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent_timeout_seconds",
+            help: AGENT_TIMEOUT_SECONDS,
+        },
+        ChiefOptionHelpSpec {
+            key: "suite_command_timeout_seconds",
+            help: SUITE_COMMAND_TIMEOUT_SECONDS,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent_log_max_output_lines",
+            help: AGENT_LOG_MAX_OUTPUT_LINES,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent_log_max_output_chars",
+            help: AGENT_LOG_MAX_OUTPUT_CHARS,
+        },
+        ChiefOptionHelpSpec {
+            key: "respect_limits",
+            help: RESPECT_LIMITS,
+        },
+        ChiefOptionHelpSpec {
+            key: "use_agent_log_truncation_for_stdout_logs",
+            help: USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS,
+        },
+    ];
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct CliChiefOverrides {
+    #[arg(long, global = true, help = chief_option_help::FLOW)]
+    flow: Option<String>,
+    #[arg(long, global = true, help = chief_option_help::AGENT)]
+    agent: Option<String>,
+    #[arg(long, global = true, help = chief_option_help::MODEL)]
+    model: Option<String>,
+    #[arg(long, global = true, help = chief_option_help::MODEL_REASONING_EFFORT)]
+    model_reasoning_effort: Option<String>,
+    #[arg(long, global = true, help = chief_option_help::AGENT_EXTRA_ARGS)]
+    agent_extra_args: Option<String>,
+    #[arg(long, global = true, help = chief_option_help::MCP_SERVERS)]
+    mcp_servers: Option<String>,
+    #[arg(long, global = true, help = chief_option_help::MAX_RETRIES)]
+    max_retries: Option<usize>,
+    #[arg(long, global = true, help = chief_option_help::MAX_LOOP_ITERATIONS)]
+    max_loop_iterations: Option<usize>,
+    #[arg(long, global = true, help = chief_option_help::REQUIRED_STABLE_ITERATIONS)]
+    required_stable_iterations: Option<usize>,
+    #[arg(long, global = true, help = chief_option_help::AGENT_TIMEOUT_SECONDS)]
+    agent_timeout_seconds: Option<u64>,
+    #[arg(long, global = true, help = chief_option_help::SUITE_COMMAND_TIMEOUT_SECONDS)]
+    suite_command_timeout_seconds: Option<u64>,
+    #[arg(long, global = true, help = chief_option_help::AGENT_LOG_MAX_OUTPUT_LINES)]
+    agent_log_max_output_lines: Option<usize>,
+    #[arg(long, global = true, help = chief_option_help::AGENT_LOG_MAX_OUTPUT_CHARS)]
+    agent_log_max_output_chars: Option<usize>,
+    #[arg(long, global = true, help = chief_option_help::RESPECT_LIMITS)]
+    respect_limits: Option<bool>,
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS
+    )]
+    use_agent_log_truncation_for_stdout_logs: Option<bool>,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "chief")]
 #[command(about = "Chief orchestration CLI")]
 struct Cli {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
-    /// Flow to run (`loop_file`, `bd`, or `refactor`). Defaults to `.chief/chief.yaml`.
-    #[arg(long)]
-    flow: Option<String>,
-    #[arg(long)]
-    model: Option<String>,
-    #[arg(long)]
-    max_retries: Option<usize>,
+    #[command(flatten)]
+    chief: CliChiefOverrides,
     /// Markdown file used when running flow=loop_file via the default `chief` command.
     #[arg(long)]
     file: Option<PathBuf>,
@@ -170,6 +303,87 @@ struct LoopFileArgs {
     watch_only: Vec<String>,
 }
 
+impl CliChiefOverrides {
+    fn to_config_overrides(&self) -> Result<ChiefConfigOverrides> {
+        let Self {
+            flow,
+            agent,
+            model,
+            model_reasoning_effort,
+            agent_extra_args,
+            mcp_servers,
+            max_retries,
+            max_loop_iterations,
+            required_stable_iterations,
+            agent_timeout_seconds,
+            suite_command_timeout_seconds,
+            agent_log_max_output_lines,
+            agent_log_max_output_chars,
+            respect_limits,
+            use_agent_log_truncation_for_stdout_logs,
+        } = self.clone();
+
+        let agent_extra_args = agent_extra_args
+            .as_deref()
+            .map(parse_agent_extra_args_override)
+            .transpose()?;
+        let mcp_servers = mcp_servers
+            .as_deref()
+            .map(parse_mcp_servers_override)
+            .transpose()?;
+
+        Ok(ChiefConfigOverrides {
+            flow,
+            agent,
+            model,
+            model_reasoning_effort,
+            agent_extra_args,
+            mcp_servers,
+            max_retries,
+            max_loop_iterations,
+            required_stable_iterations,
+            agent_timeout_seconds,
+            suite_command_timeout_seconds,
+            agent_log_max_output_lines,
+            agent_log_max_output_chars,
+            respect_limits,
+            use_agent_log_truncation_for_stdout_logs,
+        })
+    }
+}
+
+fn parse_agent_extra_args_override(raw: &str) -> Result<Vec<String>> {
+    serde_yaml::from_str::<Vec<String>>(raw).with_context(
+        || "--agent-extra-args must be a YAML/JSON string list (for example: [] or [\"--foo\"])",
+    )
+}
+
+fn parse_mcp_servers_override(raw: &str) -> Result<Option<BTreeMap<String, McpServerConfig>>> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("personal") {
+        return Ok(None);
+    }
+
+    serde_yaml::from_str::<BTreeMap<String, McpServerConfig>>(trimmed)
+        .map(Some)
+        .with_context(|| {
+            "--mcp-servers must be `personal` or a YAML/JSON object (for example: {} or {docs: {transport: stdio, command: npx}})"
+        })
+}
+
+fn apply_cli_overrides_to_context(context: &mut ProjectContext, cli: &Cli) -> Result<()> {
+    let overrides = cli.chief.to_config_overrides()?;
+    let current = std::mem::take(&mut context.chief_yaml.chief);
+    context.chief_yaml.chief = current.apply_overrides(overrides);
+    Ok(())
+}
+
+fn load_context_with_cli_overrides(project_dir: &Path, cli: &Cli) -> Result<ProjectContext> {
+    let mut context = ProjectContext::load(project_dir)?;
+    apply_cli_overrides_to_context(&mut context, cli)?;
+    Ok(context)
+}
+
 fn main() {
     if let Err(err) = run_with_db_reset_prompt() {
         eprintln!("error: {err:#}");
@@ -236,9 +450,8 @@ fn run(cli: &Cli) -> Result<()> {
         return run_command(cli, command);
     }
 
-    let context = ProjectContext::load(&cli.project_dir)?;
-    let configured_flow = context.chief_yaml.chief.flow.trim();
-    let flow_input = cli.flow.as_deref().unwrap_or(configured_flow);
+    let context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
+    let flow_input = context.chief_yaml.chief.flow.trim();
     let flow_kind: FlowKind = flow_input
         .parse()
         .with_context(|| format!("invalid flow '{flow_input}'"))?;
@@ -246,7 +459,7 @@ fn run(cli: &Cli) -> Result<()> {
     let requirements_text = load_requirements_text(&cli.requirements, &cli.requirements_file)?;
     if !requirements_text.trim().is_empty() {
         let engine = ChiefEngine::new(context.clone());
-        let diff = engine.process_requirements(&requirements_text, cli.model.clone())?;
+        let diff = engine.process_requirements(&requirements_text, cli.chief.model.clone())?;
         println!("=== git diff HEAD ===");
         if diff.trim().is_empty() {
             println!("(no diff)");
@@ -260,12 +473,21 @@ fn run(cli: &Cli) -> Result<()> {
         let file = cli.file.clone();
         let prompt = cli.prompt.clone();
         if file.is_none() && prompt.is_none() {
-            bail!("flow 'loop_file' requires either --file <path> or --prompt <text> (or use `chief loop_file --file <path>` or `chief loop_file --prompt <text>`)");
+            bail!(
+                "flow 'loop_file' requires either --file <path> or --prompt <text> (or use `chief loop_file --file <path>` or `chief loop_file --prompt <text>`)"
+            );
         }
         if file.is_some() && prompt.is_some() {
             bail!("--file and --prompt are mutually exclusive for loop_file flow");
         }
-        return run_loop_file(cli, &LoopFileArgs { file, prompt, watch_only: cli.watch_only.clone() });
+        return run_loop_file(
+            cli,
+            &LoopFileArgs {
+                file,
+                prompt,
+                watch_only: cli.watch_only.clone(),
+            },
+        );
     }
     if cli.file.is_some() || cli.prompt.is_some() {
         bail!("--file and --prompt are only supported when flow resolves to 'loop_file'");
@@ -281,15 +503,13 @@ fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKi
     let report_started_at = Utc::now();
     context.chief_yaml.chief.flow = flow_kind.as_str().to_owned();
     let engine = ChiefEngine::new(context.clone());
-    let max_retries = cli
-        .max_retries
-        .unwrap_or(context.chief_yaml.chief.max_retries.max(1));
+    let max_retries = context.chief_yaml.chief.max_retries.max(1);
     let head_before = context.git.head_commit(&context.project_dir).ok();
     let latest_run_before = latest_run_id(&context.store)?;
 
     let queue_result = engine.run_todos_until_done_with_retries(
         flow_kind,
-        cli.model.clone(),
+        cli.chief.model.clone(),
         max_retries,
         |outcome| {
             println!(
@@ -348,7 +568,7 @@ fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKi
 }
 
 fn run_refactor(cli: &Cli) -> Result<()> {
-    let context = ProjectContext::load(&cli.project_dir)?;
+    let context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
     if cli.file.is_some() || cli.prompt.is_some() {
         bail!("--file and --prompt are only supported when flow resolves to 'loop_file'");
     }
@@ -357,7 +577,7 @@ fn run_refactor(cli: &Cli) -> Result<()> {
 
 fn run_bd(cli: &Cli) -> Result<()> {
     let report_started_at = Utc::now();
-    let mut context = ProjectContext::load(&cli.project_dir)?;
+    let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
     context.chief_yaml.chief.flow = FlowKind::Bd.as_str().to_owned();
     println!("bd: started {}", context.project_dir.display());
     let head_before = context.git.head_commit(&context.project_dir).ok();
@@ -392,7 +612,7 @@ fn run_bd(cli: &Cli) -> Result<()> {
         synthetic_todo,
         FlowKind::Bd,
         context.project_dir.clone(),
-        cli.model.clone(),
+        cli.chief.model.clone(),
         Vec::new(),
         Arc::new(AtomicBool::new(false)),
         1,
@@ -458,14 +678,14 @@ fn run_bd(cli: &Cli) -> Result<()> {
 }
 
 fn run_clean_done(cli: &Cli) -> Result<()> {
-    let context = ProjectContext::load(&cli.project_dir)?;
+    let context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
     let removed = context.store.clean_completed_todos_with_commit()?;
     println!("cleaned completed todos ({removed} removed)");
     Ok(())
 }
 
 fn run_tail_events(cli: &Cli, args: &TailEventsArgs) -> Result<()> {
-    let context = ProjectContext::load(&cli.project_dir)?;
+    let context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
     let events = context.store.query_events(EventQuery {
         limit: args.limit,
         ..EventQuery::default()
@@ -519,7 +739,7 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
         bail!("project path is not a directory: {}", project_dir.display());
     }
 
-    let context = ProjectContext::load(&project_dir)?;
+    let context = load_context_with_cli_overrides(&project_dir, cli)?;
     let project_name = context.name.clone();
     let projects_dir = project_dir.clone();
     let registry = ProjectRegistry::discover(&projects_dir, std::slice::from_ref(&project_dir))
@@ -604,7 +824,7 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
 
 fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     let report_started_at = Utc::now();
-    let mut context = ProjectContext::load(&cli.project_dir)?;
+    let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
 
     let (source_desc, expectations): (String, String) = if let Some(ref file) = args.file {
         let file_path = if file.is_absolute() {
@@ -626,10 +846,7 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     let head_before = context.git.head_commit(&context.project_dir).ok();
 
     let synthetic_todo = Todo {
-        id: Todo::compute_id(
-            &format!("loop_file:{}", source_desc),
-            expectations.as_str(),
-        ),
+        id: Todo::compute_id(&format!("loop_file:{}", source_desc), expectations.as_str()),
         todo: format!("loop_file: {}", source_desc),
         expectations,
         priority: 1,
@@ -656,7 +873,7 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         synthetic_todo,
         FlowKind::LoopFile,
         context.project_dir.clone(),
-        cli.model.clone(),
+        cli.chief.model.clone(),
         args.watch_only.clone(),
         Arc::new(AtomicBool::new(false)),
         1,
