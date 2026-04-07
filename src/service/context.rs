@@ -6,7 +6,7 @@ use crate::git::ShellGitOps;
 use crate::paths;
 use crate::prompt::FsPromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -428,7 +428,11 @@ fn parse_opencode_json_output(output: &str) -> String {
         };
 
         if value.get("type").and_then(Value::as_str) == Some("text") {
-            if let Some(text) = value.get("part").and_then(|p| p.get("text")).and_then(Value::as_str) {
+            if let Some(text) = value
+                .get("part")
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+            {
                 parts.push(text.to_owned());
             }
         }

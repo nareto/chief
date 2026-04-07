@@ -132,10 +132,12 @@ fn claude_prepare_launch_uses_strict_mcp_config_when_managed() {
     let launch = agent
         .prepare_launch(&request)
         .expect("launch should prepare");
-    assert!(launch
-        .command
-        .iter()
-        .any(|arg| arg == "--strict-mcp-config"));
+    assert!(
+        launch
+            .command
+            .iter()
+            .any(|arg| arg == "--strict-mcp-config")
+    );
     assert!(launch.command.iter().any(|arg| arg == "--mcp-config"));
     assert!(
         launch.scratch_dir.is_some(),
