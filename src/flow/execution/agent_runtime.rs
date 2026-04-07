@@ -67,6 +67,17 @@ impl<'a> FlowExecution<'a> {
             .changed_files(&self.project_dir)
             .unwrap_or_default();
 
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::AgentCmd,
+            format!("Invoking agent ({})", phase.as_str()),
+            payload_from_json(json!({
+                "agent_name": self.agent.name(),
+                "query_id": query_id,
+            })),
+        )?;
+
         let stream_project = project_name.clone();
         let stream_query_id = query_id.clone();
         let out = match self.agent.run(AgentRequest {
