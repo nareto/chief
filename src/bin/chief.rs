@@ -502,6 +502,7 @@ fn run(cli: &Cli) -> Result<()> {
 fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKind) -> Result<()> {
     let report_started_at = Utc::now();
     context.chief_yaml.chief.flow = flow_kind.as_str().to_owned();
+    print_config_summary(&context, &cli.chief);
     let engine = ChiefEngine::new(context.clone());
     let max_retries = context.chief_yaml.chief.max_retries.max(1);
     let head_before = context.git.head_commit(&context.project_dir).ok();
@@ -578,6 +579,7 @@ fn run_refactor(cli: &Cli) -> Result<()> {
 fn run_bd(cli: &Cli) -> Result<()> {
     let report_started_at = Utc::now();
     let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
+    print_config_summary(&context, &cli.chief);
     context.chief_yaml.chief.flow = FlowKind::Bd.as_str().to_owned();
     println!("bd: started {}", context.project_dir.display());
     let head_before = context.git.head_commit(&context.project_dir).ok();
@@ -825,6 +827,7 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
 fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     let report_started_at = Utc::now();
     let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
+    print_config_summary(&context, &cli.chief);
 
     let (source_desc, expectations): (String, String) = if let Some(ref file) = args.file {
         let file_path = if file.is_absolute() {
@@ -1684,4 +1687,68 @@ fn print_cli_run_report(
     )?;
     println!("{}", render_cli_run_report(&report));
     Ok(())
+}
+
+fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides) {
+    let color = should_use_color_stdout();
+    let divider = style(
+        "================================================================",
+        "\x1b[90m",
+        color,
+    );
+    println!("{}", divider);
+    println!("{}", style("\x1b[1mChief Configuration\x1b[0m", "\x1b[1m", color));
+    println!("{}", divider);
+    println!(
+        "{} {}",
+        format_report_key("project", color),
+        context.project_dir.display()
+    );
+    println!("{} {}", format_report_key("flow", color), context.chief_yaml.chief.flow);
+    println!("{} {}", format_report_key("agent", color), context.chief_yaml.chief.agent);
+    if let Some(ref model) = context.chief_yaml.chief.model {
+        println!("{} {}", format_report_key("model", color), model);
+    }
+    if let Some(ref reasoning) = context.chief_yaml.chief.model_reasoning_effort {
+        println!("{} {}", format_report_key("reasoning_effort", color), reasoning);
+    }
+    if !context.chief_yaml.chief.agent_extra_args.is_empty() {
+        println!(
+            "{} {}",
+            format_report_key("agent_extra_args", color),
+            context.chief_yaml.chief.agent_extra_args.join(" ")
+        );
+    }
+    if let Some(ref mcp) = context.chief_yaml.chief.mcp_servers {
+        println!("{} {:?}", format_report_key("mcp_servers", color), mcp.keys().collect::<Vec<_>>());
+    }
+    println!("{} {}", format_report_key("max_retries", color), context.chief_yaml.chief.max_retries);
+    println!("{} {}", format_report_key("max_loop_iterations", color), context.chief_yaml.chief.max_loop_iterations);
+    println!("{} {}", format_report_key("required_stable_iterations", color), context.chief_yaml.chief.required_stable_iterations);
+    println!("{} {}s", format_report_key("agent_timeout", color), context.chief_yaml.chief.agent_timeout_seconds);
+    println!("{} {}s", format_report_key("suite_timeout", color), context.chief_yaml.chief.suite_command_timeout_seconds);
+    println!("{} {}", format_report_key("respect_limits", color), context.chief_yaml.chief.respect_limits);
+    println!("{} {}", format_report_key("log_truncation", color), context.chief_yaml.chief.use_agent_log_truncation_for_stdout_logs);
+
+    let override_fields = [
+        ("flow", overrides.flow.is_some()),
+        ("agent", overrides.agent.is_some()),
+        ("model", overrides.model.is_some()),
+        ("mcp_servers", overrides.mcp_servers.is_some()),
+        ("max_retries", overrides.max_retries.is_some()),
+        ("max_loop_iterations", overrides.max_loop_iterations.is_some()),
+        ("required_stable_iterations", overrides.required_stable_iterations.is_some()),
+        ("agent_timeout_seconds", overrides.agent_timeout_seconds.is_some()),
+        ("suite_command_timeout_seconds", overrides.suite_command_timeout_seconds.is_some()),
+        ("agent_log_max_output_lines", overrides.agent_log_max_output_lines.is_some()),
+        ("agent_log_max_output_chars", overrides.agent_log_max_output_chars.is_some()),
+        ("respect_limits", overrides.respect_limits.is_some()),
+        ("use_agent_log_truncation_for_stdout_logs", overrides.use_agent_log_truncation_for_stdout_logs.is_some()),
+    ];
+    let active_overrides: Vec<_> = override_fields.iter().filter(|(_, active)| *active).map(|(name, _)| *name).collect();
+    if !active_overrides.is_empty() {
+        println!("{}", style("\x1b[90m--- CLI Overrides ---\x1b[0m", "\x1b[90m", color));
+        println!("{} {}", format_report_key("active_overrides", color), active_overrides.join(", "));
+    }
+    println!("{}", divider);
 }
