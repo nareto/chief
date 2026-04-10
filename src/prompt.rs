@@ -16,9 +16,8 @@ pub struct FsPromptStore {
     root: PathBuf,
 }
 
-const REQUIRED_PROMPT_FILES: [&str; 5] = [
+const REQUIRED_PROMPT_FILES: [&str; 4] = [
     "loop_file_prompt.md",
-    "loop_file_convergence.md",
     "structural_cleanup.md",
     "mechanical_cleanup.md",
     "requirements.md",

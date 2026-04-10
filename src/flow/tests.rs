@@ -2634,8 +2634,8 @@ fn loop_file_runs_lint_and_tests_for_all_configured_suites() {
     let marker_contents =
         fs::read_to_string(&marker_file).expect("suite command marker should exist");
     assert_eq!(
-        marker_contents, "BLFLBTFTBLFLBTFT",
-        "loop_file should run lint and test commands during convergence and convergence review"
+        marker_contents, "BLFLBTFT",
+        "loop_file should run lint and test commands during convergence"
     );
 
     let rendered = prompts.rendered_suite_names();
@@ -2764,8 +2764,8 @@ fn loop_file_agent_commit_with_clean_tree_does_not_count_as_stable() {
     assert_eq!(outcome.commit_hash.as_deref(), Some("mock-final-commit-1"));
     assert_eq!(
         agent.runs(),
-        3,
-        "loop_file should run an additional convergence review after convergence is reached"
+        2,
+        "loop_file should retry after an agent-only commit before converging"
     );
 
     let commit_messages = git.commit_messages();
@@ -2882,15 +2882,12 @@ fn loop_file_does_not_restart_from_global_bd_ready_tickets() {
 
     assert_eq!(
         agent.runs(),
-        2,
-        "loop_file should run one implementation pass and one convergence review"
+        1,
+        "loop_file should converge without an extra review pass"
     );
     assert_eq!(
         prompts.template_names(),
-        vec![
-            "loop_file_prompt.md".to_owned(),
-            "loop_file_convergence.md".to_owned(),
-        ],
+        vec!["loop_file_prompt.md".to_owned()],
     );
     assert!(
         !bd_called.exists(),

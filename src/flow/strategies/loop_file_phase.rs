@@ -165,40 +165,6 @@ impl LoopFilePhaseStrategy {
         Ok(LoopDecision::Stable)
     }
 
-    pub(super) fn run_convergence_review(
-        &mut self,
-        execution: &mut FlowExecution<'_>,
-    ) -> Result<LoopDecision> {
-        let suites_for_prompt = Self::reload_configured_suites(execution)?;
-        let prompt = execution.prompts.render_json(
-            "loop_file_convergence.md",
-            &json!({
-                "work_item": execution.work_item(),
-                "todo": execution.work_item_prompt_payload(),
-                "file_contents": execution.work_item_details(),
-                "suites": suites_for_prompt,
-                "iteration": self.attempts + 1,
-                "run_id": execution.run_id,
-            }),
-        )?;
-        let run = execution.run_agent_with_git_changes(Phase::LoopFile, prompt, Vec::new())?;
-        self.evaluate_agent_run(
-            execution,
-            run,
-            "loop_file convergence check agent step failed",
-            self.attempts + 1,
-        )
-    }
-
-    pub(super) fn reset_prompt_history(
-        &mut self,
-        execution: &FlowExecution<'_>,
-        marker: &str,
-    ) -> Result<()> {
-        self.last_agent_run = None;
-        self.attempts = 0;
-        execution.mark_retry_reset_boundary(Phase::LoopFile, marker)
-    }
 }
 
 impl PhaseStrategy for LoopFilePhaseStrategy {

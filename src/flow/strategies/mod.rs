@@ -48,29 +48,9 @@ impl ExecutionFlow for LoopFileFlow {
     }
 
     fn run(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
-        let mut convergence_pass = 0usize;
-        loop {
-            convergence_pass += 1;
-
-            let mut strategy = LoopFilePhaseStrategy::new();
-            self.loop_policy.run(&mut strategy, execution)?;
-            strategy.run_post_green_for_involved_suites(execution)?;
-
-            let convergence_review = strategy.run_convergence_review(execution)?;
-            if matches!(convergence_review, LoopDecision::Retry) {
-                execution.log_event(
-                    "warning",
-                    Some(Phase::LoopFile),
-                    EventType::PhaseChange,
-                    "loop_file convergence check requested another convergence pass",
-                    payload_from_json(json!({ "convergence_pass": convergence_pass })),
-                )?;
-                strategy.reset_prompt_history(execution, "manual/1")?;
-                continue;
-            }
-
-            break;
-        }
+        let mut strategy = LoopFilePhaseStrategy::new();
+        self.loop_policy.run(&mut strategy, execution)?;
+        strategy.run_post_green_for_involved_suites(execution)?;
 
         execution.log_event(
             "info",

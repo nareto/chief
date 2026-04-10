@@ -33,7 +33,6 @@ Chief currently supports three flow kinds:
 Prompt templates live in this repo's [`prompts/`](./prompts) directory:
 
 - `loop_file_prompt.md`
-- `loop_file_convergence.md`
 - `structural_cleanup.md`
 - `mechanical_cleanup.md`
 - `requirements.md`
