@@ -10,7 +10,7 @@ mod tests;
 
 use agentusage::{ApprovalPolicy, UsageConfig, run_claude, run_codex};
 use anyhow::{Context, Result, bail};
-use chief::config::{ChiefConfigOverrides, McpServerConfig};
+use chief::config::{ChiefConfigOverrides, ChiefYaml, McpServerConfig, TestSuiteConfig};
 use chief::domain::{JobStatus, RunExitStatus, Todo, TodoStatus};
 use chief::flow::FlowKind;
 use chief::git::GitOps;
@@ -20,19 +20,46 @@ use chief::scheduler::Scheduler;
 use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry};
 use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
 use chrono::{DateTime, Utc};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+const CHIEF_LONG_ABOUT: &str = "Chief orchestrates project flows, suite commands, and readiness checks.\n\n\
+The default `chief` invocation resolves its flow from config and then runs one of three behaviors:\n\
+- `loop_file`: execute a single convergence task from `--file` or `--prompt`\n\
+- `bd`: drain `bd ready --json` work using `prompts/bd.md`\n\
+- `refactor`: process queued todos from `todos.yaml`\n\n\
+For CLI-only discovery, use `chief schema --json`, `chief config show --resolved`,\n\
+`chief list suites`, `chief explain flow`, and `chief doctor`.";
+
+const CHIEF_AFTER_HELP: &str = "Examples:
+  chief --flow loop_file --prompt \"Tighten the parser error messages\"
+  chief loop_file --file prompts/task.md
+  chief suite test --suite backend --target src/bin/chief.rs
+  chief schema --json
+  chief config show --resolved
+  chief list suites --json
+  chief explain flow --flow bd
+  chief doctor
+
+Config precedence:
+  defaults < .chief/chief.yaml < CLI flags
+
+Exit codes:
+  0  Success
+  1  Command or runtime error";
+
 mod chief_option_help {
+    #[cfg(test)]
     #[derive(Debug, Clone, Copy)]
     pub(super) struct ChiefOptionHelpSpec {
         pub key: &'static str,
@@ -40,11 +67,9 @@ mod chief_option_help {
     }
 
     pub(super) const FLOW: &str = "Flow to run (`loop_file`, `bd`, or `refactor`).";
-    pub(super) const AGENT: &str =
-        "Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`).";
+    pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`; `cursor` is also accepted).";
     pub(super) const MODEL: &str = "Model override passed to the selected agent.";
-    pub(super) const MODEL_REASONING_EFFORT: &str =
-        "Reasoning effort for model adapters that support it.";
+    pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, or `xhigh`).";
     pub(super) const AGENT_EXTRA_ARGS: &str =
         "Extra CLI args forwarded to the selected agent (YAML/JSON string list).";
     pub(super) const MCP_SERVERS: &str =
@@ -68,6 +93,7 @@ mod chief_option_help {
     pub(super) const USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS: &str =
         "When true, apply agent log truncation to stdout log output too.";
 
+    #[cfg(test)]
     pub(super) const SPECS: [ChiefOptionHelpSpec; 15] = [
         ChiefOptionHelpSpec {
             key: "flow",
@@ -132,65 +158,211 @@ mod chief_option_help {
     ];
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+enum CliFlowValue {
+    #[value(name = "loop_file", alias = "loop-file")]
+    LoopFile,
+    #[value(name = "bd")]
+    Bd,
+    #[value(name = "refactor")]
+    Refactor,
+}
+
+impl CliFlowValue {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LoopFile => "loop_file",
+            Self::Bd => "bd",
+            Self::Refactor => "refactor",
+        }
+    }
+
+    fn from_flow_kind(flow: FlowKind) -> Self {
+        match flow {
+            FlowKind::LoopFile => Self::LoopFile,
+            FlowKind::Bd => Self::Bd,
+            FlowKind::Refactor => Self::Refactor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+enum CliAgentValue {
+    #[value(name = "codex")]
+    Codex,
+    #[value(name = "claude")]
+    Claude,
+    #[value(name = "opencode")]
+    Opencode,
+    #[value(name = "cursor-agent", alias = "cursor")]
+    CursorAgent,
+}
+
+impl CliAgentValue {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Opencode => "opencode",
+            Self::CursorAgent => "cursor-agent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+enum CliReasoningEffortValue {
+    #[value(name = "low")]
+    Low,
+    #[value(name = "medium")]
+    Medium,
+    #[value(name = "high")]
+    High,
+    #[value(name = "xhigh")]
+    Xhigh,
+}
+
+impl CliReasoningEffortValue {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args, Default)]
 struct CliChiefOverrides {
-    #[arg(long, global = true, help = chief_option_help::FLOW)]
-    flow: Option<String>,
-    #[arg(long, global = true, help = chief_option_help::AGENT)]
-    agent: Option<String>,
-    #[arg(long, global = true, help = chief_option_help::MODEL)]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = chief_option_help::FLOW,
+        help_heading = "Chief Overrides"
+    )]
+    flow: Option<CliFlowValue>,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = chief_option_help::AGENT,
+        help_heading = "Chief Overrides"
+    )]
+    agent: Option<CliAgentValue>,
+    #[arg(long, global = true, help = chief_option_help::MODEL, help_heading = "Chief Overrides")]
     model: Option<String>,
-    #[arg(long, global = true, help = chief_option_help::MODEL_REASONING_EFFORT)]
-    model_reasoning_effort: Option<String>,
-    #[arg(long, global = true, help = chief_option_help::AGENT_EXTRA_ARGS)]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = chief_option_help::MODEL_REASONING_EFFORT,
+        help_heading = "Chief Overrides"
+    )]
+    model_reasoning_effort: Option<CliReasoningEffortValue>,
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::AGENT_EXTRA_ARGS,
+        help_heading = "Chief Overrides"
+    )]
     agent_extra_args: Option<String>,
-    #[arg(long, global = true, help = chief_option_help::MCP_SERVERS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::MCP_SERVERS,
+        help_heading = "Chief Overrides"
+    )]
     mcp_servers: Option<String>,
-    #[arg(long, global = true, help = chief_option_help::MAX_RETRIES)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::MAX_RETRIES,
+        help_heading = "Chief Overrides"
+    )]
     max_retries: Option<usize>,
-    #[arg(long, global = true, help = chief_option_help::MAX_LOOP_ITERATIONS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::MAX_LOOP_ITERATIONS,
+        help_heading = "Chief Overrides"
+    )]
     max_loop_iterations: Option<usize>,
-    #[arg(long, global = true, help = chief_option_help::REQUIRED_STABLE_ITERATIONS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::REQUIRED_STABLE_ITERATIONS,
+        help_heading = "Chief Overrides"
+    )]
     required_stable_iterations: Option<usize>,
-    #[arg(long, global = true, help = chief_option_help::AGENT_TIMEOUT_SECONDS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::AGENT_TIMEOUT_SECONDS,
+        help_heading = "Chief Overrides"
+    )]
     agent_timeout_seconds: Option<u64>,
-    #[arg(long, global = true, help = chief_option_help::SUITE_COMMAND_TIMEOUT_SECONDS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::SUITE_COMMAND_TIMEOUT_SECONDS,
+        help_heading = "Chief Overrides"
+    )]
     suite_command_timeout_seconds: Option<u64>,
-    #[arg(long, global = true, help = chief_option_help::AGENT_LOG_MAX_OUTPUT_LINES)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::AGENT_LOG_MAX_OUTPUT_LINES,
+        help_heading = "Chief Overrides"
+    )]
     agent_log_max_output_lines: Option<usize>,
-    #[arg(long, global = true, help = chief_option_help::AGENT_LOG_MAX_OUTPUT_CHARS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::AGENT_LOG_MAX_OUTPUT_CHARS,
+        help_heading = "Chief Overrides"
+    )]
     agent_log_max_output_chars: Option<usize>,
-    #[arg(long, global = true, help = chief_option_help::RESPECT_LIMITS)]
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::RESPECT_LIMITS,
+        help_heading = "Chief Overrides"
+    )]
     respect_limits: Option<bool>,
     #[arg(
         long,
         global = true,
-        help = chief_option_help::USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS
+        help = chief_option_help::USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS,
+        help_heading = "Chief Overrides"
     )]
     use_agent_log_truncation_for_stdout_logs: Option<bool>,
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "chief")]
+#[command(name = "chief", version)]
 #[command(about = "Chief orchestration CLI")]
+#[command(long_about = CHIEF_LONG_ABOUT, after_help = CHIEF_AFTER_HELP)]
 struct Cli {
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", help_heading = "Global Options")]
     project_dir: PathBuf,
     #[command(flatten)]
     chief: CliChiefOverrides,
     /// Markdown file used when running flow=loop_file via the default `chief` command.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "prompt", help_heading = "Loop File Inputs")]
     file: Option<PathBuf>,
     /// Prompt text used when running flow=loop_file via the default `chief` command.
     /// Mutually exclusive with --file.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "file", help_heading = "Loop File Inputs")]
     prompt: Option<String>,
     /// Scope convergence to these paths only (repeatable). Ignored for non-loop_file flows.
-    #[arg(long = "watch-only")]
+    #[arg(long = "watch-only", help_heading = "Loop File Inputs")]
     watch_only: Vec<String>,
-    #[arg(long = "requirements")]
+    /// Inline requirements text to process before any flow execution.
+    #[arg(long = "requirements", help_heading = "Requirements")]
     requirements: Vec<String>,
-    #[arg(long = "requirements-file")]
+    /// File whose contents are appended to inline requirements before processing.
+    #[arg(long = "requirements-file", help_heading = "Requirements")]
     requirements_file: Vec<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
@@ -211,12 +383,22 @@ enum Commands {
     /// Run suite-level commands from chief.yaml for a specific suite.
     Suite(SuiteArgs),
     /// Execute one loop_file flow run from a markdown file.
-    #[command(name = "loop_file", alias = "loop-file")]
+    #[command(name = "loop_file", visible_alias = "loop-file")]
     LoopFile(LoopFileArgs),
     /// Run a bd-driven convergence loop using prompts/bd.md.
     Bd,
     /// Run queued todos using the refactor flow.
     Refactor,
+    /// Print a self-describing schema for the CLI.
+    Schema(SchemaArgs),
+    /// Inspect chief.yaml content and effective overrides.
+    Config(ConfigArgs),
+    /// List discoverable entities from chief.yaml.
+    List(ListArgs),
+    /// Explain flow behavior and expected inputs.
+    Explain(ExplainArgs),
+    /// Validate local project and tool readiness for Chief.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Args)]
@@ -254,20 +436,20 @@ enum SuiteCommand {
     /// Run the suite test command.
     Test(SuiteRunArgs),
     /// Run the suite test_init command.
-    #[command(name = "test_init", alias = "test-init")]
+    #[command(name = "test_init", visible_alias = "test-init")]
     TestInit(SuiteRunNoTargetArgs),
     /// Run the suite test_setup command.
-    #[command(name = "test_setup", alias = "test-setup")]
+    #[command(name = "test_setup", visible_alias = "test-setup")]
     TestSetup(SuiteRunNoTargetArgs),
     /// Run the suite lint command.
-    #[command(alias = "linting")]
+    #[command(visible_alias = "linting")]
     Lint(SuiteRunArgs),
     /// Run the suite lint_fix command.
     #[command(
         name = "lint_fix",
-        alias = "lint-fix",
-        alias = "linting_fix",
-        alias = "linting-fix"
+        visible_alias = "lint-fix",
+        visible_alias = "linting_fix",
+        visible_alias = "linting-fix"
     )]
     LintFix(SuiteRunArgs),
 }
@@ -292,16 +474,93 @@ struct SuiteRunNoTargetArgs {
 #[derive(Debug, Args)]
 struct LoopFileArgs {
     /// Markdown file path to load as the loop_file task body.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "prompt")]
     file: Option<PathBuf>,
     /// Prompt text for the loop_file task body.
     /// Mutually exclusive with --file.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "file")]
     prompt: Option<String>,
     /// Scope convergence to these paths only (repeatable). When set, an iteration
     /// is considered stable only if none of the specified paths were modified.
     #[arg(long = "watch-only")]
     watch_only: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct SchemaArgs {
+    /// Emit machine-readable JSON instead of human-readable text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Show raw or resolved chief.yaml content.
+    Show(ConfigShowArgs),
+}
+
+#[derive(Debug, Args)]
+struct ConfigShowArgs {
+    /// Render defaults + chief.yaml + CLI overrides instead of the raw file content.
+    #[arg(long, default_value_t = false)]
+    resolved: bool,
+    /// Emit machine-readable JSON instead of YAML/text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ListArgs {
+    #[command(subcommand)]
+    command: ListCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ListCommand {
+    /// List suites defined in chief.yaml.
+    Suites(ListSuitesArgs),
+}
+
+#[derive(Debug, Args)]
+struct ListSuitesArgs {
+    /// Emit machine-readable JSON instead of human-readable text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ExplainArgs {
+    #[command(subcommand)]
+    command: ExplainCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ExplainCommand {
+    /// Explain how a flow behaves and which inputs it expects.
+    Flow(ExplainFlowArgs),
+}
+
+#[derive(Debug, Args)]
+struct ExplainFlowArgs {
+    /// Flow to describe. Defaults to the resolved flow for this project.
+    #[arg(long, value_enum)]
+    flow: Option<CliFlowValue>,
+    /// Emit machine-readable JSON instead of human-readable text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    /// Emit machine-readable JSON instead of human-readable text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 impl CliChiefOverrides {
@@ -334,10 +593,10 @@ impl CliChiefOverrides {
             .transpose()?;
 
         Ok(ChiefConfigOverrides {
-            flow,
-            agent,
+            flow: flow.map(|value| value.as_str().to_owned()),
+            agent: agent.map(|value| value.as_str().to_owned()),
             model,
-            model_reasoning_effort,
+            model_reasoning_effort: model_reasoning_effort.map(|value| value.as_str().to_owned()),
             agent_extra_args,
             mcp_servers,
             max_retries,
@@ -379,10 +638,1255 @@ fn apply_cli_overrides_to_context(context: &mut ProjectContext, cli: &Cli) -> Re
     Ok(())
 }
 
+fn load_chief_yaml_with_cli_overrides(project_dir: &Path, cli: &Cli) -> Result<ChiefYaml> {
+    let config_path = paths::chief_yaml_path(project_dir);
+    let mut chief_yaml = ChiefYaml::load_or_default(&config_path)?;
+    let overrides = cli.chief.to_config_overrides()?;
+    let current = std::mem::take(&mut chief_yaml.chief);
+    chief_yaml.chief = current.apply_overrides(overrides);
+    Ok(chief_yaml)
+}
+
 fn load_context_with_cli_overrides(project_dir: &Path, cli: &Cli) -> Result<ProjectContext> {
     let mut context = ProjectContext::load(project_dir)?;
     apply_cli_overrides_to_context(&mut context, cli)?;
     Ok(context)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SchemaOption {
+    long: Option<String>,
+    short: Option<String>,
+    value_name: Option<String>,
+    help: String,
+    required: bool,
+    repeatable: bool,
+    default: Option<String>,
+    possible_values: Vec<String>,
+    conflicts_with: Vec<String>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SchemaCommand {
+    name: String,
+    aliases: Vec<String>,
+    about: String,
+    options: Vec<SchemaOption>,
+    subcommands: Vec<SchemaCommand>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SchemaExitCode {
+    code: i32,
+    meaning: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CliSchema {
+    name: String,
+    about: String,
+    long_about: String,
+    config_precedence: Vec<String>,
+    examples: Vec<String>,
+    exit_codes: Vec<SchemaExitCode>,
+    global_options: Vec<SchemaOption>,
+    commands: Vec<SchemaCommand>,
+}
+
+#[derive(Debug, Serialize)]
+struct SuiteSummary {
+    name: String,
+    language: String,
+    framework: String,
+    test_root: String,
+    target_type: String,
+    default_target: Option<String>,
+    test_command: String,
+    test_init: Option<String>,
+    test_setup: Option<String>,
+    lint_command: Option<String>,
+    lint_fix_command: Option<String>,
+    cache_mode: String,
+    command_timeout_seconds: Option<u64>,
+}
+
+impl From<&TestSuiteConfig> for SuiteSummary {
+    fn from(suite: &TestSuiteConfig) -> Self {
+        Self {
+            name: suite.name.clone(),
+            language: suite.language.clone(),
+            framework: suite.framework.clone(),
+            test_root: suite.test_root.clone(),
+            target_type: match suite.target_type {
+                chief::domain::TargetType::File => "file",
+                chief::domain::TargetType::Package => "package",
+                chief::domain::TargetType::Project => "project",
+                chief::domain::TargetType::Repo => "repo",
+            }
+            .to_owned(),
+            default_target: suite.default_target.clone(),
+            test_command: suite.test_command.clone(),
+            test_init: suite.test_init.clone(),
+            test_setup: suite.test_setup.clone(),
+            lint_command: suite.lint_command.clone(),
+            lint_fix_command: suite.lint_fix_command.clone(),
+            cache_mode: suite.cache_mode.as_str().to_owned(),
+            command_timeout_seconds: suite.command_timeout_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FlowExplanation {
+    flow: String,
+    summary: String,
+    execution_model: String,
+    inputs: Vec<String>,
+    disallowed_inputs: Vec<String>,
+    prompt_sources: Vec<String>,
+    examples: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    name: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    project_dir: String,
+    config_path: String,
+    overall_status: String,
+    checks: Vec<DoctorCheck>,
+}
+
+impl DoctorReport {
+    fn has_failures(&self) -> bool {
+        self.checks.iter().any(|check| check.status == "fail")
+    }
+}
+
+fn schema_option(
+    long: Option<&str>,
+    short: Option<char>,
+    value_name: Option<&str>,
+    help: &str,
+    required: bool,
+    repeatable: bool,
+    default: Option<&str>,
+    possible_values: Vec<String>,
+    conflicts_with: &[&str],
+    notes: &[&str],
+) -> SchemaOption {
+    SchemaOption {
+        long: long.map(str::to_owned),
+        short: short.map(|value| value.to_string()),
+        value_name: value_name.map(str::to_owned),
+        help: help.to_owned(),
+        required,
+        repeatable,
+        default: default.map(str::to_owned),
+        possible_values,
+        conflicts_with: conflicts_with
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        notes: notes.iter().map(|value| (*value).to_owned()).collect(),
+    }
+}
+
+fn enum_possible_values<T: ValueEnum>() -> Vec<String> {
+    T::value_variants()
+        .iter()
+        .filter_map(|value| value.to_possible_value())
+        .map(|value| value.get_name().to_owned())
+        .collect()
+}
+
+fn bool_possible_values() -> Vec<String> {
+    vec!["true".to_owned(), "false".to_owned()]
+}
+
+fn build_cli_schema() -> CliSchema {
+    let global_options = vec![
+        schema_option(
+            Some("project-dir"),
+            None,
+            Some("PROJECT_DIR"),
+            "Project directory to inspect or run.",
+            false,
+            false,
+            Some("."),
+            Vec::new(),
+            &[],
+            &["Relative paths are resolved from the current working directory."],
+        ),
+        schema_option(
+            Some("flow"),
+            None,
+            Some("FLOW"),
+            chief_option_help::FLOW,
+            false,
+            false,
+            None,
+            enum_possible_values::<CliFlowValue>(),
+            &[],
+            &["When omitted, the flow comes from chief.yaml or defaults."],
+        ),
+        schema_option(
+            Some("agent"),
+            None,
+            Some("AGENT"),
+            chief_option_help::AGENT,
+            false,
+            false,
+            None,
+            enum_possible_values::<CliAgentValue>(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("model"),
+            None,
+            Some("MODEL"),
+            chief_option_help::MODEL,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("model-reasoning-effort"),
+            None,
+            Some("MODEL_REASONING_EFFORT"),
+            chief_option_help::MODEL_REASONING_EFFORT,
+            false,
+            false,
+            None,
+            enum_possible_values::<CliReasoningEffortValue>(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("agent-extra-args"),
+            None,
+            Some("AGENT_EXTRA_ARGS"),
+            chief_option_help::AGENT_EXTRA_ARGS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &["Accepts a YAML/JSON string list such as [] or [\"--sandbox\",\"workspace-write\"]."],
+        ),
+        schema_option(
+            Some("mcp-servers"),
+            None,
+            Some("MCP_SERVERS"),
+            chief_option_help::MCP_SERVERS,
+            false,
+            false,
+            None,
+            vec!["personal".to_owned()],
+            &[],
+            &["Structured values accept a YAML/JSON object describing MCP server definitions."],
+        ),
+        schema_option(
+            Some("max-retries"),
+            None,
+            Some("MAX_RETRIES"),
+            chief_option_help::MAX_RETRIES,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("max-loop-iterations"),
+            None,
+            Some("MAX_LOOP_ITERATIONS"),
+            chief_option_help::MAX_LOOP_ITERATIONS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("required-stable-iterations"),
+            None,
+            Some("REQUIRED_STABLE_ITERATIONS"),
+            chief_option_help::REQUIRED_STABLE_ITERATIONS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("agent-timeout-seconds"),
+            None,
+            Some("AGENT_TIMEOUT_SECONDS"),
+            chief_option_help::AGENT_TIMEOUT_SECONDS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("suite-command-timeout-seconds"),
+            None,
+            Some("SUITE_COMMAND_TIMEOUT_SECONDS"),
+            chief_option_help::SUITE_COMMAND_TIMEOUT_SECONDS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("agent-log-max-output-lines"),
+            None,
+            Some("AGENT_LOG_MAX_OUTPUT_LINES"),
+            chief_option_help::AGENT_LOG_MAX_OUTPUT_LINES,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("agent-log-max-output-chars"),
+            None,
+            Some("AGENT_LOG_MAX_OUTPUT_CHARS"),
+            chief_option_help::AGENT_LOG_MAX_OUTPUT_CHARS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("respect-limits"),
+            None,
+            Some("RESPECT_LIMITS"),
+            chief_option_help::RESPECT_LIMITS,
+            false,
+            false,
+            None,
+            bool_possible_values(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("use-agent-log-truncation-for-stdout-logs"),
+            None,
+            Some("USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS"),
+            chief_option_help::USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS,
+            false,
+            false,
+            None,
+            bool_possible_values(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("file"),
+            None,
+            Some("FILE"),
+            "Markdown file used when running flow=loop_file via the default `chief` command.",
+            false,
+            false,
+            None,
+            Vec::new(),
+            &["prompt"],
+            &["Only valid when the resolved flow is `loop_file`."],
+        ),
+        schema_option(
+            Some("prompt"),
+            None,
+            Some("PROMPT"),
+            "Prompt text used when running flow=loop_file via the default `chief` command.",
+            false,
+            false,
+            None,
+            Vec::new(),
+            &["file"],
+            &["Only valid when the resolved flow is `loop_file`."],
+        ),
+        schema_option(
+            Some("watch-only"),
+            None,
+            Some("WATCH_ONLY"),
+            "Scope convergence to these paths only (repeatable). Ignored for non-loop_file flows.",
+            false,
+            true,
+            None,
+            Vec::new(),
+            &[],
+            &["A stability pass only counts when none of the watched paths changed."],
+        ),
+        schema_option(
+            Some("requirements"),
+            None,
+            Some("REQUIREMENTS"),
+            "Inline requirements text to process before any flow execution.",
+            false,
+            true,
+            None,
+            Vec::new(),
+            &[],
+            &[
+                "If any requirements are provided, Chief processes requirements and exits without running a flow.",
+            ],
+        ),
+        schema_option(
+            Some("requirements-file"),
+            None,
+            Some("REQUIREMENTS_FILE"),
+            "File whose contents are appended to inline requirements before processing.",
+            false,
+            true,
+            None,
+            Vec::new(),
+            &[],
+            &["The file content is appended after inline `--requirements` chunks."],
+        ),
+    ];
+
+    let suite_local_options = vec![
+        schema_option(
+            Some("suite"),
+            None,
+            Some("SUITE"),
+            "Suite name as configured in chief.yaml.",
+            true,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+        schema_option(
+            Some("target"),
+            None,
+            Some("TARGET"),
+            "Optional target value used for {target} placeholder replacement.",
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &[],
+        ),
+    ];
+
+    CliSchema {
+        name: "chief".to_owned(),
+        about: "Chief orchestration CLI".to_owned(),
+        long_about: CHIEF_LONG_ABOUT.to_owned(),
+        config_precedence: vec![
+            "defaults".to_owned(),
+            ".chief/chief.yaml".to_owned(),
+            "CLI flags".to_owned(),
+        ],
+        examples: vec![
+            "chief --flow loop_file --prompt \"Tighten the parser error messages\"".to_owned(),
+            "chief loop_file --file prompts/task.md".to_owned(),
+            "chief suite test --suite backend --target src/bin/chief.rs".to_owned(),
+            "chief schema --json".to_owned(),
+            "chief config show --resolved".to_owned(),
+            "chief list suites --json".to_owned(),
+            "chief explain flow --flow bd".to_owned(),
+            "chief doctor".to_owned(),
+        ],
+        exit_codes: vec![
+            SchemaExitCode {
+                code: 0,
+                meaning: "Success".to_owned(),
+            },
+            SchemaExitCode {
+                code: 1,
+                meaning: "Command or runtime error".to_owned(),
+            },
+        ],
+        global_options,
+        commands: vec![
+            SchemaCommand {
+                name: "init".to_owned(),
+                aliases: Vec::new(),
+                about: "Initialize Chief config files in a new project directory.".to_owned(),
+                options: vec![
+                    schema_option(
+                        Some("chief-root"),
+                        None,
+                        Some("CHIEF_ROOT"),
+                        "Path to the Chief repo root that contains *.example.yaml files.",
+                        false,
+                        false,
+                        Some("../chief"),
+                        Vec::new(),
+                        &[],
+                        &[],
+                    ),
+                    schema_option(
+                        Some("beads"),
+                        None,
+                        Some("BEADS"),
+                        "Initialize beads integration (runs `bd init`).",
+                        false,
+                        false,
+                        Some("false"),
+                        bool_possible_values(),
+                        &[],
+                        &[],
+                    ),
+                ],
+                subcommands: Vec::new(),
+                notes: vec!["Global override flags are also accepted.".to_owned()],
+            },
+            SchemaCommand {
+                name: "migrate".to_owned(),
+                aliases: Vec::new(),
+                about: "Move legacy root-level chief files into .chief/.".to_owned(),
+                options: Vec::new(),
+                subcommands: Vec::new(),
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "clean-done".to_owned(),
+                aliases: Vec::new(),
+                about: "Remove completed todos that have a commit hash.".to_owned(),
+                options: Vec::new(),
+                subcommands: Vec::new(),
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "check".to_owned(),
+                aliases: Vec::new(),
+                about: "Run project pre-run checks.".to_owned(),
+                options: vec![schema_option(
+                    Some("force"),
+                    None,
+                    Some("FORCE"),
+                    "Force executing checks even when cached readiness is still valid.",
+                    false,
+                    false,
+                    Some("false"),
+                    bool_possible_values(),
+                    &[],
+                    &[],
+                )],
+                subcommands: Vec::new(),
+                notes: vec!["Global override flags are also accepted.".to_owned()],
+            },
+            SchemaCommand {
+                name: "tail-events".to_owned(),
+                aliases: Vec::new(),
+                about: "Print recent project events.".to_owned(),
+                options: vec![schema_option(
+                    Some("limit"),
+                    Some('n'),
+                    Some("LIMIT"),
+                    "Maximum number of most-recent events to print.",
+                    false,
+                    false,
+                    Some("50"),
+                    Vec::new(),
+                    &[],
+                    &[],
+                )],
+                subcommands: Vec::new(),
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "suite".to_owned(),
+                aliases: Vec::new(),
+                about: "Run suite-level commands from chief.yaml for a specific suite.".to_owned(),
+                options: Vec::new(),
+                subcommands: vec![
+                    SchemaCommand {
+                        name: "test".to_owned(),
+                        aliases: Vec::new(),
+                        about: "Run the suite test command.".to_owned(),
+                        options: suite_local_options.clone(),
+                        subcommands: Vec::new(),
+                        notes: vec!["Global override flags are also accepted.".to_owned()],
+                    },
+                    SchemaCommand {
+                        name: "test_init".to_owned(),
+                        aliases: vec!["test-init".to_owned()],
+                        about: "Run the suite test_init command.".to_owned(),
+                        options: vec![schema_option(
+                            Some("suite"),
+                            None,
+                            Some("SUITE"),
+                            "Suite name as configured in chief.yaml.",
+                            true,
+                            false,
+                            None,
+                            Vec::new(),
+                            &[],
+                            &[],
+                        )],
+                        subcommands: Vec::new(),
+                        notes: vec!["Global override flags are also accepted.".to_owned()],
+                    },
+                    SchemaCommand {
+                        name: "test_setup".to_owned(),
+                        aliases: vec!["test-setup".to_owned()],
+                        about: "Run the suite test_setup command.".to_owned(),
+                        options: vec![schema_option(
+                            Some("suite"),
+                            None,
+                            Some("SUITE"),
+                            "Suite name as configured in chief.yaml.",
+                            true,
+                            false,
+                            None,
+                            Vec::new(),
+                            &[],
+                            &[],
+                        )],
+                        subcommands: Vec::new(),
+                        notes: vec!["Global override flags are also accepted.".to_owned()],
+                    },
+                    SchemaCommand {
+                        name: "lint".to_owned(),
+                        aliases: vec!["linting".to_owned()],
+                        about: "Run the suite lint command.".to_owned(),
+                        options: suite_local_options.clone(),
+                        subcommands: Vec::new(),
+                        notes: vec!["Global override flags are also accepted.".to_owned()],
+                    },
+                    SchemaCommand {
+                        name: "lint_fix".to_owned(),
+                        aliases: vec![
+                            "lint-fix".to_owned(),
+                            "linting_fix".to_owned(),
+                            "linting-fix".to_owned(),
+                        ],
+                        about: "Run the suite lint_fix command.".to_owned(),
+                        options: suite_local_options,
+                        subcommands: Vec::new(),
+                        notes: vec!["Global override flags are also accepted.".to_owned()],
+                    },
+                ],
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "loop_file".to_owned(),
+                aliases: vec!["loop-file".to_owned()],
+                about: "Execute one loop_file flow run from a markdown file.".to_owned(),
+                options: vec![
+                    schema_option(
+                        Some("file"),
+                        None,
+                        Some("FILE"),
+                        "Markdown file path to load as the loop_file task body.",
+                        false,
+                        false,
+                        None,
+                        Vec::new(),
+                        &["prompt"],
+                        &[],
+                    ),
+                    schema_option(
+                        Some("prompt"),
+                        None,
+                        Some("PROMPT"),
+                        "Prompt text for the loop_file task body.",
+                        false,
+                        false,
+                        None,
+                        Vec::new(),
+                        &["file"],
+                        &[],
+                    ),
+                    schema_option(
+                        Some("watch-only"),
+                        None,
+                        Some("WATCH_ONLY"),
+                        "Scope convergence to these paths only (repeatable).",
+                        false,
+                        true,
+                        None,
+                        Vec::new(),
+                        &[],
+                        &["Stability only counts when none of the watched paths changed."],
+                    ),
+                ],
+                subcommands: Vec::new(),
+                notes: vec!["Global override flags are also accepted.".to_owned()],
+            },
+            SchemaCommand {
+                name: "bd".to_owned(),
+                aliases: Vec::new(),
+                about: "Run a bd-driven convergence loop using prompts/bd.md.".to_owned(),
+                options: Vec::new(),
+                subcommands: Vec::new(),
+                notes: vec!["Global override flags are also accepted.".to_owned()],
+            },
+            SchemaCommand {
+                name: "refactor".to_owned(),
+                aliases: Vec::new(),
+                about: "Run queued todos using the refactor flow.".to_owned(),
+                options: Vec::new(),
+                subcommands: Vec::new(),
+                notes: vec!["Global override flags are also accepted.".to_owned()],
+            },
+            SchemaCommand {
+                name: "schema".to_owned(),
+                aliases: Vec::new(),
+                about: "Print a self-describing schema for the CLI.".to_owned(),
+                options: vec![schema_option(
+                    Some("json"),
+                    None,
+                    Some("JSON"),
+                    "Emit machine-readable JSON instead of human-readable text.",
+                    false,
+                    false,
+                    Some("false"),
+                    bool_possible_values(),
+                    &[],
+                    &[],
+                )],
+                subcommands: Vec::new(),
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "config".to_owned(),
+                aliases: Vec::new(),
+                about: "Inspect chief.yaml content and effective overrides.".to_owned(),
+                options: Vec::new(),
+                subcommands: vec![SchemaCommand {
+                    name: "show".to_owned(),
+                    aliases: Vec::new(),
+                    about: "Show raw or resolved chief.yaml content.".to_owned(),
+                    options: vec![
+                        schema_option(
+                            Some("resolved"),
+                            None,
+                            Some("RESOLVED"),
+                            "Render defaults + chief.yaml + CLI overrides instead of the raw file content.",
+                            false,
+                            false,
+                            Some("false"),
+                            bool_possible_values(),
+                            &[],
+                            &[],
+                        ),
+                        schema_option(
+                            Some("json"),
+                            None,
+                            Some("JSON"),
+                            "Emit machine-readable JSON instead of YAML/text.",
+                            false,
+                            false,
+                            Some("false"),
+                            bool_possible_values(),
+                            &[],
+                            &[],
+                        ),
+                    ],
+                    subcommands: Vec::new(),
+                    notes: vec!["Global override flags are also accepted.".to_owned()],
+                }],
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "list".to_owned(),
+                aliases: Vec::new(),
+                about: "List discoverable entities from chief.yaml.".to_owned(),
+                options: Vec::new(),
+                subcommands: vec![SchemaCommand {
+                    name: "suites".to_owned(),
+                    aliases: Vec::new(),
+                    about: "List suites defined in chief.yaml.".to_owned(),
+                    options: vec![schema_option(
+                        Some("json"),
+                        None,
+                        Some("JSON"),
+                        "Emit machine-readable JSON instead of human-readable text.",
+                        false,
+                        false,
+                        Some("false"),
+                        bool_possible_values(),
+                        &[],
+                        &[],
+                    )],
+                    subcommands: Vec::new(),
+                    notes: vec!["Global override flags are also accepted.".to_owned()],
+                }],
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "explain".to_owned(),
+                aliases: Vec::new(),
+                about: "Explain flow behavior and expected inputs.".to_owned(),
+                options: Vec::new(),
+                subcommands: vec![SchemaCommand {
+                    name: "flow".to_owned(),
+                    aliases: Vec::new(),
+                    about: "Explain how a flow behaves and which inputs it expects.".to_owned(),
+                    options: vec![
+                        schema_option(
+                            Some("flow"),
+                            None,
+                            Some("FLOW"),
+                            "Flow to describe. Defaults to the resolved flow for this project.",
+                            false,
+                            false,
+                            None,
+                            enum_possible_values::<CliFlowValue>(),
+                            &[],
+                            &[],
+                        ),
+                        schema_option(
+                            Some("json"),
+                            None,
+                            Some("JSON"),
+                            "Emit machine-readable JSON instead of human-readable text.",
+                            false,
+                            false,
+                            Some("false"),
+                            bool_possible_values(),
+                            &[],
+                            &[],
+                        ),
+                    ],
+                    subcommands: Vec::new(),
+                    notes: vec!["Global override flags are also accepted.".to_owned()],
+                }],
+                notes: Vec::new(),
+            },
+            SchemaCommand {
+                name: "doctor".to_owned(),
+                aliases: Vec::new(),
+                about: "Validate local project and tool readiness for Chief.".to_owned(),
+                options: vec![schema_option(
+                    Some("json"),
+                    None,
+                    Some("JSON"),
+                    "Emit machine-readable JSON instead of human-readable text.",
+                    false,
+                    false,
+                    Some("false"),
+                    bool_possible_values(),
+                    &[],
+                    &[],
+                )],
+                subcommands: Vec::new(),
+                notes: vec!["Global override flags are also accepted.".to_owned()],
+            },
+        ],
+    }
+}
+
+fn render_schema_text(schema: &CliSchema) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("{}: {}", schema.name, schema.about));
+    lines.push(String::new());
+    lines.push("Config precedence:".to_owned());
+    for step in &schema.config_precedence {
+        lines.push(format!("  - {step}"));
+    }
+    lines.push(String::new());
+    lines.push("Global options:".to_owned());
+    for option in &schema.global_options {
+        let mut line = format!("  --{}", option.long.as_deref().unwrap_or_default());
+        if let Some(value_name) = &option.value_name {
+            line.push(' ');
+            line.push('<');
+            line.push_str(value_name);
+            line.push('>');
+        }
+        line.push_str(": ");
+        line.push_str(&option.help);
+        if !option.possible_values.is_empty() {
+            line.push_str(" Possible values: ");
+            line.push_str(&option.possible_values.join(", "));
+            line.push('.');
+        }
+        lines.push(line);
+    }
+    lines.push(String::new());
+    lines.push("Commands:".to_owned());
+    for command in &schema.commands {
+        let mut command_line = format!("  {}", command.name);
+        if !command.aliases.is_empty() {
+            command_line.push_str(" (aliases: ");
+            command_line.push_str(&command.aliases.join(", "));
+            command_line.push(')');
+        }
+        command_line.push_str(": ");
+        command_line.push_str(&command.about);
+        lines.push(command_line);
+        for subcommand in &command.subcommands {
+            let mut subcommand_line = format!("    {} {}", command.name, subcommand.name);
+            if !subcommand.aliases.is_empty() {
+                subcommand_line.push_str(" (aliases: ");
+                subcommand_line.push_str(&subcommand.aliases.join(", "));
+                subcommand_line.push(')');
+            }
+            subcommand_line.push_str(": ");
+            subcommand_line.push_str(&subcommand.about);
+            lines.push(subcommand_line);
+        }
+    }
+    lines.join("\n")
+}
+
+fn build_flow_explanation(flow: CliFlowValue) -> FlowExplanation {
+    match flow {
+        CliFlowValue::LoopFile => FlowExplanation {
+            flow: flow.as_str().to_owned(),
+            summary: "Run a single convergence task from inline prompt text or a markdown file."
+                .to_owned(),
+            execution_model:
+                "Chief creates a synthetic todo, runs loop_file convergence, and prints a run report."
+                    .to_owned(),
+            inputs: vec![
+                "--file <path> or --prompt <text>".to_owned(),
+                "--watch-only <path> (repeatable)".to_owned(),
+            ],
+            disallowed_inputs: vec![
+                "Providing both --file and --prompt together.".to_owned(),
+                "Using root-level --file/--prompt when the resolved flow is not loop_file."
+                    .to_owned(),
+            ],
+            prompt_sources: vec![
+                "The provided markdown file content.".to_owned(),
+                "The provided CLI prompt text.".to_owned(),
+            ],
+            examples: vec![
+                "chief loop_file --file prompts/task.md".to_owned(),
+                "chief --flow loop_file --prompt \"Refine the API error handling\"".to_owned(),
+            ],
+        },
+        CliFlowValue::Bd => FlowExplanation {
+            flow: flow.as_str().to_owned(),
+            summary: "Drain `bd ready --json` work until no ready items remain.".to_owned(),
+            execution_model:
+                "Chief synthesizes one bd todo, feeds `prompts/bd.md`, and loops until readiness is empty."
+                    .to_owned(),
+            inputs: vec!["No flow-specific inputs.".to_owned()],
+            disallowed_inputs: vec![
+                "--file and --prompt are not used by bd.".to_owned(),
+                "--watch-only is ignored by bd.".to_owned(),
+            ],
+            prompt_sources: vec!["prompts/bd.md".to_owned(), "`bd ready --json` output".to_owned()],
+            examples: vec!["chief bd".to_owned(), "chief --flow bd".to_owned()],
+        },
+        CliFlowValue::Refactor => FlowExplanation {
+            flow: flow.as_str().to_owned(),
+            summary: "Run queued todos using the refactor flow.".to_owned(),
+            execution_model:
+                "Chief claims pending todos from storage, runs them with retry logic, and prints a run report."
+                    .to_owned(),
+            inputs: vec!["No flow-specific CLI inputs.".to_owned()],
+            disallowed_inputs: vec![
+                "--file and --prompt are not used by refactor.".to_owned(),
+                "--watch-only is ignored by refactor.".to_owned(),
+            ],
+            prompt_sources: vec!["Queued todos from storage/todos state.".to_owned()],
+            examples: vec!["chief refactor".to_owned(), "chief --flow refactor".to_owned()],
+        },
+    }
+}
+
+fn resolve_project_dir(project_dir: &Path) -> Result<PathBuf> {
+    if project_dir.is_absolute() {
+        return Ok(project_dir.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()
+        .context("failed resolving current directory for --project-dir")?
+        .join(project_dir))
+}
+
+fn ensure_project_dir_exists(project_dir: &Path) -> Result<()> {
+    if !project_dir.exists() {
+        bail!(
+            "project directory does not exist: {}",
+            project_dir.display()
+        );
+    }
+    if !project_dir.is_dir() {
+        bail!("project path is not a directory: {}", project_dir.display());
+    }
+    Ok(())
+}
+
+fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
+    let override_fields = [
+        ("flow", overrides.flow.is_some()),
+        ("agent", overrides.agent.is_some()),
+        ("model", overrides.model.is_some()),
+        (
+            "model_reasoning_effort",
+            overrides.model_reasoning_effort.is_some(),
+        ),
+        ("agent_extra_args", overrides.agent_extra_args.is_some()),
+        ("mcp_servers", overrides.mcp_servers.is_some()),
+        ("max_retries", overrides.max_retries.is_some()),
+        (
+            "max_loop_iterations",
+            overrides.max_loop_iterations.is_some(),
+        ),
+        (
+            "required_stable_iterations",
+            overrides.required_stable_iterations.is_some(),
+        ),
+        (
+            "agent_timeout_seconds",
+            overrides.agent_timeout_seconds.is_some(),
+        ),
+        (
+            "suite_command_timeout_seconds",
+            overrides.suite_command_timeout_seconds.is_some(),
+        ),
+        (
+            "agent_log_max_output_lines",
+            overrides.agent_log_max_output_lines.is_some(),
+        ),
+        (
+            "agent_log_max_output_chars",
+            overrides.agent_log_max_output_chars.is_some(),
+        ),
+        ("respect_limits", overrides.respect_limits.is_some()),
+        (
+            "use_agent_log_truncation_for_stdout_logs",
+            overrides.use_agent_log_truncation_for_stdout_logs.is_some(),
+        ),
+    ];
+
+    override_fields
+        .iter()
+        .filter(|(_, active)| *active)
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+fn resolved_agent_binary(agent_name: &str) -> (&'static str, Option<String>) {
+    match agent_name.trim().to_ascii_lowercase().as_str() {
+        "claude" => ("claude", None),
+        "opencode" => ("opencode", None),
+        "cursor" | "cursor-agent" => ("cursor-agent", None),
+        "codex" => ("codex", None),
+        other => (
+            "codex",
+            Some(format!(
+                "unsupported agent '{other}' falls back to codex at runtime"
+            )),
+        ),
+    }
+}
+
+fn command_presence_detail(command: &str) -> Result<String> {
+    match ProcessCommand::new(command).arg("--version").output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            if !stdout.is_empty() {
+                Ok(stdout.lines().next().unwrap_or(&stdout).to_owned())
+            } else if !stderr.is_empty() {
+                Ok(stderr.lines().next().unwrap_or(&stderr).to_owned())
+            } else {
+                Ok("installed".to_owned())
+            }
+        }
+        Err(err) => Err(err).with_context(|| format!("failed to run `{command} --version`")),
+    }
+}
+
+fn build_doctor_report(project_dir: &Path, cli: &Cli) -> DoctorReport {
+    let config_path = paths::chief_yaml_path(project_dir);
+    let mut checks = Vec::new();
+
+    if project_dir.exists() && project_dir.is_dir() {
+        checks.push(DoctorCheck {
+            name: "project_dir".to_owned(),
+            status: "ok".to_owned(),
+            detail: project_dir.display().to_string(),
+        });
+    } else if project_dir.exists() {
+        checks.push(DoctorCheck {
+            name: "project_dir".to_owned(),
+            status: "fail".to_owned(),
+            detail: format!("{} exists but is not a directory", project_dir.display()),
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "project_dir".to_owned(),
+            status: "fail".to_owned(),
+            detail: format!("{} does not exist", project_dir.display()),
+        });
+    }
+
+    if project_dir.exists() && project_dir.is_dir() {
+        match chief::git::ShellGitOps::discover(project_dir) {
+            Ok(_) => checks.push(DoctorCheck {
+                name: "git_repository".to_owned(),
+                status: "ok".to_owned(),
+                detail: "git repository discovered".to_owned(),
+            }),
+            Err(err) => checks.push(DoctorCheck {
+                name: "git_repository".to_owned(),
+                status: "fail".to_owned(),
+                detail: err.to_string(),
+            }),
+        }
+    }
+
+    if config_path.is_file() {
+        checks.push(DoctorCheck {
+            name: "chief_yaml".to_owned(),
+            status: "ok".to_owned(),
+            detail: config_path.display().to_string(),
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "chief_yaml".to_owned(),
+            status: "fail".to_owned(),
+            detail: format!(
+                "missing {}; run `chief init` or copy .chief/chief.example.yaml",
+                config_path.display()
+            ),
+        });
+    }
+
+    if config_path.is_file() {
+        match load_chief_yaml_with_cli_overrides(project_dir, cli) {
+            Ok(chief_yaml) => {
+                checks.push(DoctorCheck {
+                    name: "config_parse".to_owned(),
+                    status: "ok".to_owned(),
+                    detail: "chief.yaml parsed successfully".to_owned(),
+                });
+
+                let flow_name = chief_yaml.chief.flow.trim().to_owned();
+                match flow_name.parse::<FlowKind>() {
+                    Ok(flow_kind) => checks.push(DoctorCheck {
+                        name: "flow".to_owned(),
+                        status: "ok".to_owned(),
+                        detail: format!("resolved flow: {}", flow_kind.as_str()),
+                    }),
+                    Err(err) => checks.push(DoctorCheck {
+                        name: "flow".to_owned(),
+                        status: "fail".to_owned(),
+                        detail: err.to_string(),
+                    }),
+                }
+
+                let (agent_binary, fallback_note) = resolved_agent_binary(&chief_yaml.chief.agent);
+                checks.push(DoctorCheck {
+                    name: "agent_config".to_owned(),
+                    status: if fallback_note.is_some() {
+                        "warn"
+                    } else {
+                        "ok"
+                    }
+                    .to_owned(),
+                    detail: fallback_note.unwrap_or_else(|| {
+                        format!("configured agent resolves to `{agent_binary}`")
+                    }),
+                });
+
+                match command_presence_detail(agent_binary) {
+                    Ok(detail) => checks.push(DoctorCheck {
+                        name: "agent_binary".to_owned(),
+                        status: "ok".to_owned(),
+                        detail: format!("{agent_binary}: {detail}"),
+                    }),
+                    Err(err) => checks.push(DoctorCheck {
+                        name: "agent_binary".to_owned(),
+                        status: "fail".to_owned(),
+                        detail: err.to_string(),
+                    }),
+                }
+
+                if flow_name.eq_ignore_ascii_case("bd") {
+                    match command_presence_detail("bd") {
+                        Ok(detail) => checks.push(DoctorCheck {
+                            name: "bd_binary".to_owned(),
+                            status: "ok".to_owned(),
+                            detail: format!("bd: {detail}"),
+                        }),
+                        Err(err) => checks.push(DoctorCheck {
+                            name: "bd_binary".to_owned(),
+                            status: "fail".to_owned(),
+                            detail: err.to_string(),
+                        }),
+                    }
+                }
+
+                checks.push(DoctorCheck {
+                    name: "suite_count".to_owned(),
+                    status: if chief_yaml.suites.is_empty() {
+                        "warn"
+                    } else {
+                        "ok"
+                    }
+                    .to_owned(),
+                    detail: format!("{} suite(s) configured", chief_yaml.suites.len()),
+                });
+            }
+            Err(err) => checks.push(DoctorCheck {
+                name: "config_parse".to_owned(),
+                status: "fail".to_owned(),
+                detail: err.to_string(),
+            }),
+        }
+    }
+
+    let overall_status = if checks.iter().any(|check| check.status == "fail") {
+        "fail"
+    } else if checks.iter().any(|check| check.status == "warn") {
+        "warn"
+    } else {
+        "ok"
+    };
+
+    DoctorReport {
+        project_dir: project_dir.display().to_string(),
+        config_path: config_path.display().to_string(),
+        overall_status: overall_status.to_owned(),
+        checks,
+    }
+}
+
+fn render_doctor_report_text(report: &DoctorReport) -> String {
+    let mut lines = vec![
+        format!("project_dir: {}", report.project_dir),
+        format!("config_path: {}", report.config_path),
+        format!("overall_status: {}", report.overall_status),
+        String::new(),
+    ];
+
+    for check in &report.checks {
+        lines.push(format!(
+            "[{}] {}: {}",
+            check.status, check.name, check.detail
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn main() {
@@ -417,6 +1921,19 @@ fn run_with_db_reset_prompt() -> Result<()> {
     }
 }
 
+fn command_requires_chief_yaml(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Init(_)
+            | Commands::Migrate
+            | Commands::Schema(_)
+            | Commands::Config(_)
+            | Commands::List(_)
+            | Commands::Explain(_)
+            | Commands::Doctor(_)
+    )
+}
+
 fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
     match command {
         Commands::Init(args) => init_files::run_init(cli, args),
@@ -428,6 +1945,11 @@ fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
         Commands::LoopFile(args) => run_loop_file(cli, args),
         Commands::Bd => run_bd(cli),
         Commands::Refactor => run_refactor(cli),
+        Commands::Schema(args) => run_schema(args),
+        Commands::Config(args) => run_config(cli, args),
+        Commands::List(args) => run_list(cli, args),
+        Commands::Explain(args) => run_explain(cli, args),
+        Commands::Doctor(args) => run_doctor(cli, args),
     }
 }
 
@@ -443,7 +1965,12 @@ fn ensure_chief_yaml_exists(project_dir: &Path) -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    if !matches!(cli.command, Some(Commands::Init(_) | Commands::Migrate)) {
+    if cli
+        .command
+        .as_ref()
+        .map(command_requires_chief_yaml)
+        .unwrap_or(true)
+    {
         ensure_chief_yaml_exists(&cli.project_dir)?;
     }
 
@@ -724,23 +2251,8 @@ fn run_tail_events(cli: &Cli, args: &TailEventsArgs) -> Result<()> {
 }
 
 fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
-    let project_dir = if cli.project_dir.is_absolute() {
-        cli.project_dir.clone()
-    } else {
-        std::env::current_dir()
-            .context("failed resolving current directory for --project-dir")?
-            .join(&cli.project_dir)
-    };
-
-    if !project_dir.exists() {
-        bail!(
-            "project directory does not exist: {}",
-            project_dir.display()
-        );
-    }
-    if !project_dir.is_dir() {
-        bail!("project path is not a directory: {}", project_dir.display());
-    }
+    let project_dir = resolve_project_dir(&cli.project_dir)?;
+    ensure_project_dir_exists(&project_dir)?;
 
     let context = load_context_with_cli_overrides(&project_dir, cli)?;
     let project_name = context.name.clone();
@@ -820,6 +2332,219 @@ fn run_check(cli: &Cli, args: &CheckArgs) -> Result<()> {
 
     if result.readiness.status != "ready" {
         bail!("{}", result.readiness.summary);
+    }
+
+    Ok(())
+}
+
+fn run_schema(args: &SchemaArgs) -> Result<()> {
+    let schema = build_cli_schema();
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&schema)?);
+    } else {
+        println!("{}", render_schema_text(&schema));
+    }
+    Ok(())
+}
+
+fn run_config(cli: &Cli, args: &ConfigArgs) -> Result<()> {
+    match &args.command {
+        ConfigCommand::Show(args) => run_config_show(cli, args),
+    }
+}
+
+fn run_config_show(cli: &Cli, args: &ConfigShowArgs) -> Result<()> {
+    let project_dir = resolve_project_dir(&cli.project_dir)?;
+    let config_path = paths::chief_yaml_path(&project_dir);
+
+    if args.resolved {
+        let chief_yaml = load_chief_yaml_with_cli_overrides(&project_dir, cli)?;
+        if args.json {
+            let payload = serde_json::json!({
+                "project_dir": project_dir.display().to_string(),
+                "config_path": config_path.display().to_string(),
+                "resolved": true,
+                "active_overrides": active_override_names(&cli.chief),
+                "config": chief_yaml,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("project_dir: {}", project_dir.display());
+            println!("config_path: {}", config_path.display());
+            println!("resolved: true");
+            let active_overrides = active_override_names(&cli.chief);
+            if !active_overrides.is_empty() {
+                println!("active_overrides: {}", active_overrides.join(", "));
+            }
+            println!();
+            print!("{}", serde_yaml::to_string(&chief_yaml)?);
+        }
+        return Ok(());
+    }
+
+    match fs::read_to_string(&config_path) {
+        Ok(raw) => {
+            if args.json {
+                let payload = serde_json::json!({
+                    "project_dir": project_dir.display().to_string(),
+                    "config_path": config_path.display().to_string(),
+                    "resolved": false,
+                    "exists": true,
+                    "raw_yaml": raw,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("project_dir: {}", project_dir.display());
+                println!("config_path: {}", config_path.display());
+                println!("resolved: false");
+                println!();
+                print!("{raw}");
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            if args.json {
+                let payload = serde_json::json!({
+                    "project_dir": project_dir.display().to_string(),
+                    "config_path": config_path.display().to_string(),
+                    "resolved": false,
+                    "exists": false,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("chief.yaml not found at {}", config_path.display());
+            }
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    }
+
+    Ok(())
+}
+
+fn run_list(cli: &Cli, args: &ListArgs) -> Result<()> {
+    match &args.command {
+        ListCommand::Suites(args) => run_list_suites(cli, args),
+    }
+}
+
+fn run_list_suites(cli: &Cli, args: &ListSuitesArgs) -> Result<()> {
+    let project_dir = resolve_project_dir(&cli.project_dir)?;
+    let chief_yaml = load_chief_yaml_with_cli_overrides(&project_dir, cli)?;
+    let suites: Vec<SuiteSummary> = chief_yaml.suites.iter().map(SuiteSummary::from).collect();
+
+    if args.json {
+        let payload = serde_json::json!({
+            "project_dir": project_dir.display().to_string(),
+            "suite_count": suites.len(),
+            "suites": suites,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("project_dir: {}", project_dir.display());
+    println!("suite_count: {}", suites.len());
+    if suites.is_empty() {
+        println!();
+        println!("No suites configured.");
+        return Ok(());
+    }
+
+    for suite in suites {
+        println!();
+        println!("suite: {}", suite.name);
+        println!("  language: {}", suite.language);
+        println!("  framework: {}", suite.framework);
+        println!("  test_root: {}", suite.test_root);
+        println!("  target_type: {}", suite.target_type);
+        if let Some(default_target) = suite.default_target {
+            println!("  default_target: {}", default_target);
+        }
+        println!("  test_command: {}", suite.test_command);
+        if let Some(command) = suite.test_init {
+            println!("  test_init: {}", command);
+        }
+        if let Some(command) = suite.test_setup {
+            println!("  test_setup: {}", command);
+        }
+        if let Some(command) = suite.lint_command {
+            println!("  lint_command: {}", command);
+        }
+        if let Some(command) = suite.lint_fix_command {
+            println!("  lint_fix_command: {}", command);
+        }
+        println!("  cache_mode: {}", suite.cache_mode);
+        if let Some(timeout) = suite.command_timeout_seconds {
+            println!("  command_timeout_seconds: {}", timeout);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_explain(cli: &Cli, args: &ExplainArgs) -> Result<()> {
+    match &args.command {
+        ExplainCommand::Flow(args) => run_explain_flow(cli, args),
+    }
+}
+
+fn run_explain_flow(cli: &Cli, args: &ExplainFlowArgs) -> Result<()> {
+    let project_dir = resolve_project_dir(&cli.project_dir)?;
+    let flow = if let Some(flow) = args.flow {
+        flow
+    } else {
+        let chief_yaml = load_chief_yaml_with_cli_overrides(&project_dir, cli)?;
+        let flow_kind: FlowKind = chief_yaml
+            .chief
+            .flow
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid flow '{}'", chief_yaml.chief.flow.trim()))?;
+        CliFlowValue::from_flow_kind(flow_kind)
+    };
+    let explanation = build_flow_explanation(flow);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&explanation)?);
+        return Ok(());
+    }
+
+    println!("flow: {}", explanation.flow);
+    println!("summary: {}", explanation.summary);
+    println!("execution_model: {}", explanation.execution_model);
+    println!();
+    println!("inputs:");
+    for value in explanation.inputs {
+        println!("  - {value}");
+    }
+    println!("disallowed_inputs:");
+    for value in explanation.disallowed_inputs {
+        println!("  - {value}");
+    }
+    println!("prompt_sources:");
+    for value in explanation.prompt_sources {
+        println!("  - {value}");
+    }
+    println!("examples:");
+    for value in explanation.examples {
+        println!("  - {value}");
+    }
+    Ok(())
+}
+
+fn run_doctor(cli: &Cli, args: &DoctorArgs) -> Result<()> {
+    let project_dir = resolve_project_dir(&cli.project_dir)?;
+    let report = build_doctor_report(&project_dir, cli);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", render_doctor_report_text(&report));
+    }
+
+    if report.has_failures() {
+        bail!("doctor found failing checks")
     }
 
     Ok(())
@@ -1781,47 +3506,7 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
             .use_agent_log_truncation_for_stdout_logs
     );
 
-    let override_fields = [
-        ("flow", overrides.flow.is_some()),
-        ("agent", overrides.agent.is_some()),
-        ("model", overrides.model.is_some()),
-        ("mcp_servers", overrides.mcp_servers.is_some()),
-        ("max_retries", overrides.max_retries.is_some()),
-        (
-            "max_loop_iterations",
-            overrides.max_loop_iterations.is_some(),
-        ),
-        (
-            "required_stable_iterations",
-            overrides.required_stable_iterations.is_some(),
-        ),
-        (
-            "agent_timeout_seconds",
-            overrides.agent_timeout_seconds.is_some(),
-        ),
-        (
-            "suite_command_timeout_seconds",
-            overrides.suite_command_timeout_seconds.is_some(),
-        ),
-        (
-            "agent_log_max_output_lines",
-            overrides.agent_log_max_output_lines.is_some(),
-        ),
-        (
-            "agent_log_max_output_chars",
-            overrides.agent_log_max_output_chars.is_some(),
-        ),
-        ("respect_limits", overrides.respect_limits.is_some()),
-        (
-            "use_agent_log_truncation_for_stdout_logs",
-            overrides.use_agent_log_truncation_for_stdout_logs.is_some(),
-        ),
-    ];
-    let active_overrides: Vec<_> = override_fields
-        .iter()
-        .filter(|(_, active)| *active)
-        .map(|(name, _)| *name)
-        .collect();
+    let active_overrides = active_override_names(overrides);
     if !active_overrides.is_empty() {
         println!(
             "{}",

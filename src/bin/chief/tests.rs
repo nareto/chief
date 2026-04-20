@@ -322,6 +322,35 @@ fn parse_root_file_option() {
 }
 
 #[test]
+fn parse_root_flow_option_accepts_loop_file_alias() {
+    let cli = Cli::try_parse_from(["chief", "--flow", "loop-file", "--prompt", "ship it"])
+        .expect("root --flow should accept loop-file alias");
+
+    assert_eq!(cli.chief.flow, Some(CliFlowValue::LoopFile));
+    assert_eq!(cli.prompt.as_deref(), Some("ship it"));
+}
+
+#[test]
+fn parse_agent_and_reasoning_options_use_typed_values() {
+    let cli = Cli::try_parse_from([
+        "chief",
+        "--agent",
+        "cursor",
+        "--model-reasoning-effort",
+        "xhigh",
+        "--prompt",
+        "inspect",
+    ])
+    .expect("typed agent and reasoning options should parse");
+
+    assert_eq!(cli.chief.agent, Some(CliAgentValue::CursorAgent));
+    assert_eq!(
+        cli.chief.model_reasoning_effort,
+        Some(CliReasoningEffortValue::Xhigh)
+    );
+}
+
+#[test]
 fn parse_loop_file_command() {
     let cli = Cli::try_parse_from(["chief", "loop_file", "--file", "plan.md"])
         .expect("loop_file command should parse");
@@ -348,6 +377,29 @@ fn parse_refactor_command() {
     let Some(Commands::Refactor) = cli.command else {
         panic!("expected refactor command");
     };
+}
+
+#[test]
+fn parse_introspection_commands() {
+    let schema =
+        Cli::try_parse_from(["chief", "schema", "--json"]).expect("schema command should parse");
+    assert!(matches!(schema.command, Some(Commands::Schema(_))));
+
+    let config = Cli::try_parse_from(["chief", "config", "show", "--resolved", "--json"])
+        .expect("config show command should parse");
+    assert!(matches!(config.command, Some(Commands::Config(_))));
+
+    let list = Cli::try_parse_from(["chief", "list", "suites", "--json"])
+        .expect("list suites command should parse");
+    assert!(matches!(list.command, Some(Commands::List(_))));
+
+    let explain = Cli::try_parse_from(["chief", "explain", "flow", "--flow", "bd"])
+        .expect("explain flow command should parse");
+    assert!(matches!(explain.command, Some(Commands::Explain(_))));
+
+    let doctor =
+        Cli::try_parse_from(["chief", "doctor", "--json"]).expect("doctor command should parse");
+    assert!(matches!(doctor.command, Some(Commands::Doctor(_))));
 }
 
 #[test]
@@ -410,6 +462,42 @@ fn cli_help_text_matches_chief_example_comments() {
 }
 
 #[test]
+fn cli_schema_lists_typed_values_and_introspection_commands() {
+    let schema = build_cli_schema();
+    let flow_option = schema
+        .global_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("flow"))
+        .expect("flow option should exist");
+    assert_eq!(
+        flow_option.possible_values,
+        vec!["loop_file", "bd", "refactor"]
+    );
+
+    let agent_option = schema
+        .global_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("agent"))
+        .expect("agent option should exist");
+    assert_eq!(
+        agent_option.possible_values,
+        vec!["codex", "claude", "opencode", "cursor-agent"]
+    );
+
+    let command_names: BTreeSet<_> = schema
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    for expected in ["schema", "config", "list", "explain", "doctor"] {
+        assert!(
+            command_names.contains(expected),
+            "schema should list introspection command {expected}"
+        );
+    }
+}
+
+#[test]
 fn cli_chief_overrides_parse_complex_fields() {
     let cli = Cli::try_parse_from([
         "chief",
@@ -430,6 +518,57 @@ fn cli_chief_overrides_parse_complex_fields() {
         Some(vec!["--sandbox".to_owned(), "workspace-write".to_owned()])
     );
     assert_eq!(overrides.mcp_servers, Some(None));
+}
+
+#[test]
+fn load_chief_yaml_with_cli_overrides_does_not_require_git_context() {
+    let temp = TempDir::new("load-chief-yaml-overrides");
+    write_chief_yaml(&temp.path, "chief:\n  flow: loop_file\n  agent: codex\n");
+
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        chief: CliChiefOverrides {
+            flow: Some(CliFlowValue::Refactor),
+            model: Some("gpt-5.4".to_owned()),
+            ..CliChiefOverrides::default()
+        },
+        file: None,
+        prompt: None,
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: Some(Commands::Config(ConfigArgs {
+            command: ConfigCommand::Show(ConfigShowArgs {
+                resolved: true,
+                json: false,
+            }),
+        })),
+    };
+
+    let chief_yaml = load_chief_yaml_with_cli_overrides(&temp.path, &cli)
+        .expect("resolved config should load without git context");
+    assert_eq!(chief_yaml.chief.flow, "refactor");
+    assert_eq!(chief_yaml.chief.model.as_deref(), Some("gpt-5.4"));
+}
+
+#[test]
+fn build_flow_explanation_describes_loop_file_inputs() {
+    let explanation = build_flow_explanation(CliFlowValue::LoopFile);
+    assert_eq!(explanation.flow, "loop_file");
+    assert!(
+        explanation
+            .inputs
+            .iter()
+            .any(|value| value.contains("--file <path>") || value.contains("--prompt <text>")),
+        "loop_file explanation should describe file/prompt inputs"
+    );
+    assert!(
+        explanation
+            .disallowed_inputs
+            .iter()
+            .any(|value| value.contains("Providing both --file and --prompt")),
+        "loop_file explanation should document mutual exclusion"
+    );
 }
 
 #[test]
@@ -819,7 +958,7 @@ fn run_rejects_file_option_for_non_loop_file_flows() {
     let cli = Cli {
         project_dir: temp.path.clone(),
         chief: CliChiefOverrides {
-            flow: Some("refactor".to_owned()),
+            flow: Some(CliFlowValue::Refactor),
             ..CliChiefOverrides::default()
         },
         file: Some(PathBuf::from("plan.md")),
