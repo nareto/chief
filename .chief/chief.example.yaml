@@ -1,20 +1,23 @@
 chief:
   # Flow to run (`loop_file`, `bd`, or `refactor`).
   flow: loop_file # loop_file requires `chief --file <path>` (or `chief loop_file --file <path>`)
-  # Agent binary to use (`codex`, `claude`, or `opencode`).
+  # Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`).
   agent: codex
   # Model override passed to the selected agent.
   # model: gpt-5
+  # Cursor example: use the exact Cursor model id in `model`.
+  # agent: cursor-agent
+  # model: gpt-5.4-xhigh
   # Reasoning effort for model adapters that support it.
   # model_reasoning_effort: high
   # Extra CLI args forwarded to the selected agent (YAML/JSON string list).
   agent_extra_args: []
   # MCP server config (`personal` or YAML/JSON object; `{}` means no servers).
   # Default from `chief init`: chief owns the MCP set and starts with none.
-  # Delete this key entirely to let Claude/Codex use your personal MCP config.
+  # Delete this key entirely to let Claude/Codex/Cursor use your personal MCP config.
   mcp_servers: {}
-  # Define servers below to let chief translate the same config for either
-  # Claude or Codex.
+  # Define servers below to let chief translate the same config for
+  # Claude, Codex, or Cursor.
   # mcp_servers:
   #   context7:
   #     transport: stdio

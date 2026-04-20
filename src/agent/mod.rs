@@ -99,6 +99,23 @@ impl OpencodeAgent {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CursorAgent {
+    model: Option<String>,
+    extra_args: Vec<String>,
+    mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+}
+
+impl CursorAgent {
+    pub fn from_config(config: &ChiefConfig, model_override: Option<String>) -> Self {
+        Self {
+            model: model_override.or_else(|| config.model.clone()),
+            extra_args: config.agent_extra_args.clone(),
+            mcp_servers: config.mcp_servers.clone(),
+        }
+    }
+}
+
 struct PreparedAgentLaunch {
     command: Vec<String>,
     env: BTreeMap<String, String>,
@@ -239,6 +256,63 @@ impl CommandBackedAgent for OpencodeAgent {
     }
 }
 
+impl CommandBackedAgent for CursorAgent {
+    fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
+        let mut cmd = vec![
+            "cursor-agent".to_owned(),
+            "-p".to_owned(),
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            "--force".to_owned(),
+            "--trust".to_owned(),
+            "--approve-mcps".to_owned(),
+            "--sandbox".to_owned(),
+            "disabled".to_owned(),
+        ];
+        cmd.extend(self.extra_args.iter().cloned());
+        if let Some(model) = &self.model {
+            cmd.push("--model".to_owned());
+            cmd.push(model.clone());
+        }
+        cmd
+    }
+
+    fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        let mut launch = PreparedAgentLaunch::new(self.build_command(&request.disallowed_paths));
+        if let Some(servers) = &self.mcp_servers {
+            let runtime = mcp::prepare_cursor_mcp_runtime(servers)?;
+            let home_dir = runtime.home_dir.display().to_string();
+            launch.env.insert("HOME".to_owned(), home_dir.clone());
+            launch.env.insert(
+                "XDG_DATA_HOME".to_owned(),
+                Path::new(&home_dir)
+                    .join(".local/share")
+                    .display()
+                    .to_string(),
+            );
+            launch.env.insert(
+                "XDG_CACHE_HOME".to_owned(),
+                Path::new(&home_dir).join(".cache").display().to_string(),
+            );
+            launch.scratch_dir = Some(runtime.scratch_dir);
+        }
+        Ok(launch)
+    }
+
+    fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
+        let parsed = parse_cursor_json_output(raw_stdout);
+        if parsed.trim().is_empty() {
+            if raw_stdout.trim().is_empty() {
+                raw_stderr.trim().to_owned()
+            } else {
+                raw_stdout.trim().to_owned()
+            }
+        } else {
+            parsed
+        }
+    }
+}
+
 fn run_command_backed_agent(
     agent: &impl CommandBackedAgent,
     request: AgentRequest,
@@ -329,6 +403,16 @@ impl CodingAgent for ClaudeAgent {
 impl CodingAgent for OpencodeAgent {
     fn name(&self) -> &str {
         "opencode"
+    }
+
+    fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
+        run_command_backed_agent(self, request)
+    }
+}
+
+impl CodingAgent for CursorAgent {
+    fn name(&self) -> &str {
+        "cursor-agent"
     }
 
     fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
@@ -439,6 +523,30 @@ fn parse_opencode_json_output(output: &str) -> String {
     }
 
     parts.join("")
+}
+
+fn parse_cursor_json_output(output: &str) -> String {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed)
+        && let Some(text) = value.get("result").and_then(Value::as_str)
+    {
+        return text.to_owned();
+    }
+
+    for line in trimmed.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(text) = value.get("result").and_then(Value::as_str) {
+            return text.to_owned();
+        }
+    }
+
+    String::new()
 }
 
 pub fn shell_join(parts: &[String]) -> String {

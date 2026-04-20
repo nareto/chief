@@ -1,4 +1,4 @@
-use crate::agent::{ClaudeAgent, CodexAgent, CodingAgent, OpencodeAgent};
+use crate::agent::{ClaudeAgent, CodexAgent, CodingAgent, CursorAgent, OpencodeAgent};
 use crate::config::ChiefYaml;
 use crate::domain::{EventRecord, EventType, JobRecord, JobStatus, Phase, Todo};
 use crate::flow::FlowKind;
@@ -78,6 +78,10 @@ impl ProjectContext {
                 model_override,
             )),
             "opencode" => Arc::new(OpencodeAgent::from_config(
+                &self.chief_yaml.chief,
+                model_override,
+            )),
+            "cursor" | "cursor-agent" => Arc::new(CursorAgent::from_config(
                 &self.chief_yaml.chief,
                 model_override,
             )),

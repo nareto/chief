@@ -40,7 +40,8 @@ mod chief_option_help {
     }
 
     pub(super) const FLOW: &str = "Flow to run (`loop_file`, `bd`, or `refactor`).";
-    pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, or `opencode`).";
+    pub(super) const AGENT: &str =
+        "Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`).";
     pub(super) const MODEL: &str = "Model override passed to the selected agent.";
     pub(super) const MODEL_REASONING_EFFORT: &str =
         "Reasoning effort for model adapters that support it.";
@@ -1697,20 +1698,35 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
         color,
     );
     println!("{}", divider);
-    println!("{}", style("\x1b[1mChief Configuration\x1b[0m", "\x1b[1m", color));
+    println!(
+        "{}",
+        style("\x1b[1mChief Configuration\x1b[0m", "\x1b[1m", color)
+    );
     println!("{}", divider);
     println!(
         "{} {}",
         format_report_key("project", color),
         context.project_dir.display()
     );
-    println!("{} {}", format_report_key("flow", color), context.chief_yaml.chief.flow);
-    println!("{} {}", format_report_key("agent", color), context.chief_yaml.chief.agent);
+    println!(
+        "{} {}",
+        format_report_key("flow", color),
+        context.chief_yaml.chief.flow
+    );
+    println!(
+        "{} {}",
+        format_report_key("agent", color),
+        context.chief_yaml.chief.agent
+    );
     if let Some(ref model) = context.chief_yaml.chief.model {
         println!("{} {}", format_report_key("model", color), model);
     }
     if let Some(ref reasoning) = context.chief_yaml.chief.model_reasoning_effort {
-        println!("{} {}", format_report_key("reasoning_effort", color), reasoning);
+        println!(
+            "{} {}",
+            format_report_key("reasoning_effort", color),
+            reasoning
+        );
     }
     if !context.chief_yaml.chief.agent_extra_args.is_empty() {
         println!(
@@ -1720,15 +1736,50 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
         );
     }
     if let Some(ref mcp) = context.chief_yaml.chief.mcp_servers {
-        println!("{} {:?}", format_report_key("mcp_servers", color), mcp.keys().collect::<Vec<_>>());
+        println!(
+            "{} {:?}",
+            format_report_key("mcp_servers", color),
+            mcp.keys().collect::<Vec<_>>()
+        );
     }
-    println!("{} {}", format_report_key("max_retries", color), context.chief_yaml.chief.max_retries);
-    println!("{} {}", format_report_key("max_loop_iterations", color), context.chief_yaml.chief.max_loop_iterations);
-    println!("{} {}", format_report_key("required_stable_iterations", color), context.chief_yaml.chief.required_stable_iterations);
-    println!("{} {}s", format_report_key("agent_timeout", color), context.chief_yaml.chief.agent_timeout_seconds);
-    println!("{} {}s", format_report_key("suite_timeout", color), context.chief_yaml.chief.suite_command_timeout_seconds);
-    println!("{} {}", format_report_key("respect_limits", color), context.chief_yaml.chief.respect_limits);
-    println!("{} {}", format_report_key("log_truncation", color), context.chief_yaml.chief.use_agent_log_truncation_for_stdout_logs);
+    println!(
+        "{} {}",
+        format_report_key("max_retries", color),
+        context.chief_yaml.chief.max_retries
+    );
+    println!(
+        "{} {}",
+        format_report_key("max_loop_iterations", color),
+        context.chief_yaml.chief.max_loop_iterations
+    );
+    println!(
+        "{} {}",
+        format_report_key("required_stable_iterations", color),
+        context.chief_yaml.chief.required_stable_iterations
+    );
+    println!(
+        "{} {}s",
+        format_report_key("agent_timeout", color),
+        context.chief_yaml.chief.agent_timeout_seconds
+    );
+    println!(
+        "{} {}s",
+        format_report_key("suite_timeout", color),
+        context.chief_yaml.chief.suite_command_timeout_seconds
+    );
+    println!(
+        "{} {}",
+        format_report_key("respect_limits", color),
+        context.chief_yaml.chief.respect_limits
+    );
+    println!(
+        "{} {}",
+        format_report_key("log_truncation", color),
+        context
+            .chief_yaml
+            .chief
+            .use_agent_log_truncation_for_stdout_logs
+    );
 
     let override_fields = [
         ("flow", overrides.flow.is_some()),
@@ -1736,19 +1787,51 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
         ("model", overrides.model.is_some()),
         ("mcp_servers", overrides.mcp_servers.is_some()),
         ("max_retries", overrides.max_retries.is_some()),
-        ("max_loop_iterations", overrides.max_loop_iterations.is_some()),
-        ("required_stable_iterations", overrides.required_stable_iterations.is_some()),
-        ("agent_timeout_seconds", overrides.agent_timeout_seconds.is_some()),
-        ("suite_command_timeout_seconds", overrides.suite_command_timeout_seconds.is_some()),
-        ("agent_log_max_output_lines", overrides.agent_log_max_output_lines.is_some()),
-        ("agent_log_max_output_chars", overrides.agent_log_max_output_chars.is_some()),
+        (
+            "max_loop_iterations",
+            overrides.max_loop_iterations.is_some(),
+        ),
+        (
+            "required_stable_iterations",
+            overrides.required_stable_iterations.is_some(),
+        ),
+        (
+            "agent_timeout_seconds",
+            overrides.agent_timeout_seconds.is_some(),
+        ),
+        (
+            "suite_command_timeout_seconds",
+            overrides.suite_command_timeout_seconds.is_some(),
+        ),
+        (
+            "agent_log_max_output_lines",
+            overrides.agent_log_max_output_lines.is_some(),
+        ),
+        (
+            "agent_log_max_output_chars",
+            overrides.agent_log_max_output_chars.is_some(),
+        ),
         ("respect_limits", overrides.respect_limits.is_some()),
-        ("use_agent_log_truncation_for_stdout_logs", overrides.use_agent_log_truncation_for_stdout_logs.is_some()),
+        (
+            "use_agent_log_truncation_for_stdout_logs",
+            overrides.use_agent_log_truncation_for_stdout_logs.is_some(),
+        ),
     ];
-    let active_overrides: Vec<_> = override_fields.iter().filter(|(_, active)| *active).map(|(name, _)| *name).collect();
+    let active_overrides: Vec<_> = override_fields
+        .iter()
+        .filter(|(_, active)| *active)
+        .map(|(name, _)| *name)
+        .collect();
     if !active_overrides.is_empty() {
-        println!("{}", style("\x1b[90m--- CLI Overrides ---\x1b[0m", "\x1b[90m", color));
-        println!("{} {}", format_report_key("active_overrides", color), active_overrides.join(", "));
+        println!(
+            "{}",
+            style("\x1b[90m--- CLI Overrides ---\x1b[0m", "\x1b[90m", color)
+        );
+        println!(
+            "{} {}",
+            format_report_key("active_overrides", color),
+            active_overrides.join(", ")
+        );
     }
     println!("{}", divider);
 }

@@ -60,7 +60,7 @@ For the CLI and backend:
 - Git
 - a supported coding-agent CLI on `PATH`
   - `codex` is the default
-  - `claude` is also supported
+  - `claude`, `opencode`, and `cursor-agent` are also supported
 
 For `chief init` and the `bd` flow:
 
@@ -199,6 +199,8 @@ chief:
   # flow: refactor
   agent: codex
   # model: gpt-5
+  # agent: cursor-agent
+  # model: gpt-5.4-xhigh
   # model_reasoning_effort: high
   agent_extra_args: []
   mcp_servers: {} # default from `chief init`; remove this key to use personal agent MCP config
@@ -229,12 +231,13 @@ suites:
 
 Current config details worth knowing:
 
-- `chief.agent` supports `codex` and `claude`.
+- `chief.agent` supports `codex`, `claude`, `opencode`, and `cursor-agent` (`cursor` is accepted as a compatibility alias).
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
-- `chief init` writes `mcp_servers: {}` by default, so new projects do not inherit personal Claude/Codex MCP servers unless you add them to `chief.yaml`.
-- `chief.mcp_servers` is agent-independent. Omit the key entirely to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for either agent.
+- For `cursor-agent`, pass Cursor's exact model id in `chief.model` such as `gpt-5.4-xhigh`.
+- `chief init` writes `mcp_servers: {}` by default, so new projects do not inherit personal Claude/Codex/Cursor MCP servers unless you add them to `chief.yaml`.
+- `chief.mcp_servers` is agent-independent. Omit the key entirely to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for Claude, Codex, or Cursor.
 - `chief.mcp_servers` supports `stdio` and `streamable_http` transports. HTTP servers support JWT bearer auth with either `token` or `token_env_var`.
-- When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config and Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`.
+- When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config, Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`, and Cursor with an isolated `HOME` containing a chief-managed `~/.cursor/mcp.json`.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.
 - `chief.respect_limits` checks usage with `agentusage` before each call and waits when needed to stay under the slowest active limit.
 - `max_retries` is the queued-work retry budget used by the worktree scheduler.
@@ -405,7 +408,7 @@ It writes logs and a TSV summary under `.chief/evidence/`.
 - `src/scheduler/`: multi-worker scheduling and worktree lifecycle
 - `src/flow/`: flow definitions, loop policy, prompt phases, and suite execution
 - `src/storage/` and `src/storage.rs`: SQLite persistence
-- `src/agent/`: `codex` and `claude` process adapters
+- `src/agent/`: `codex`, `claude`, `opencode`, and `cursor-agent` process adapters
 - `prompts/`: Markdown/Jinja prompt templates
 - `frontend/`: Next.js dashboard
 - `ops/`: small operational scripts and config fragments

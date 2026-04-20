@@ -117,6 +117,43 @@ fn prepare_codex_mcp_runtime_with_source_home(
     })
 }
 
+pub(super) struct CursorMcpRuntime {
+    pub(super) home_dir: PathBuf,
+    pub(super) scratch_dir: AgentScratchDir,
+}
+
+pub(super) fn prepare_cursor_mcp_runtime(
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> Result<CursorMcpRuntime> {
+    prepare_cursor_mcp_runtime_with_source_home(servers, current_cursor_home().as_deref())
+}
+
+fn prepare_cursor_mcp_runtime_with_source_home(
+    servers: &BTreeMap<String, McpServerConfig>,
+    source_home: Option<&Path>,
+) -> Result<CursorMcpRuntime> {
+    let scratch_dir = AgentScratchDir::new("cursor-home")?;
+    let home_dir = scratch_dir.path().to_path_buf();
+    let cursor_dir = home_dir.join(".cursor");
+    ensure_private_dir(&cursor_dir)?;
+    copy_cursor_config_file(source_home, &cursor_dir, "cli-config.json")?;
+    copy_cursor_config_file(source_home, &cursor_dir, "agent-cli-state.json")?;
+
+    let config = CursorMcpConfig {
+        mcp_servers: build_cursor_servers(servers)?,
+    };
+    let json = serde_json::to_string_pretty(&config).context("failed to serialize Cursor MCP")?;
+    write_private_text_file(&cursor_dir.join("mcp.json"), &json)?;
+
+    ensure_private_dir(&home_dir.join(".local/share"))?;
+    ensure_private_dir(&home_dir.join(".cache"))?;
+
+    Ok(CursorMcpRuntime {
+        home_dir,
+        scratch_dir,
+    })
+}
+
 #[derive(Serialize)]
 struct ClaudeMcpConfig {
     #[serde(rename = "mcpServers")]
@@ -154,6 +191,26 @@ struct CodexMcpServer {
     bearer_token_env_var: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     http_headers: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct CursorMcpConfig {
+    #[serde(rename = "mcpServers")]
+    mcp_servers: BTreeMap<String, CursorMcpServer>,
+}
+
+#[derive(Serialize)]
+struct CursorMcpServer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    args: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
 }
 
 fn build_claude_servers(
@@ -228,6 +285,47 @@ fn build_codex_servers(
                         url: Some(url.clone()),
                         bearer_token_env_var,
                         http_headers,
+                    }
+                }
+            };
+            Ok((name.clone(), rendered))
+        })
+        .collect()
+}
+
+fn build_cursor_servers(
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> Result<BTreeMap<String, CursorMcpServer>> {
+    servers
+        .iter()
+        .map(|(name, server)| {
+            let rendered = match server {
+                McpServerConfig::Stdio { command, args, env } => CursorMcpServer {
+                    command: Some(command.clone()),
+                    args: args.clone(),
+                    env: env.clone(),
+                    url: None,
+                    headers: BTreeMap::new(),
+                },
+                McpServerConfig::StreamableHttp { url, auth } => {
+                    let mut headers = BTreeMap::new();
+                    if let Some(token) = resolve_jwt_auth(auth)? {
+                        headers.insert(
+                            "Authorization".to_owned(),
+                            match token {
+                                JwtToken::Static(token) => format!("Bearer {token}"),
+                                JwtToken::EnvVar(token_env_var) => {
+                                    format!("Bearer ${{env:{token_env_var}}}")
+                                }
+                            },
+                        );
+                    }
+                    CursorMcpServer {
+                        command: None,
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        url: Some(url.clone()),
+                        headers,
                     }
                 }
             };
@@ -332,6 +430,72 @@ fn current_codex_home() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
         .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".codex")))
+}
+
+fn current_cursor_home() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".cursor"))
+        .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".cursor")))
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_private_text_file(path: &Path, content: &str) -> Result<()> {
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_cursor_config_file(
+    source_home: Option<&Path>,
+    dest_cursor_dir: &Path,
+    file_name: &str,
+) -> Result<()> {
+    let Some(source_home) = source_home else {
+        return Ok(());
+    };
+    let source_path = source_home.join(file_name);
+    if !source_path.is_file() {
+        return Ok(());
+    }
+    let dest_path = dest_cursor_dir.join(file_name);
+    fs::copy(&source_path, &dest_path).with_context(|| {
+        format!(
+            "failed to copy Cursor config from {} to {}",
+            source_path.display(),
+            dest_path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&dest_path)
+            .with_context(|| format!("failed to stat {}", dest_path.display()))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&dest_path, permissions)
+            .with_context(|| format!("failed to chmod {}", dest_path.display()))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -463,6 +627,52 @@ args = ["-y", "user-server"]
         assert!(
             !runtime.home_dir.join("stale.txt").exists(),
             "fixed codex home should be reset before each run"
+        );
+    }
+
+    #[test]
+    fn prepare_cursor_runtime_writes_mcp_json_and_copies_cli_state() {
+        let source_home = TempDir::new("cursor-source-home");
+        let source_cursor_dir = source_home.path.join(".cursor");
+        fs::create_dir_all(&source_cursor_dir).expect("source cursor dir should be created");
+        fs::write(
+            source_cursor_dir.join("cli-config.json"),
+            r#"{"authInfo":{"email":"cursor@example.com"}}"#,
+        )
+        .expect("cursor config should be written");
+        fs::write(
+            source_cursor_dir.join("agent-cli-state.json"),
+            r#"{"version":1}"#,
+        )
+        .expect("cursor state should be written");
+
+        let servers = BTreeMap::from([(
+            "sentry".to_owned(),
+            McpServerConfig::StreamableHttp {
+                url: "https://mcp.sentry.dev/mcp".to_owned(),
+                auth: Some(McpServerAuthConfig::Jwt {
+                    token: None,
+                    token_env_var: Some("SENTRY_TOKEN".to_owned()),
+                }),
+            },
+        )]);
+
+        let runtime = prepare_cursor_mcp_runtime_with_source_home(
+            &servers,
+            Some(source_cursor_dir.as_path()),
+        )
+        .expect("Cursor MCP runtime should work");
+        let rendered = fs::read_to_string(runtime.home_dir.join(".cursor/mcp.json"))
+            .expect("generated Cursor MCP config should be readable");
+
+        assert!(rendered.contains("\"url\": \"https://mcp.sentry.dev/mcp\""));
+        assert!(rendered.contains("\"Authorization\": \"Bearer ${env:SENTRY_TOKEN}\""));
+        assert!(runtime.home_dir.join(".cursor/cli-config.json").is_file());
+        assert!(
+            runtime
+                .home_dir
+                .join(".cursor/agent-cli-state.json")
+                .is_file()
         );
     }
 

@@ -303,3 +303,107 @@ also not json
     let result = parse_opencode_json_output(output);
     assert_eq!(result, "but this is");
 }
+
+#[test]
+fn cursor_command_uses_headless_json_mode_with_full_permissions() {
+    let agent = CursorAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: None,
+    };
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["-p", "--output-format"])
+            || command.iter().any(|arg| arg == "-p"),
+        "cursor-agent command should enable print mode: {command:?}"
+    );
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--output-format", "json"]),
+        "cursor-agent command should request json output: {command:?}"
+    );
+    assert!(
+        command.iter().any(|arg| arg == "--force"),
+        "cursor-agent command should auto-approve shell commands: {command:?}"
+    );
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--sandbox", "disabled"]),
+        "cursor-agent command should disable sandbox mode: {command:?}"
+    );
+    assert!(
+        command.iter().any(|arg| arg == "--trust"),
+        "cursor-agent command should trust the workspace in headless mode: {command:?}"
+    );
+}
+
+#[test]
+fn cursor_command_includes_model_from_config() {
+    let config = ChiefConfig {
+        model: Some("gpt-5.4-xhigh".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = CursorAgent::from_config(&config, None);
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--model", "gpt-5.4-xhigh"]),
+        "cursor-agent command should include configured model: {command:?}"
+    );
+}
+
+#[test]
+fn cursor_prepare_launch_uses_isolated_home_when_managed_mcp_is_enabled() {
+    let agent = CursorAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: Some(BTreeMap::from([(
+            "context7".to_owned(),
+            McpServerConfig::Stdio {
+                command: "npx".to_owned(),
+                args: vec!["-y".to_owned(), "@upstash/context7-mcp".to_owned()],
+                env: BTreeMap::new(),
+            },
+        )])),
+    };
+    let request = AgentRequest {
+        prompt: "test".to_owned(),
+        cwd: std::env::temp_dir(),
+        timeout_seconds: Some(1),
+        disallowed_paths: Vec::new(),
+        cancel_signal: None,
+        on_chunk: None,
+    };
+
+    let launch = agent
+        .prepare_launch(&request)
+        .expect("launch should prepare");
+    assert!(launch.env.contains_key("HOME"));
+    assert!(launch.env.contains_key("XDG_DATA_HOME"));
+    assert!(launch.env.contains_key("XDG_CACHE_HOME"));
+    assert!(
+        launch.scratch_dir.is_some(),
+        "managed Cursor MCP should keep scratch files alive"
+    );
+}
+
+#[test]
+fn parse_cursor_json_output_extracts_result_field() {
+    let output =
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"Hello Cursor!"}"#;
+    let result = parse_cursor_json_output(output);
+    assert_eq!(result, "Hello Cursor!");
+}
+
+#[test]
+fn parse_cursor_json_output_handles_invalid_json() {
+    let result = parse_cursor_json_output("not json");
+    assert_eq!(result, "");
+}

@@ -94,6 +94,31 @@ fn chief_engine_start_run_requires_chief_yaml() {
 }
 
 #[test]
+fn project_context_build_agent_supports_cursor_agent_and_cursor_alias() {
+    let root = TempDir::new("cursor-agent");
+    let project_dir = root.path.join("project");
+    init_git_repo(&project_dir);
+    fs::create_dir_all(crate::paths::chief_dir(&project_dir))
+        .expect(".chief directory should be created");
+    fs::write(
+        crate::paths::chief_yaml_path(&project_dir),
+        "chief:\n  agent: cursor-agent\n",
+    )
+    .expect("failed to write chief.yaml fixture");
+
+    let mut context = ProjectContext::load(&project_dir).expect("project context should load");
+    assert_eq!(context.build_agent(None).name(), "cursor-agent");
+
+    fs::write(
+        crate::paths::chief_yaml_path(&project_dir),
+        "chief:\n  agent: cursor\n",
+    )
+    .expect("failed to rewrite chief.yaml fixture");
+    context.refresh().expect("project context should refresh");
+    assert_eq!(context.build_agent(None).name(), "cursor-agent");
+}
+
+#[test]
 fn worker_worktree_dir_name_uses_chief_prefix() {
     assert_eq!(
         super::worker_worktree_dir_name("abc-123"),
