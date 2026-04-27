@@ -319,14 +319,20 @@ fn normalize_watch_path(raw_path: &str, project_dir: &Path) -> Option<(String, P
     }
 
     let raw = Path::new(trimmed);
-    let relative = if raw.is_absolute() {
-        raw.strip_prefix(project_dir).ok()?.to_path_buf()
-    } else {
-        raw.to_path_buf()
-    };
+    if raw.is_absolute() {
+        let path = normalize_absolute_watch_path(raw)?;
+        let key = watch_path_key(&path, project_dir);
+        return Some((key, path));
+    }
 
+    let normalized = normalize_relative_watch_path(raw)?;
+    let key = normalized.to_string_lossy().replace('\\', "/");
+    Some((key, project_dir.join(normalized)))
+}
+
+fn normalize_relative_watch_path(path: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
-    for component in relative.components() {
+    for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
@@ -338,6 +344,42 @@ fn normalize_watch_path(raw_path: &str, project_dir: &Path) -> Option<(String, P
         return None;
     }
 
-    let key = normalized.to_string_lossy().replace('\\', "/");
-    Some((key, project_dir.join(normalized)))
+    Some(normalized)
+}
+
+fn watch_path_key(path: &Path, project_dir: &Path) -> String {
+    path.strip_prefix(project_dir)
+        .ok()
+        .and_then(normalize_relative_watch_path)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn normalize_absolute_watch_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    let mut normal_components = 0usize;
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => {
+                normalized.push(part);
+                normal_components += 1;
+            }
+            Component::ParentDir => {
+                if normal_components == 0 || !normalized.pop() {
+                    return None;
+                }
+                normal_components -= 1;
+            }
+        }
+    }
+
+    if normal_components == 0 {
+        return None;
+    }
+
+    Some(normalized)
 }

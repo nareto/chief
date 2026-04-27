@@ -1,8 +1,8 @@
 use super::{
-    build_flow, FlowExecution, FlowKind, TestSuiteConfig,
-    SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
+    FlowExecution, FlowKind, SINGLE_PROMPT_CHANGED_FILES_RETRY_MESSAGE,
     SINGLE_PROMPT_RETRY_HAS_ASSOCIATED_TEST_SUITES_PAYLOAD_KEY,
     SINGLE_PROMPT_RETRY_REASON_CONVERGENCE_CHANGED_FILES, SINGLE_PROMPT_RETRY_REASON_PAYLOAD_KEY,
+    TestSuiteConfig, build_flow,
 };
 use crate::agent::{AgentRequest, CodingAgent};
 use crate::config::ChiefConfig;
@@ -10,7 +10,7 @@ use crate::domain::{AgentOutput, EventType, Phase, Todo, TodoStatus};
 use crate::git::GitOps;
 use crate::prompt::PromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -747,6 +747,80 @@ fn run_agent_with_git_changes_detects_watch_only_file_changes_outside_git_tracki
     );
 
     let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn run_agent_with_git_changes_detects_absolute_watch_only_file_outside_project() {
+    let project_dir = temp_project_dir();
+    let findings_root = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let watched_file = findings_root.join("wf_helpers/.review_pr_findings/123_findings.yaml");
+    let watched_parent = watched_file
+        .parent()
+        .expect("watched file path should have a parent directory");
+    fs::create_dir_all(watched_parent).expect("watched parent directory should be created");
+    fs::write(&watched_file, "before\n").expect("initial watched file should be written");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "absolute watch-only convergence should use filesystem changes".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = NoopPromptStore;
+    let dirty_flag = Arc::new(AtomicBool::new(false));
+    let agent = OneShotDirtyAgent::new(watched_file.clone(), dirty_flag);
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+    let watched_arg = watched_file.to_string_lossy().to_string();
+    let expected_touched_file = watched_file.to_string_lossy().replace('\\', "/");
+
+    let execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: vec![watched_arg],
+    };
+
+    let run = execution
+        .run_agent_with_git_changes(
+            Phase::LoopFile,
+            "write findings to watched file".to_owned(),
+            Vec::new(),
+        )
+        .expect("agent run should complete");
+
+    assert!(
+        run.had_git_changes,
+        "absolute watch-only paths outside the project should still detect filesystem changes"
+    );
+    assert_eq!(
+        run.touched_files,
+        vec![expected_touched_file],
+        "the absolute watched file should be reported as touched"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+    let _ = fs::remove_dir_all(&findings_root);
 }
 
 #[test]
