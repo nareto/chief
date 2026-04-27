@@ -459,6 +459,12 @@ fn cli_help_text_matches_chief_example_comments() {
             spec.key
         );
     }
+
+    assert!(
+        help.contains("chief --agent cursor-agent --model gpt-5.4-xhigh --prompt"),
+        "CLI help should include a concrete cursor-agent model example; help output:\n{}",
+        help
+    );
 }
 
 #[test]

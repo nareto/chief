@@ -3,7 +3,7 @@ chief:
   flow: loop_file # loop_file requires `chief --file <path>` (or `chief loop_file --file <path>`)
   # Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`; `cursor` is also accepted).
   agent: codex
-  # Model override passed to the selected agent.
+  # Model override passed to the selected agent (for `cursor-agent`, use Cursor's exact model id such as `gpt-5.4-xhigh`).
   # model: gpt-5
   # Cursor example: use the exact Cursor model id in `model`.
   # agent: cursor-agent
