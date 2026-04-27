@@ -284,6 +284,10 @@ impl CommandBackedAgent for CursorAgent {
             let home_dir = runtime.home_dir.display().to_string();
             launch.env.insert("HOME".to_owned(), home_dir.clone());
             launch.env.insert(
+                "XDG_CONFIG_HOME".to_owned(),
+                Path::new(&home_dir).join(".config").display().to_string(),
+            );
+            launch.env.insert(
                 "XDG_DATA_HOME".to_owned(),
                 Path::new(&home_dir)
                     .join(".local/share")

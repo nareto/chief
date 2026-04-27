@@ -125,19 +125,29 @@ pub(super) struct CursorMcpRuntime {
 pub(super) fn prepare_cursor_mcp_runtime(
     servers: &BTreeMap<String, McpServerConfig>,
 ) -> Result<CursorMcpRuntime> {
-    prepare_cursor_mcp_runtime_with_source_home(servers, current_cursor_home().as_deref())
+    prepare_cursor_mcp_runtime_with_source_dirs(
+        servers,
+        current_cursor_home().as_deref(),
+        current_cursor_config_dir().as_deref(),
+    )
 }
 
-fn prepare_cursor_mcp_runtime_with_source_home(
+fn prepare_cursor_mcp_runtime_with_source_dirs(
     servers: &BTreeMap<String, McpServerConfig>,
-    source_home: Option<&Path>,
+    source_cursor_home: Option<&Path>,
+    source_cursor_config_dir: Option<&Path>,
 ) -> Result<CursorMcpRuntime> {
     let scratch_dir = AgentScratchDir::new("cursor-home")?;
     let home_dir = scratch_dir.path().to_path_buf();
     let cursor_dir = home_dir.join(".cursor");
+    let xdg_config_home = home_dir.join(".config");
+    let cursor_config_dir = xdg_config_home.join("cursor");
     ensure_private_dir(&cursor_dir)?;
-    copy_cursor_config_file(source_home, &cursor_dir, "cli-config.json")?;
-    copy_cursor_config_file(source_home, &cursor_dir, "agent-cli-state.json")?;
+    ensure_private_dir(&xdg_config_home)?;
+    ensure_private_dir(&cursor_config_dir)?;
+    copy_cursor_config_file(source_cursor_home, &cursor_dir, "cli-config.json")?;
+    copy_cursor_config_file(source_cursor_home, &cursor_dir, "agent-cli-state.json")?;
+    copy_cursor_config_file(source_cursor_config_dir, &cursor_config_dir, "auth.json")?;
 
     let config = CursorMcpConfig {
         mcp_servers: build_cursor_servers(servers)?,
@@ -438,6 +448,15 @@ fn current_cursor_home() -> Option<PathBuf> {
         .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".cursor")))
 }
 
+fn current_cursor_config_dir() -> Option<PathBuf> {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(|path| PathBuf::from(path).join("cursor"))
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/cursor")))
+        .or_else(|| {
+            env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".config/cursor"))
+        })
+}
+
 fn ensure_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     #[cfg(unix)]
@@ -631,10 +650,13 @@ args = ["-y", "user-server"]
     }
 
     #[test]
-    fn prepare_cursor_runtime_writes_mcp_json_and_copies_cli_state() {
+    fn prepare_cursor_runtime_writes_mcp_json_and_copies_cli_state_and_auth() {
         let source_home = TempDir::new("cursor-source-home");
         let source_cursor_dir = source_home.path.join(".cursor");
+        let source_cursor_config_dir = source_home.path.join(".config/cursor");
         fs::create_dir_all(&source_cursor_dir).expect("source cursor dir should be created");
+        fs::create_dir_all(&source_cursor_config_dir)
+            .expect("source cursor config dir should be created");
         fs::write(
             source_cursor_dir.join("cli-config.json"),
             r#"{"authInfo":{"email":"cursor@example.com"}}"#,
@@ -645,6 +667,11 @@ args = ["-y", "user-server"]
             r#"{"version":1}"#,
         )
         .expect("cursor state should be written");
+        fs::write(
+            source_cursor_config_dir.join("auth.json"),
+            r#"{"accessToken":"abc","refreshToken":"def"}"#,
+        )
+        .expect("cursor auth should be written");
 
         let servers = BTreeMap::from([(
             "sentry".to_owned(),
@@ -657,9 +684,10 @@ args = ["-y", "user-server"]
             },
         )]);
 
-        let runtime = prepare_cursor_mcp_runtime_with_source_home(
+        let runtime = prepare_cursor_mcp_runtime_with_source_dirs(
             &servers,
             Some(source_cursor_dir.as_path()),
+            Some(source_cursor_config_dir.as_path()),
         )
         .expect("Cursor MCP runtime should work");
         let rendered = fs::read_to_string(runtime.home_dir.join(".cursor/mcp.json"))
@@ -673,6 +701,11 @@ args = ["-y", "user-server"]
                 .home_dir
                 .join(".cursor/agent-cli-state.json")
                 .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(runtime.home_dir.join(".config/cursor/auth.json"))
+                .expect("copied cursor auth should be readable"),
+            r#"{"accessToken":"abc","refreshToken":"def"}"#
         );
     }
 

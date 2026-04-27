@@ -386,8 +386,22 @@ fn cursor_prepare_launch_uses_isolated_home_when_managed_mcp_is_enabled() {
         .prepare_launch(&request)
         .expect("launch should prepare");
     assert!(launch.env.contains_key("HOME"));
+    assert!(launch.env.contains_key("XDG_CONFIG_HOME"));
     assert!(launch.env.contains_key("XDG_DATA_HOME"));
     assert!(launch.env.contains_key("XDG_CACHE_HOME"));
+    let home_dir = launch
+        .env
+        .get("HOME")
+        .expect("managed Cursor MCP launch should override HOME");
+    assert_eq!(
+        launch.env.get("XDG_CONFIG_HOME"),
+        Some(
+            &std::path::Path::new(home_dir)
+                .join(".config")
+                .display()
+                .to_string()
+        )
+    );
     assert!(
         launch.scratch_dir.is_some(),
         "managed Cursor MCP should keep scratch files alive"
