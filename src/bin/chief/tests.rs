@@ -351,6 +351,18 @@ fn parse_agent_and_reasoning_options_use_typed_values() {
 }
 
 #[test]
+fn parse_agent_wait_seconds_override() {
+    let cli = Cli::try_parse_from(["chief", "--agent-wait-seconds", "45", "--prompt", "inspect"])
+        .expect("agent wait option should parse");
+
+    let overrides = cli
+        .chief
+        .to_config_overrides()
+        .expect("agent wait override should convert");
+    assert_eq!(overrides.agent_wait_seconds, Some(45));
+}
+
+#[test]
 fn parse_loop_file_command() {
     let cli = Cli::try_parse_from(["chief", "loop_file", "--file", "plan.md"])
         .expect("loop_file command should parse");

@@ -22,6 +22,7 @@ pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   max_loop_iterations: 20
   required_stable_iterations: 2
   agent_timeout_seconds: 2700
+  # agent_wait_seconds: 60 # fixed wait between agent calls; overrides respect_limits when set
   suite_command_timeout_seconds: 1800
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500

@@ -11,11 +11,16 @@ use std::time::Duration;
 pub(super) struct AgentCallPermit {
     _guard: Option<MutexGuard<'static, ()>>,
     decision: Option<AgentPacingDecision>,
+    fixed_wait_decision: Option<AgentFixedWaitDecision>,
 }
 
 impl AgentCallPermit {
     pub(super) fn decision(&self) -> Option<&AgentPacingDecision> {
         self.decision.as_ref()
+    }
+
+    pub(super) fn fixed_wait_decision(&self) -> Option<&AgentFixedWaitDecision> {
+        self.fixed_wait_decision.as_ref()
     }
 }
 
@@ -86,12 +91,25 @@ pub(super) struct AgentPacingDecision {
     average_usage_impact: Vec<AverageUsageImpact>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct AgentFixedWaitDecision {
+    configured_wait: Duration,
+    last_call_at: Option<chrono::DateTime<Utc>>,
+    elapsed_since_last_call: Option<Duration>,
+    wait_duration: Duration,
+}
+
 impl<'a> FlowExecution<'a> {
     pub(super) fn prepare_agent_call(&self, phase: Phase) -> Result<AgentCallPermit> {
+        if let Some(wait_seconds) = self.chief_config.agent_wait_seconds {
+            return self.prepare_fixed_wait_agent_call(phase, Duration::from_secs(wait_seconds));
+        }
+
         if !self.chief_config.respect_limits {
             return Ok(AgentCallPermit {
                 _guard: None,
                 decision: None,
+                fixed_wait_decision: None,
             });
         }
 
@@ -120,6 +138,7 @@ impl<'a> FlowExecution<'a> {
                 return Ok(AgentCallPermit {
                     _guard: Some(provider_guard),
                     decision: None,
+                    fixed_wait_decision: None,
                 });
             }
         };
@@ -153,6 +172,55 @@ impl<'a> FlowExecution<'a> {
         Ok(AgentCallPermit {
             _guard: Some(provider_guard),
             decision: Some(decision),
+            fixed_wait_decision: None,
+        })
+    }
+
+    fn prepare_fixed_wait_agent_call(
+        &self,
+        phase: Phase,
+        configured_wait: Duration,
+    ) -> Result<AgentCallPermit> {
+        let agent_name = self.agent.name().to_owned();
+        let provider_guard = agent_limit_mutex(&agent_name)
+            .lock()
+            .map_err(|_| anyhow!("agent usage coordination mutex poisoned"))?;
+
+        let history = self.recent_agent_invocation_history(&agent_name)?;
+        let now = Utc::now();
+        let decision = compute_fixed_agent_wait(now, configured_wait, history.last().copied());
+
+        if !decision.wait_duration.is_zero() {
+            let wait_until = wait_until_timestamp(now, decision.wait_duration);
+            self.log_event(
+                "info",
+                Some(phase),
+                EventType::Msg,
+                waiting_for_fixed_agent_wait_message(now, &agent_name, &decision),
+                payload_from_json(json!({
+                    "agent_name": agent_name,
+                    "pacing_mode": "fixed_wait",
+                    "respect_limits": self.chief_config.respect_limits,
+                    "respect_limits_overridden": self.chief_config.respect_limits,
+                    "agent_wait_seconds": decision.configured_wait.as_secs_f64(),
+                    "wait_seconds": decision.wait_duration.as_secs_f64(),
+                    "wait_until": wait_until.map(|timestamp| timestamp.to_rfc3339()),
+                    "last_agent_call_at": decision
+                        .last_call_at
+                        .as_ref()
+                        .map(|timestamp| timestamp.to_rfc3339()),
+                    "elapsed_since_last_call_seconds": decision
+                        .elapsed_since_last_call
+                        .map(|duration| duration.as_secs_f64()),
+                })),
+            )?;
+            self.sleep_with_cancellation(decision.wait_duration)?;
+        }
+
+        Ok(AgentCallPermit {
+            _guard: Some(provider_guard),
+            decision: None,
+            fixed_wait_decision: Some(decision),
         })
     }
 
@@ -181,6 +249,34 @@ impl<'a> FlowExecution<'a> {
                 "limiting_usage_label": decision.limiting_usage_label,
                 "average_usage_impact": decision.average_usage_impact,
                 "usage_impact_estimation_basis": usage_impact_estimation_basis(decision),
+            })),
+        )
+    }
+
+    pub(super) fn log_agent_fixed_wait_event(
+        &self,
+        phase: Phase,
+        decision: &AgentFixedWaitDecision,
+    ) -> Result<()> {
+        self.log_event(
+            "info",
+            Some(phase),
+            EventType::AgentCmd,
+            "Agent fixed wait before call",
+            payload_from_json(json!({
+                "agent_name": self.agent.name(),
+                "pacing_mode": "fixed_wait",
+                "respect_limits": self.chief_config.respect_limits,
+                "respect_limits_overridden": self.chief_config.respect_limits,
+                "agent_wait_seconds": decision.configured_wait.as_secs_f64(),
+                "last_agent_call_at": decision
+                    .last_call_at
+                    .as_ref()
+                    .map(|timestamp| timestamp.to_rfc3339()),
+                "elapsed_since_last_call_seconds": decision
+                    .elapsed_since_last_call
+                    .map(|duration| duration.as_secs_f64()),
+                "wait_seconds_applied": decision.wait_duration.as_secs_f64(),
             })),
         )
     }
@@ -218,6 +314,36 @@ impl<'a> FlowExecution<'a> {
                 timestamp: event.timestamp,
                 snapshot,
             });
+        }
+
+        Ok(history)
+    }
+
+    fn recent_agent_invocation_history(
+        &self,
+        agent_name: &str,
+    ) -> Result<Vec<chrono::DateTime<Utc>>> {
+        let events = self.store.query_events(EventQuery {
+            limit: 256,
+            event_type: Some(EventType::AgentCmd),
+            phase: None,
+            level: None,
+            contains_text: None,
+        })?;
+
+        let mut history = Vec::new();
+        for event in events.into_iter().rev() {
+            let Some(event_agent_name) = event.payload.get("agent_name").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !event_agent_name.eq_ignore_ascii_case(agent_name) {
+                continue;
+            }
+            if !event.payload.contains_key("query_id") {
+                continue;
+            }
+            history.push(event.timestamp);
         }
 
         Ok(history)
@@ -313,6 +439,28 @@ fn compute_agent_pacing(
         wait_duration,
         limiting_usage_label,
         average_usage_impact,
+    }
+}
+
+fn compute_fixed_agent_wait(
+    now: chrono::DateTime<Utc>,
+    configured_wait: Duration,
+    last_call_at: Option<chrono::DateTime<Utc>>,
+) -> AgentFixedWaitDecision {
+    let elapsed_since_last_call = last_call_at.as_ref().map(|timestamp| {
+        now.signed_duration_since(timestamp.clone())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+    });
+    let wait_duration = elapsed_since_last_call
+        .map(|elapsed| configured_wait.saturating_sub(elapsed))
+        .unwrap_or(Duration::ZERO);
+
+    AgentFixedWaitDecision {
+        configured_wait,
+        last_call_at,
+        elapsed_since_last_call,
+        wait_duration,
     }
 }
 
@@ -478,6 +626,27 @@ fn waiting_for_usage_limit_message(
     }
 }
 
+fn waiting_for_fixed_agent_wait_message(
+    now: chrono::DateTime<Utc>,
+    agent_name: &str,
+    decision: &AgentFixedWaitDecision,
+) -> String {
+    let wait_seconds = duration_seconds_ceiling(decision.wait_duration);
+    if let Some(wait_until) = wait_until_timestamp(now, decision.wait_duration) {
+        format!(
+            "Waiting until {} before calling {} due to fixed agent_wait_seconds (~{} second(s))",
+            wait_until.to_rfc3339(),
+            agent_name,
+            wait_seconds
+        )
+    } else {
+        format!(
+            "Waiting {} second(s) before calling {} due to fixed agent_wait_seconds",
+            wait_seconds, agent_name
+        )
+    }
+}
+
 fn duration_seconds_ceiling(duration: Duration) -> u64 {
     duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
 }
@@ -541,6 +710,28 @@ mod tests {
             651,
             "wait should subtract time since the previous call"
         );
+    }
+
+    #[test]
+    fn compute_fixed_agent_wait_skips_first_call_and_waits_between_later_calls() {
+        let now = Utc.with_ymd_and_hms(2025, 3, 18, 12, 0, 0).unwrap();
+
+        let first_call = compute_fixed_agent_wait(now, Duration::from_secs(60), None);
+        assert!(first_call.wait_duration.is_zero());
+
+        let later_call = compute_fixed_agent_wait(
+            now,
+            Duration::from_secs(60),
+            Some(now - ChronoDuration::seconds(25)),
+        );
+        assert_eq!(duration_seconds_ceiling(later_call.wait_duration), 35);
+
+        let overdue_call = compute_fixed_agent_wait(
+            now,
+            Duration::from_secs(60),
+            Some(now - ChronoDuration::seconds(90)),
+        );
+        assert!(overdue_call.wait_duration.is_zero());
     }
 
     #[test]

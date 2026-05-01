@@ -83,6 +83,7 @@ mod chief_option_help {
         "Consecutive stable iterations required before convergence is done.";
     pub(super) const AGENT_TIMEOUT_SECONDS: &str =
         "Per-agent invocation timeout in seconds (0 disables timeout).";
+    pub(super) const AGENT_WAIT_SECONDS: &str = "Fixed wait in seconds between agent calls; when set, it overrides respect_limits logic (0 means no wait).";
     pub(super) const SUITE_COMMAND_TIMEOUT_SECONDS: &str =
         "Default timeout in seconds for suite/readiness commands.";
     pub(super) const AGENT_LOG_MAX_OUTPUT_LINES: &str =
@@ -95,7 +96,7 @@ mod chief_option_help {
         "When true, apply agent log truncation to stdout log output too.";
 
     #[cfg(test)]
-    pub(super) const SPECS: [ChiefOptionHelpSpec; 15] = [
+    pub(super) const SPECS: [ChiefOptionHelpSpec; 16] = [
         ChiefOptionHelpSpec {
             key: "flow",
             help: FLOW,
@@ -135,6 +136,10 @@ mod chief_option_help {
         ChiefOptionHelpSpec {
             key: "agent_timeout_seconds",
             help: AGENT_TIMEOUT_SECONDS,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent_wait_seconds",
+            help: AGENT_WAIT_SECONDS,
         },
         ChiefOptionHelpSpec {
             key: "suite_command_timeout_seconds",
@@ -303,6 +308,13 @@ struct CliChiefOverrides {
         help_heading = "Chief Overrides"
     )]
     agent_timeout_seconds: Option<u64>,
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::AGENT_WAIT_SECONDS,
+        help_heading = "Chief Overrides"
+    )]
+    agent_wait_seconds: Option<u64>,
     #[arg(
         long,
         global = true,
@@ -577,6 +589,7 @@ impl CliChiefOverrides {
             max_loop_iterations,
             required_stable_iterations,
             agent_timeout_seconds,
+            agent_wait_seconds,
             suite_command_timeout_seconds,
             agent_log_max_output_lines,
             agent_log_max_output_chars,
@@ -604,6 +617,7 @@ impl CliChiefOverrides {
             max_loop_iterations,
             required_stable_iterations,
             agent_timeout_seconds,
+            agent_wait_seconds,
             suite_command_timeout_seconds,
             agent_log_max_output_lines,
             agent_log_max_output_chars,
@@ -945,6 +959,18 @@ fn build_cli_schema() -> CliSchema {
             Vec::new(),
             &[],
             &[],
+        ),
+        schema_option(
+            Some("agent-wait-seconds"),
+            None,
+            Some("AGENT_WAIT_SECONDS"),
+            chief_option_help::AGENT_WAIT_SECONDS,
+            false,
+            false,
+            None,
+            Vec::new(),
+            &[],
+            &["When present, Chief skips agentusage-based respect_limits pacing."],
         ),
         schema_option(
             Some("suite-command-timeout-seconds"),
@@ -1658,6 +1684,7 @@ fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
             "agent_timeout_seconds",
             overrides.agent_timeout_seconds.is_some(),
         ),
+        ("agent_wait_seconds", overrides.agent_wait_seconds.is_some()),
         (
             "suite_command_timeout_seconds",
             overrides.suite_command_timeout_seconds.is_some(),
@@ -3488,6 +3515,13 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
         format_report_key("agent_timeout", color),
         context.chief_yaml.chief.agent_timeout_seconds
     );
+    if let Some(agent_wait_seconds) = context.chief_yaml.chief.agent_wait_seconds {
+        println!(
+            "{} {}s",
+            format_report_key("agent_wait", color),
+            agent_wait_seconds
+        );
+    }
     println!(
         "{} {}s",
         format_report_key("suite_timeout", color),

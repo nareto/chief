@@ -66,6 +66,8 @@ pub struct ChiefConfig {
     pub required_stable_iterations: usize,
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
+    #[serde(default)]
+    pub agent_wait_seconds: Option<u64>,
     #[serde(default = "default_suite_command_timeout_seconds")]
     pub suite_command_timeout_seconds: u64,
     #[serde(default = "default_agent_log_max_output_lines")]
@@ -90,6 +92,7 @@ pub struct ChiefConfigOverrides {
     pub max_loop_iterations: Option<usize>,
     pub required_stable_iterations: Option<usize>,
     pub agent_timeout_seconds: Option<u64>,
+    pub agent_wait_seconds: Option<u64>,
     pub suite_command_timeout_seconds: Option<u64>,
     pub agent_log_max_output_lines: Option<usize>,
     pub agent_log_max_output_chars: Option<usize>,
@@ -110,6 +113,7 @@ impl Default for ChiefConfig {
             max_loop_iterations: default_max_loop_iterations(),
             required_stable_iterations: default_required_stable_iterations(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
+            agent_wait_seconds: None,
             suite_command_timeout_seconds: default_suite_command_timeout_seconds(),
             agent_log_max_output_lines: default_agent_log_max_output_lines(),
             agent_log_max_output_chars: default_agent_log_max_output_chars(),
@@ -132,6 +136,7 @@ impl ChiefConfig {
             max_loop_iterations,
             required_stable_iterations,
             agent_timeout_seconds,
+            agent_wait_seconds,
             suite_command_timeout_seconds,
             agent_log_max_output_lines,
             agent_log_max_output_chars,
@@ -150,6 +155,7 @@ impl ChiefConfig {
             max_loop_iterations: Some(max_loop_iterations),
             required_stable_iterations: Some(required_stable_iterations),
             agent_timeout_seconds: Some(agent_timeout_seconds),
+            agent_wait_seconds,
             suite_command_timeout_seconds: Some(suite_command_timeout_seconds),
             agent_log_max_output_lines: Some(agent_log_max_output_lines),
             agent_log_max_output_chars: Some(agent_log_max_output_chars),
@@ -172,6 +178,7 @@ impl ChiefConfig {
             max_loop_iterations,
             required_stable_iterations,
             agent_timeout_seconds,
+            agent_wait_seconds,
             suite_command_timeout_seconds,
             agent_log_max_output_lines,
             agent_log_max_output_chars,
@@ -190,6 +197,7 @@ impl ChiefConfig {
             max_loop_iterations: max_loop_iterations_override,
             required_stable_iterations: required_stable_iterations_override,
             agent_timeout_seconds: agent_timeout_seconds_override,
+            agent_wait_seconds: agent_wait_seconds_override,
             suite_command_timeout_seconds: suite_command_timeout_seconds_override,
             agent_log_max_output_lines: agent_log_max_output_lines_override,
             agent_log_max_output_chars: agent_log_max_output_chars_override,
@@ -210,6 +218,7 @@ impl ChiefConfig {
             required_stable_iterations: required_stable_iterations_override
                 .unwrap_or(required_stable_iterations),
             agent_timeout_seconds: agent_timeout_seconds_override.unwrap_or(agent_timeout_seconds),
+            agent_wait_seconds: agent_wait_seconds_override.or(agent_wait_seconds),
             suite_command_timeout_seconds: suite_command_timeout_seconds_override
                 .unwrap_or(suite_command_timeout_seconds),
             agent_log_max_output_lines: agent_log_max_output_lines_override
@@ -433,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn agent_wait_seconds_defaults_to_absent() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.agent_wait_seconds, None);
+    }
+
+    #[test]
+    fn parse_agent_wait_seconds_preserved() {
+        let yaml = "chief:\n  agent_wait_seconds: 45\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.agent_wait_seconds, Some(45));
+    }
+
+    #[test]
     fn respect_limits_defaults_to_true() {
         let yaml = "chief: {}\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
@@ -556,6 +579,7 @@ mod tests {
             max_loop_iterations: 7,
             required_stable_iterations: 3,
             agent_timeout_seconds: 111,
+            agent_wait_seconds: Some(12),
             suite_command_timeout_seconds: 222,
             agent_log_max_output_lines: 33,
             agent_log_max_output_chars: 444,

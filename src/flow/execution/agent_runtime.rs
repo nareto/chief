@@ -56,6 +56,13 @@ impl<'a> FlowExecution<'a> {
             return Err(err);
         }
 
+        if let Some(decision) = permit.fixed_wait_decision() {
+            if let Err(err) = self.log_agent_fixed_wait_event(phase, decision) {
+                agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));
+                return Err(err);
+            }
+        }
+
         if let Some(decision) = permit.decision() {
             if let Err(err) = self.log_agent_usage_event(phase, decision) {
                 agent_stream::complete_query(&project_name, &query_id, None, Some(err.to_string()));

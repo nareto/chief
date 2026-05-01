@@ -208,6 +208,7 @@ chief:
   max_loop_iterations: 20
   required_stable_iterations: 2
   agent_timeout_seconds: 2700
+  # agent_wait_seconds: 60 # fixed wait between agent calls; overrides respect_limits when set
   suite_command_timeout_seconds: 1800
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
@@ -240,6 +241,7 @@ Current config details worth knowing:
 - When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config, Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`, and Cursor with an isolated `HOME` containing a chief-managed `~/.cursor/mcp.json`.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.
 - `chief.respect_limits` checks usage with `agentusage` before each call and waits when needed to stay under the slowest active limit.
+- `chief.agent_wait_seconds`, when set, applies a fixed wait between agent call starts and overrides the `respect_limits`/`agentusage` pacing logic. Use `0` to bypass waiting while still disabling `respect_limits` pacing.
 - `max_retries` is the queued-work retry budget used by the worktree scheduler.
 - `max_loop_iterations` and `required_stable_iterations` control convergence behavior.
 - `suite_command_timeout_seconds` is the default timeout for suite/readiness commands.

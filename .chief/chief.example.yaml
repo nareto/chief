@@ -38,6 +38,8 @@ chief:
   required_stable_iterations: 2
   # Per-agent invocation timeout in seconds (0 disables timeout).
   agent_timeout_seconds: 2700
+  # Fixed wait in seconds between agent calls; when set, it overrides respect_limits logic (0 means no wait).
+  # agent_wait_seconds: 60
   # Default timeout in seconds for suite/readiness commands.
   suite_command_timeout_seconds: 1800
   # Tail line count kept when truncating agent output in logs.
