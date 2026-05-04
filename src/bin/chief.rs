@@ -389,7 +389,7 @@ enum Commands {
     Migrate,
     /// Remove completed todos that have a commit hash.
     CleanDone,
-    /// Run project pre-run checks (same readiness checks used by backend/frontend start).
+    /// Run project pre-run checks (same readiness checks used by backend start).
     Check(CheckArgs),
     /// Print recent project events.
     TailEvents(TailEventsArgs),

@@ -8,7 +8,6 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::{
     DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
 };
@@ -27,8 +26,6 @@ pub struct BackendCli {
     pub host: String,
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
-    #[arg(long, default_value = "frontend")]
-    pub frontend_dir: PathBuf,
     #[arg(long = "allow-origin")]
     pub allow_origins: Vec<String>,
     #[arg(long, default_value_t = 1)]
@@ -49,7 +46,6 @@ pub struct BackendRuntimeSettings {
     pub port: u16,
     pub projects_dir: String,
     pub projects: Vec<String>,
-    pub frontend_dir: String,
     pub allow_origins: Vec<String>,
     pub enable_terminal: bool,
     pub default_agents_per_project: usize,
@@ -83,11 +79,7 @@ pub async fn run() -> Result<()> {
 
     let default_agents_per_project = cli.default_agents_per_project.max(1);
     let max_agents_per_project = cli.max_agents_per_project.max(1);
-    let effective_allow_origins = if cli.allow_origins.is_empty() {
-        vec!["http://localhost:3000".to_owned()]
-    } else {
-        cli.allow_origins.clone()
-    };
+    let effective_allow_origins = cli.allow_origins.clone();
 
     let cors_layer = build_cors_layer(&effective_allow_origins)?;
 
@@ -105,7 +97,6 @@ pub async fn run() -> Result<()> {
                 .iter()
                 .map(|project| project.display().to_string())
                 .collect(),
-            frontend_dir: cli.frontend_dir.display().to_string(),
             allow_origins: effective_allow_origins,
             enable_terminal: cli.enable_terminal,
             default_agents_per_project,
@@ -126,11 +117,6 @@ pub async fn run() -> Result<()> {
     } else {
         build_router(state).layer(cors_layer)
     };
-    let app = if cli.frontend_dir.exists() {
-        app.fallback_service(ServeDir::new(&cli.frontend_dir))
-    } else {
-        app
-    };
 
     let bind = format!("{}:{}", cli.host, cli.port);
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -149,6 +135,10 @@ fn build_cors_layer(allow_origins: &[String]) -> Result<CorsLayer> {
 
     if allow_origins.iter().any(|origin| origin == "*") {
         return Ok(base.allow_origin(Any));
+    }
+
+    if allow_origins.is_empty() {
+        return Ok(base);
     }
 
     let parsed = allow_origins

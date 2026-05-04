@@ -29,7 +29,6 @@ pub async fn get_backend_settings(
         port: state.backend_settings.port,
         projects_dir: state.backend_settings.projects_dir.clone(),
         projects: state.backend_settings.projects.clone(),
-        frontend_dir: state.backend_settings.frontend_dir.clone(),
         allow_origins: state.backend_settings.allow_origins.clone(),
         enable_terminal: state.backend_settings.enable_terminal,
         default_agents_per_project: state.backend_settings.default_agents_per_project,

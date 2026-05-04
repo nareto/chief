@@ -6,9 +6,6 @@ This repo contains:
 
 - `chief`: the single-project CLI
 - `chief_backend`: the multi-project scheduler + HTTP/WebSocket API
-- `frontend/`: the deprecated Next.js dashboard and project cockpit
-
-Frontend note: `frontend/` is deprecated and should be treated as unmaintained unless work is explicitly requested there.
 
 Chief stores state per target project in:
 
@@ -65,10 +62,6 @@ For the CLI and backend:
 For `chief init` and the `bd` flow:
 
 - `bd` on `PATH`
-
-For the deprecated frontend:
-
-- Node.js 20+ and npm, or Docker
 
 ## Quick start for a target project
 
@@ -269,8 +262,7 @@ cargo run --bin chief_backend -- \
   --port 8000 \
   --default-agents-per-project 1 \
   --max-agents-per-project 8 \
-  --enable-terminal \
-  --allow-origin http://localhost:3000
+  --enable-terminal
 ```
 
 Important runtime behavior:
@@ -288,7 +280,7 @@ Accepted auth headers:
 
 Current API surface includes:
 
-- dashboard project listing and refresh
+- project listing and refresh
 - start, pause, and stop controls
 - todo CRUD and delete-done
 - jobs, logs, state, events, and event streaming
@@ -300,97 +292,31 @@ Current API surface includes:
 - workspace reset
 - terminal WebSocket access when enabled
 
-## Frontend
-
-The UI in [`frontend/`](./frontend) is a Next.js 14 app backed by the backend API.
-
-It currently provides:
-
-- a dashboard of discovered projects
-- per-project cockpit views
-- live event streaming
-- interactive terminal access
-- todo management
-- requirements submission
-- readiness status and streaming output
-- suite-check execution
-- diff inspection
-- project settings editing for `.chief/chief.yaml`
-
-Runtime configuration:
-
-- `CHIEF_BACKEND_URL` controls the frontend's `/api/*` rewrite target
-- `NEXT_PUBLIC_CHIEF_WS_BASE` controls WebSocket base URLs
-
 ## Local development
 
-The repo's `justfile` is the quickest way to run the current dev setup.
-
-Frontend only:
-
-```bash
-just frontend
-```
-
-This:
-
-- syncs `frontend/node_modules` with `docker compose run --rm --no-deps frontend npm ci` when needed
-- starts the frontend container on `http://localhost:3000`
-
-Backend only:
+The repo's `justfile` is the quickest way to run the backend during development:
 
 ```bash
 export PROJECTS_DIR=/absolute/path/to/projects
 export PROJECT=/absolute/path/to/one/project
-export FRONTEND_HOST=127.0.0.1
 
 just backend
 ```
 
-Combined local dev:
+Useful recipes:
 
 ```bash
-just dev-full
-```
-
-Other useful recipes:
-
-```bash
-just dev      # alias for frontend only
-just down     # stop compose services
-just logs     # tail frontend logs
-```
-
-Current Compose behavior is intentionally limited:
-
-- `docker-compose.yml` defines only the `frontend` service
-- that container expects a backend already running on the host at `http://host.docker.internal:8000`
-- it exposes the frontend on `http://localhost:3000`
-
-You can also run the frontend without Docker:
-
-```bash
-cd frontend
-npm install
-CHIEF_BACKEND_URL=http://localhost:8000 \
-NEXT_PUBLIC_CHIEF_WS_BASE=ws://localhost:8000 \
-npm run dev
+just build    # build both binaries
+just build-chief
+just dev      # alias for backend
+just up       # alias for dev
 ```
 
 ## Testing and utility scripts
 
-Rust:
-
 ```bash
 cargo check
 cargo test
-```
-
-Frontend:
-
-```bash
-cd frontend
-npm test
 ```
 
 There is also a small helper for recording per-ticket Rust test evidence:
@@ -412,5 +338,4 @@ It writes logs and a TSV summary under `.chief/evidence/`.
 - `src/storage/` and `src/storage.rs`: SQLite persistence
 - `src/agent/`: `codex`, `claude`, `opencode`, and `cursor-agent` process adapters
 - `prompts/`: Markdown/Jinja prompt templates
-- `frontend/`: Next.js dashboard
 - `ops/`: small operational scripts and config fragments

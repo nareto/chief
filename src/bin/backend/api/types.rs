@@ -90,7 +90,6 @@ pub struct BackendSettingsResponse {
     pub port: u16,
     pub projects_dir: String,
     pub projects: Vec<String>,
-    pub frontend_dir: String,
     pub allow_origins: Vec<String>,
     pub enable_terminal: bool,
     pub default_agents_per_project: usize,
