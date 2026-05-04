@@ -9,9 +9,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use uuid::Uuid;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 struct TempDir {
     path: PathBuf,
 }
@@ -42,16 +39,6 @@ fn init_git_repo(path: &std::path::Path) {
         .status()
         .expect("git init should run");
     assert!(status.success(), "git init should succeed");
-}
-
-#[cfg(unix)]
-fn write_executable_script(path: &std::path::Path, content: &str) {
-    fs::write(path, content).expect("script should be written");
-    let mut permissions = fs::metadata(path)
-        .expect("script metadata should be readable")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("script should be executable");
 }
 
 fn git_head(path: &std::path::Path) -> String {
@@ -374,15 +361,6 @@ fn parse_loop_file_command() {
 }
 
 #[test]
-fn parse_bd_command() {
-    let cli = Cli::try_parse_from(["chief", "bd"]).expect("bd command should parse");
-
-    let Some(Commands::Bd) = cli.command else {
-        panic!("expected bd command");
-    };
-}
-
-#[test]
 fn parse_refactor_command() {
     let cli = Cli::try_parse_from(["chief", "refactor"]).expect("refactor command should parse");
 
@@ -405,7 +383,7 @@ fn parse_introspection_commands() {
         .expect("list suites command should parse");
     assert!(matches!(list.command, Some(Commands::List(_))));
 
-    let explain = Cli::try_parse_from(["chief", "explain", "flow", "--flow", "bd"])
+    let explain = Cli::try_parse_from(["chief", "explain", "flow", "--flow", "refactor"])
         .expect("explain flow command should parse");
     assert!(matches!(explain.command, Some(Commands::Explain(_))));
 
@@ -489,7 +467,7 @@ fn cli_schema_lists_typed_values_and_introspection_commands() {
         .expect("flow option should exist");
     assert_eq!(
         flow_option.possible_values,
-        vec!["loop_file", "bd", "refactor"]
+        vec!["loop_file", "refactor"]
     );
 
     let agent_option = schema
@@ -640,7 +618,6 @@ fn init_writes_full_default_chief_yaml_block() {
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
             chief_root: chief_root.clone(),
-            beads: false,
         })),
     };
 
@@ -664,126 +641,6 @@ fn init_writes_full_default_chief_yaml_block() {
     assert!(
         !chief_yaml.contains("\nsuites:"),
         "init default chief.yaml should only contain global chief options"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn init_runs_bd_init_and_ignores_beads_directory() {
-    let temp = TempDir::new("init-bd");
-    let chief_root = temp.path.join("chief-root");
-    let chief_root_config_dir = chief_root.join(".chief");
-    fs::create_dir_all(&chief_root_config_dir).expect("chief-root dir should be created");
-    fs::write(
-        chief_root_config_dir.join("chief.example.yaml"),
-        "chief: {}\n",
-    )
-    .expect("chief.example.yaml should be created");
-    fs::write(chief_root.join("bd_AGENTS.md"), "# bd agents\n")
-        .expect("bd_AGENTS.md should be created");
-
-    let bd_args_log = temp.path.join("bd-args.log");
-    let bd_stdin_log = temp.path.join("bd-stdin.log");
-    let bd_script = temp.path.join("mock-bd");
-    write_executable_script(
-        &bd_script,
-        &format!(
-            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"{}\"\ncat > \"{}\"\nmkdir -p .beads\n",
-            bd_args_log.display(),
-            bd_stdin_log.display()
-        ),
-    );
-
-    let cli = Cli {
-        project_dir: temp.path.clone(),
-        chief: CliChiefOverrides::default(),
-        file: None,
-        prompt: None,
-        watch_only: Vec::new(),
-        requirements: Vec::new(),
-        requirements_file: Vec::new(),
-        command: Some(Commands::Init(InitArgs {
-            chief_root: PathBuf::from("chief-root"),
-            beads: true,
-        })),
-    };
-
-    let args = match &cli.command {
-        Some(Commands::Init(args)) => args,
-        _ => panic!("expected init command"),
-    };
-    init_files::run_init_with_bd_command(&cli, args, &bd_script).expect("init should succeed");
-
-    assert!(
-        temp.path.join(".beads").is_dir(),
-        "init should create .beads via bd init"
-    );
-    assert_eq!(
-        fs::read_to_string(&bd_args_log).expect("bd args log should be readable"),
-        "init\n--agents-template\nchief-root/bd_AGENTS.md\n"
-    );
-    assert_eq!(
-        fs::read_to_string(&bd_stdin_log).expect("bd stdin log should be readable"),
-        "n\n"
-    );
-
-    let gitignore =
-        fs::read_to_string(temp.path.join(".gitignore")).expect(".gitignore should exist");
-    assert!(
-        gitignore.contains(".beads"),
-        "init should add .beads to .gitignore"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn init_skips_bd_init_when_beads_directory_already_exists() {
-    let temp = TempDir::new("init-bd-skip");
-    let chief_root = temp.path.join("chief-root");
-    let chief_root_config_dir = chief_root.join(".chief");
-    fs::create_dir_all(&chief_root_config_dir).expect("chief-root dir should be created");
-    fs::write(
-        chief_root_config_dir.join("chief.example.yaml"),
-        "chief: {}\n",
-    )
-    .expect("chief.example.yaml should be created");
-    fs::write(chief_root.join("bd_AGENTS.md"), "# bd agents\n")
-        .expect("bd_AGENTS.md should be created");
-    fs::create_dir_all(temp.path.join(".beads")).expect(".beads should exist");
-
-    let bd_script = temp.path.join("mock-bd");
-    let bd_log = temp.path.join("bd-called.log");
-    write_executable_script(
-        &bd_script,
-        &format!(
-            "#!/bin/sh\nset -eu\nprintf called > \"{}\"\nexit 1\n",
-            bd_log.display()
-        ),
-    );
-
-    let cli = Cli {
-        project_dir: temp.path.clone(),
-        chief: CliChiefOverrides::default(),
-        file: None,
-        prompt: None,
-        watch_only: Vec::new(),
-        requirements: Vec::new(),
-        requirements_file: Vec::new(),
-        command: Some(Commands::Init(InitArgs {
-            chief_root: PathBuf::from("chief-root"),
-            beads: true,
-        })),
-    };
-
-    let args = match &cli.command {
-        Some(Commands::Init(args)) => args,
-        _ => panic!("expected init command"),
-    };
-    init_files::run_init_with_bd_command(&cli, args, &bd_script).expect("init should succeed");
-
-    assert!(
-        !bd_log.exists(),
-        "init should not invoke bd init when .beads already exists"
     );
 }
 
@@ -842,7 +699,7 @@ fn build_cli_run_report_counts_until_pass_iterations_and_uses_cached_usage_snaps
             None,
             None,
             "info",
-            Some(Phase::Bd),
+            Some(Phase::Refactor),
             EventType::PhaseChange,
             "until_pass loop iteration 2/50",
             BTreeMap::new(),

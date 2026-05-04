@@ -1,5 +1,5 @@
 chief:
-  # Flow to run (`loop_file`, `bd`, or `refactor`).
+  # Flow to run (`loop_file` or `refactor`).
   flow: loop_file # loop_file requires `chief --file <path>` (or `chief loop_file --file <path>`)
   # Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`; `cursor` is also accepted).
   agent: codex

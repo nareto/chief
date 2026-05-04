@@ -34,9 +34,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 const CHIEF_LONG_ABOUT: &str = "Chief orchestrates project flows, suite commands, and readiness checks.\n\n\
-The default `chief` invocation resolves its flow from config and then runs one of three behaviors:\n\
+The default `chief` invocation resolves its flow from config and then runs one of two behaviors:\n\
 - `loop_file`: execute a single convergence task from `--file` or `--prompt`\n\
-- `bd`: drain `bd ready --json` work using `prompts/bd.md`\n\
 - `refactor`: process queued todos from `todos.yaml`\n\n\
 For CLI-only discovery, use `chief schema --json`, `chief config show --resolved`,\n\
 `chief list suites`, `chief explain flow`, and `chief doctor`.";
@@ -49,7 +48,7 @@ const CHIEF_AFTER_HELP: &str = "Examples:
   chief schema --json
   chief config show --resolved
   chief list suites --json
-  chief explain flow --flow bd
+  chief explain flow --flow refactor
   chief doctor
 
 Config precedence:
@@ -67,7 +66,7 @@ mod chief_option_help {
         pub help: &'static str,
     }
 
-    pub(super) const FLOW: &str = "Flow to run (`loop_file`, `bd`, or `refactor`).";
+    pub(super) const FLOW: &str = "Flow to run (`loop_file` or `refactor`).";
     pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`; `cursor` is also accepted).";
     pub(super) const MODEL: &str = "Model override passed to the selected agent (for `cursor-agent`, use Cursor's exact model id such as `gpt-5.4-xhigh`).";
     pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, or `xhigh`).";
@@ -168,8 +167,6 @@ mod chief_option_help {
 enum CliFlowValue {
     #[value(name = "loop_file", alias = "loop-file")]
     LoopFile,
-    #[value(name = "bd")]
-    Bd,
     #[value(name = "refactor")]
     Refactor,
 }
@@ -178,7 +175,6 @@ impl CliFlowValue {
     fn as_str(self) -> &'static str {
         match self {
             Self::LoopFile => "loop_file",
-            Self::Bd => "bd",
             Self::Refactor => "refactor",
         }
     }
@@ -186,7 +182,6 @@ impl CliFlowValue {
     fn from_flow_kind(flow: FlowKind) -> Self {
         match flow {
             FlowKind::LoopFile => Self::LoopFile,
-            FlowKind::Bd => Self::Bd,
             FlowKind::Refactor => Self::Refactor,
         }
     }
@@ -398,8 +393,6 @@ enum Commands {
     /// Execute one loop_file flow run from a markdown file.
     #[command(name = "loop_file", visible_alias = "loop-file")]
     LoopFile(LoopFileArgs),
-    /// Run a bd-driven convergence loop using prompts/bd.md.
-    Bd,
     /// Run queued todos using the refactor flow.
     Refactor,
     /// Print a self-describing schema for the CLI.
@@ -419,9 +412,6 @@ struct InitArgs {
     /// Path to the Chief repo root that contains *.example.yaml files.
     #[arg(long, default_value = "../chief")]
     chief_root: PathBuf,
-    /// Initialize beads integration (runs `bd init`).
-    #[arg(long, default_value_t = false)]
-    beads: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1139,7 +1129,7 @@ fn build_cli_schema() -> CliSchema {
             "chief schema --json".to_owned(),
             "chief config show --resolved".to_owned(),
             "chief list suites --json".to_owned(),
-            "chief explain flow --flow bd".to_owned(),
+            "chief explain flow --flow refactor".to_owned(),
             "chief doctor".to_owned(),
         ],
         exit_codes: vec![
@@ -1168,18 +1158,6 @@ fn build_cli_schema() -> CliSchema {
                         false,
                         Some("../chief"),
                         Vec::new(),
-                        &[],
-                        &[],
-                    ),
-                    schema_option(
-                        Some("beads"),
-                        None,
-                        Some("BEADS"),
-                        "Initialize beads integration (runs `bd init`).",
-                        false,
-                        false,
-                        Some("false"),
-                        bool_possible_values(),
                         &[],
                         &[],
                     ),
@@ -1358,14 +1336,6 @@ fn build_cli_schema() -> CliSchema {
                         &["Stability only counts when none of the watched paths changed."],
                     ),
                 ],
-                subcommands: Vec::new(),
-                notes: vec!["Global override flags are also accepted.".to_owned()],
-            },
-            SchemaCommand {
-                name: "bd".to_owned(),
-                aliases: Vec::new(),
-                about: "Run a bd-driven convergence loop using prompts/bd.md.".to_owned(),
-                options: Vec::new(),
                 subcommands: Vec::new(),
                 notes: vec!["Global override flags are also accepted.".to_owned()],
             },
@@ -1606,20 +1576,6 @@ fn build_flow_explanation(flow: CliFlowValue) -> FlowExplanation {
                 "chief --flow loop_file --prompt \"Refine the API error handling\"".to_owned(),
             ],
         },
-        CliFlowValue::Bd => FlowExplanation {
-            flow: flow.as_str().to_owned(),
-            summary: "Drain `bd ready --json` work until no ready items remain.".to_owned(),
-            execution_model:
-                "Chief synthesizes one bd todo, feeds `prompts/bd.md`, and loops until readiness is empty."
-                    .to_owned(),
-            inputs: vec!["No flow-specific inputs.".to_owned()],
-            disallowed_inputs: vec![
-                "--file and --prompt are not used by bd.".to_owned(),
-                "--watch-only is ignored by bd.".to_owned(),
-            ],
-            prompt_sources: vec!["prompts/bd.md".to_owned(), "`bd ready --json` output".to_owned()],
-            examples: vec!["chief bd".to_owned(), "chief --flow bd".to_owned()],
-        },
         CliFlowValue::Refactor => FlowExplanation {
             flow: flow.as_str().to_owned(),
             summary: "Run queued todos using the refactor flow.".to_owned(),
@@ -1849,21 +1805,6 @@ fn build_doctor_report(project_dir: &Path, cli: &Cli) -> DoctorReport {
                     }),
                 }
 
-                if flow_name.eq_ignore_ascii_case("bd") {
-                    match command_presence_detail("bd") {
-                        Ok(detail) => checks.push(DoctorCheck {
-                            name: "bd_binary".to_owned(),
-                            status: "ok".to_owned(),
-                            detail: format!("bd: {detail}"),
-                        }),
-                        Err(err) => checks.push(DoctorCheck {
-                            name: "bd_binary".to_owned(),
-                            status: "fail".to_owned(),
-                            detail: err.to_string(),
-                        }),
-                    }
-                }
-
                 checks.push(DoctorCheck {
                     name: "suite_count".to_owned(),
                     status: if chief_yaml.suites.is_empty() {
@@ -1971,7 +1912,6 @@ fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
         Commands::TailEvents(args) => run_tail_events(cli, args),
         Commands::Suite(args) => suite_commands::run_suite_command(cli, args),
         Commands::LoopFile(args) => run_loop_file(cli, args),
-        Commands::Bd => run_bd(cli),
         Commands::Refactor => run_refactor(cli),
         Commands::Schema(args) => run_schema(args),
         Commands::Config(args) => run_config(cli, args),
@@ -2048,10 +1988,6 @@ fn run(cli: &Cli) -> Result<()> {
     if cli.file.is_some() || cli.prompt.is_some() {
         bail!("--file and --prompt are only supported when flow resolves to 'loop_file'");
     }
-    if matches!(flow_kind, FlowKind::Bd) {
-        return run_bd(cli);
-    }
-
     run_todo_queue_flow(cli, context, flow_kind)
 }
 
@@ -2130,109 +2066,6 @@ fn run_refactor(cli: &Cli) -> Result<()> {
         bail!("--file and --prompt are only supported when flow resolves to 'loop_file'");
     }
     run_todo_queue_flow(cli, context, FlowKind::Refactor)
-}
-
-fn run_bd(cli: &Cli) -> Result<()> {
-    let report_started_at = Utc::now();
-    let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
-    print_config_summary(&context, &cli.chief);
-    context.chief_yaml.chief.flow = FlowKind::Bd.as_str().to_owned();
-    println!("bd: started {}", context.project_dir.display());
-    let head_before = context.git.head_commit(&context.project_dir).ok();
-
-    let synthetic_todo = Todo {
-        id: Todo::compute_id("bd:ready", "prompts/bd.md"),
-        todo: "bd ready convergence".to_owned(),
-        expectations:
-            "Resolve the current ready bd tickets using prompts/bd.md until `bd ready --json` is empty."
-                .to_owned(),
-        priority: 1,
-        test_suites: Vec::new(),
-        status: TodoStatus::Pending,
-        done_at_commit: None,
-    };
-
-    let engine = ChiefEngine::new(context.clone());
-    let run_id = engine.start_run()?;
-    let mut job = context.create_job(
-        &run_id,
-        1,
-        FlowKind::Bd,
-        Some(synthetic_todo.id.clone()),
-        None,
-    )?;
-    job = context.set_job_status(job, JobStatus::Running, None)?;
-
-    let result = engine.run_single_todo_with_retries(
-        &run_id,
-        &job.id,
-        1,
-        synthetic_todo,
-        FlowKind::Bd,
-        context.project_dir.clone(),
-        cli.chief.model.clone(),
-        Vec::new(),
-        Arc::new(AtomicBool::new(false)),
-        1,
-        |attempt, total, err| {
-            println!("bd: retry {attempt}/{total} failed: {err:#}");
-        },
-    );
-
-    let exit_status = if let Err(err) = &result {
-        if err.is_unrecoverable() {
-            RunExitStatus::UnrecoverableFailure
-        } else {
-            RunExitStatus::Failure
-        }
-    } else {
-        RunExitStatus::Success
-    };
-    let exit_reason = result
-        .as_ref()
-        .err()
-        .map(|err| err.to_string())
-        .or_else(|| Some("bd flow completed".to_owned()));
-    let finalize_result = match &result {
-        Ok(_) => context
-            .set_job_status(job, JobStatus::Completed, None)
-            .and_then(|_| engine.finish_run(&run_id, RunExitStatus::Success)),
-        Err(err) => {
-            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
-            engine.finish_run(&run_id, exit_status)
-        }
-    };
-
-    if let Ok(outcome) = &result {
-        println!(
-            "completed bd {}{}",
-            outcome.todo_id,
-            outcome
-                .commit_hash
-                .as_deref()
-                .map(|hash| format!(" @ {hash}"))
-                .unwrap_or_default()
-        );
-    }
-    if let Err(err) = &finalize_result {
-        eprintln!("warning: failed to finalize bd run state: {err:#}");
-    }
-    if let Err(err) = print_cli_run_report(
-        &context,
-        Some(run_id.as_str()),
-        head_before.as_deref(),
-        report_started_at,
-        exit_status,
-        exit_reason.as_deref(),
-    ) {
-        eprintln!("warning: failed to print run report: {err:#}");
-    }
-    finalize_result?;
-
-    match result {
-        Ok(_) => Ok(()),
-        Err(err) => Err(err.into_error()).context("bd execution failed"),
-    }
 }
 
 fn run_clean_done(cli: &Cli) -> Result<()> {

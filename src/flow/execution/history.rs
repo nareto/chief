@@ -4,7 +4,7 @@ impl<'a> FlowExecution<'a> {
     fn is_prompt_family_phase(phase: Option<Phase>) -> bool {
         matches!(
             phase,
-            Some(Phase::SinglePrompt | Phase::LoopFile | Phase::Bd | Phase::Refactor)
+            Some(Phase::SinglePrompt | Phase::LoopFile | Phase::Refactor)
         )
     }
 

@@ -26,7 +26,6 @@ use uuid::Uuid;
 pub enum FlowKind {
     #[default]
     LoopFile,
-    Bd,
     Refactor,
 }
 
@@ -34,7 +33,6 @@ impl FlowKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LoopFile => "loop_file",
-            Self::Bd => "bd",
             Self::Refactor => "refactor",
         }
     }
@@ -66,7 +64,7 @@ impl fmt::Display for FlowParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown flow '{}'; expected one of: loop_file, bd, refactor",
+            "unknown flow '{}'; expected one of: loop_file, refactor",
             self.input
         )
     }
@@ -80,7 +78,6 @@ impl FromStr for FlowKind {
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "loop_file" => Ok(Self::LoopFile),
-            "bd" => Ok(Self::Bd),
             "refactor" => Ok(Self::Refactor),
             other => Err(FlowParseError {
                 input: other.to_owned(),

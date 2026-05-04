@@ -11,7 +11,6 @@ Chief stores state per target project in:
 
 - `.chief/chief.yaml`: project config
 - `.chief/chief.db`: SQLite state for todos, runs, jobs, events, and readiness
-- `.beads/`: bd state, when initialized with `chief init`
 
 Queued execution happens in sibling Git worktrees under:
 
@@ -21,10 +20,9 @@ Successful worker branches are merged back into the project's current branch.
 
 ## Runtime flows
 
-Chief currently supports three flow kinds:
+Chief currently supports two flow kinds:
 
 - `loop_file`: CLI-only. Runs a convergence loop from a Markdown task file.
-- `bd`: converges against the current `bd ready --json` queue using `prompts/bd.md`.
 - `refactor`: claims pending SQLite todos and runs the queued cleanup flow.
 
 Prompt templates live in this repo's [`prompts/`](./prompts) directory:
@@ -33,7 +31,6 @@ Prompt templates live in this repo's [`prompts/`](./prompts) directory:
 - `structural_cleanup.md`
 - `mechanical_cleanup.md`
 - `requirements.md`
-- `bd.md`
 
 Requirements ingestion is separate from execution: it runs `prompts/requirements.md`, expects YAML shaped like `todos: [...]`, and replaces the SQLite todo queue for the target project.
 
@@ -59,10 +56,6 @@ For the CLI and backend:
   - `codex` is the default
   - `claude`, `opencode`, and `cursor-agent` are also supported
 
-For `chief init` and the `bd` flow:
-
-- `bd` on `PATH`
-
 ## Quick start for a target project
 
 Build the binaries from this repo:
@@ -85,11 +78,10 @@ Notes:
 - `init` defaults `--chief-root` to `../chief`.
 - It creates `.chief/chief.yaml`.
 - It symlinks `.chief/chief.example.yaml` back to this repo's example file.
-- It runs `bd init --agents-template <chief_root>/bd_AGENTS.md` if `.beads/` does not already exist.
 - It appends these ignore entries if missing:
   - `.chief/chief.db`
   - `.chief/chief.example.yaml`
-  - `.beads`
+  - `.chief/codex-home`
 
 If an older project still uses root-level `chief.yaml`, `chief.example.yaml`, or `chief.db`, migrate it with:
 
@@ -116,12 +108,6 @@ cargo run --bin chief -- \
   --project-dir /path/to/project \
   loop_file \
   --file docs/task.md
-```
-
-Run the `bd` convergence flow:
-
-```bash
-cargo run --bin chief -- --project-dir /path/to/project bd
 ```
 
 Run the queued `refactor` flow:
@@ -267,7 +253,7 @@ cargo run --bin chief_backend -- \
 
 Important runtime behavior:
 
-- backend start only supports `bd` and `refactor`
+- backend start only supports `refactor`
 - `loop_file` is intentionally CLI-only
 - project start runs readiness checks unless the caller sets `start_anyway`
 - terminal WebSocket routes are only mounted when `--enable-terminal` is set
