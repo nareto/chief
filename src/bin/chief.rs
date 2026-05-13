@@ -409,7 +409,7 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct InitArgs {
-    /// Path to the Chief repo root that contains *.example.yaml files.
+    /// Deprecated compatibility option; `chief init` uses embedded example files.
     #[arg(long, default_value = "../chief")]
     chief_root: PathBuf,
 }
@@ -1148,20 +1148,18 @@ fn build_cli_schema() -> CliSchema {
                 name: "init".to_owned(),
                 aliases: Vec::new(),
                 about: "Initialize Chief config files in a new project directory.".to_owned(),
-                options: vec![
-                    schema_option(
-                        Some("chief-root"),
-                        None,
-                        Some("CHIEF_ROOT"),
-                        "Path to the Chief repo root that contains *.example.yaml files.",
-                        false,
-                        false,
-                        Some("../chief"),
-                        Vec::new(),
-                        &[],
-                        &[],
-                    ),
-                ],
+                options: vec![schema_option(
+                    Some("chief-root"),
+                    None,
+                    Some("CHIEF_ROOT"),
+                    "Deprecated compatibility option; `chief init` uses embedded example files.",
+                    false,
+                    false,
+                    Some("../chief"),
+                    Vec::new(),
+                    &[],
+                    &[],
+                )],
                 subcommands: Vec::new(),
                 notes: vec!["Global override flags are also accepted.".to_owned()],
             },

@@ -4,7 +4,7 @@ use crate::domain::{EventRecord, EventType, JobRecord, JobStatus, Phase, Todo};
 use crate::flow::FlowKind;
 use crate::git::ShellGitOps;
 use crate::paths;
-use crate::prompt::FsPromptStore;
+use crate::prompt::EmbeddedPromptStore;
 use crate::storage::ProjectStore;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
@@ -20,7 +20,7 @@ pub struct ProjectContext {
     pub config_path: PathBuf,
     pub chief_yaml: ChiefYaml,
     pub store: ProjectStore,
-    pub prompts: FsPromptStore,
+    pub prompts: EmbeddedPromptStore,
     pub git: ShellGitOps,
 }
 
@@ -33,7 +33,7 @@ impl ProjectContext {
         let store = ProjectStore::new(&project_dir);
         store.init()?;
 
-        let prompts = FsPromptStore::from_workspace_prompts()?;
+        let prompts = EmbeddedPromptStore::from_embedded_prompts()?;
 
         let git = ShellGitOps::discover(&project_dir)
             .with_context(|| format!("{} is not a git repository", project_dir.display()))?;

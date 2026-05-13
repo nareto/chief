@@ -465,10 +465,7 @@ fn cli_schema_lists_typed_values_and_introspection_commands() {
         .iter()
         .find(|option| option.long.as_deref() == Some("flow"))
         .expect("flow option should exist");
-    assert_eq!(
-        flow_option.possible_values,
-        vec!["loop_file", "refactor"]
-    );
+    assert_eq!(flow_option.possible_values, vec!["loop_file", "refactor"]);
 
     let agent_option = schema
         .global_options
@@ -599,14 +596,6 @@ fn loop_file_fails_when_input_file_is_missing() {
 #[test]
 fn init_writes_full_default_chief_yaml_block() {
     let temp = TempDir::new("init-default-chief-yaml");
-    let chief_root = temp.path.join("chief-root");
-    let chief_root_config_dir = chief_root.join(".chief");
-    fs::create_dir_all(&chief_root_config_dir).expect("chief-root dir should be created");
-    fs::write(
-        chief_root_config_dir.join("chief.example.yaml"),
-        "chief: {}\n",
-    )
-    .expect("chief.example.yaml should be created");
 
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -617,7 +606,7 @@ fn init_writes_full_default_chief_yaml_block() {
         requirements: Vec::new(),
         requirements_file: Vec::new(),
         command: Some(Commands::Init(InitArgs {
-            chief_root: chief_root.clone(),
+            chief_root: PathBuf::from("/definitely/not/a/chief/checkout"),
         })),
     };
 
@@ -630,6 +619,17 @@ fn init_writes_full_default_chief_yaml_block() {
     let chief_yaml = fs::read_to_string(chief::paths::chief_yaml_path(&temp.path))
         .expect("chief.yaml should be readable");
     assert_eq!(chief_yaml, init_files::INIT_CHIEF_YAML_CONTENT);
+    let chief_example_path = chief::paths::chief_example_path(&temp.path);
+    let chief_example =
+        fs::read_to_string(&chief_example_path).expect("chief.example.yaml should be readable");
+    assert_eq!(chief_example, init_files::CHIEF_EXAMPLE_YAML_CONTENT);
+    assert!(
+        !fs::symlink_metadata(&chief_example_path)
+            .expect("chief.example.yaml metadata should be readable")
+            .file_type()
+            .is_symlink(),
+        "init should write an embedded example config instead of symlinking to a checkout"
+    );
     assert!(
         !chief_yaml.contains("\n  max_retries:"),
         "init default chief.yaml should not include max_retries"

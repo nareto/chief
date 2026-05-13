@@ -27,7 +27,13 @@ pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   use_agent_log_truncation_for_stdout_logs: false
 "#;
 
+pub(super) const CHIEF_EXAMPLE_YAML_CONTENT: &str =
+    include_str!("../../../.chief/chief.example.yaml");
+
 pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
+    // Keep parsing --chief-root for compatibility; init no longer needs a checkout.
+    let _ = &args.chief_root;
+
     let project_dir = &cli.project_dir;
     if !project_dir.exists() {
         bail!(
@@ -39,31 +45,17 @@ pub(super) fn run_init(cli: &Cli, args: &InitArgs) -> Result<()> {
         bail!("project path is not a directory: {}", project_dir.display());
     }
 
-    let chief_root_for_checks = if args.chief_root.is_absolute() {
-        args.chief_root.clone()
-    } else {
-        project_dir.join(&args.chief_root)
-    };
-    let chief_example_source = paths::chief_example_path(&chief_root_for_checks);
-    if !chief_example_source.is_file() {
-        bail!(
-            "example file not found: {}\n\
-             hint: use `chief init --chief-root <path>` to point to the chief repo directory",
-            chief_example_source.display()
-        );
-    }
-
     let chief_dir = paths::chief_dir(project_dir);
     fs::create_dir_all(&chief_dir)
         .with_context(|| format!("failed to create {}", chief_dir.display()))?;
 
-    let chief_example_link = paths::chief_example_path(project_dir);
+    let chief_example_path = paths::chief_example_path(project_dir);
     let chief_yaml_path = paths::chief_yaml_path(project_dir);
 
     let mut created = 0usize;
     let mut skipped = 0usize;
 
-    if create_file_symlink_if_missing(&chief_example_source, &chief_example_link)? {
+    if write_file_if_missing(&chief_example_path, CHIEF_EXAMPLE_YAML_CONTENT)? {
         created += 1;
     } else {
         skipped += 1;
@@ -133,34 +125,4 @@ fn gitignore_contains_entry(content: &str, entry: &str) -> bool {
             || line.strip_prefix('/').is_some_and(|value| value == entry)
             || line.strip_prefix("./").is_some_and(|value| value == entry)
     })
-}
-
-#[cfg(unix)]
-fn create_file_symlink_if_missing(target: &Path, link: &Path) -> Result<bool> {
-    match std::os::unix::fs::symlink(target, link) {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(err) => Err(err).with_context(|| {
-            format!(
-                "failed to create symlink {} -> {}",
-                link.display(),
-                target.display()
-            )
-        }),
-    }
-}
-
-#[cfg(windows)]
-fn create_file_symlink_if_missing(target: &Path, link: &Path) -> Result<bool> {
-    match std::os::windows::fs::symlink_file(target, link) {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(err) => Err(err).with_context(|| {
-            format!(
-                "failed to create symlink {} -> {}",
-                link.display(),
-                target.display()
-            )
-        }),
-    }
 }

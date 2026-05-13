@@ -25,7 +25,7 @@ Chief currently supports two flow kinds:
 - `loop_file`: CLI-only. Runs a convergence loop from a Markdown task file.
 - `refactor`: claims pending SQLite todos and runs the queued cleanup flow.
 
-Prompt templates live in this repo's [`prompts/`](./prompts) directory:
+Prompt templates live in this repo's [`prompts/`](./prompts) directory and are embedded into the binaries at compile time:
 
 - `loop_file_prompt.md`
 - `structural_cleanup.md`
@@ -69,15 +69,13 @@ Initialize a target project:
 ```bash
 cargo run --bin chief -- \
   --project-dir /path/to/project \
-  init \
-  --chief-root /path/to/chief
+  init
 ```
 
 Notes:
 
-- `init` defaults `--chief-root` to `../chief`.
 - It creates `.chief/chief.yaml`.
-- It symlinks `.chief/chief.example.yaml` back to this repo's example file.
+- It writes `.chief/chief.example.yaml` from the embedded example config.
 - It appends these ignore entries if missing:
   - `.chief/chief.db`
   - `.chief/chief.example.yaml`
