@@ -16,4 +16,3 @@ frontend/tsconfig.tsbuildinfo
 .env
 
 .chief/chief.example.yaml
-.chief/todos.example.yaml

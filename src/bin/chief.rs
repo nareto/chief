@@ -36,7 +36,7 @@ use std::time::Duration;
 const CHIEF_LONG_ABOUT: &str = "Chief orchestrates project flows, suite commands, and readiness checks.\n\n\
 The default `chief` invocation resolves its flow from config and then runs one of two behaviors:\n\
 - `loop_file`: execute a single convergence task from `--file` or `--prompt`\n\
-- `refactor`: process queued todos from `todos.yaml`\n\n\
+- `refactor`: process queued todos from the SQLite project queue\n\n\
 For CLI-only discovery, use `chief schema --json`, `chief config show --resolved`,\n\
 `chief list suites`, `chief explain flow`, and `chief doctor`.";
 

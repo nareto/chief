@@ -96,7 +96,7 @@ Run a file-driven loop:
 ```bash
 cargo run --bin chief -- \
   --project-dir /path/to/project \
-  --file docs/task.md
+  --file /path/to/task.md
 ```
 
 Equivalent explicit form:
@@ -105,7 +105,7 @@ Equivalent explicit form:
 cargo run --bin chief -- \
   --project-dir /path/to/project \
   loop_file \
-  --file docs/task.md
+  --file /path/to/task.md
 ```
 
 Run the queued `refactor` flow:
@@ -137,8 +137,8 @@ Or load requirements from files:
 ```bash
 cargo run --bin chief -- \
   --project-dir /path/to/project \
-  --requirements-file docs/requirements.md \
-  --requirements-file docs/followups.md
+  --requirements-file /path/to/requirements.md \
+  --requirements-file /path/to/followups.md
 ```
 
 Useful maintenance commands:
@@ -303,14 +303,6 @@ cargo check
 cargo test
 ```
 
-There is also a small helper for recording per-ticket Rust test evidence:
-
-```bash
-ops/per_ticket_cargo_test.sh <ticket-id> [ticket-id...]
-```
-
-It writes logs and a TSV summary under `.chief/evidence/`.
-
 ## Repository layout
 
 - `src/bin/chief.rs`: single-project CLI
@@ -322,4 +314,3 @@ It writes logs and a TSV summary under `.chief/evidence/`.
 - `src/storage/` and `src/storage.rs`: SQLite persistence
 - `src/agent/`: `codex`, `claude`, `opencode`, and `cursor-agent` process adapters
 - `prompts/`: Markdown/Jinja prompt templates
-- `ops/`: small operational scripts and config fragments

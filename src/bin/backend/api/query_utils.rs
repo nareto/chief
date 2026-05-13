@@ -11,10 +11,8 @@ pub(crate) fn is_internal_workspace_state_file(path: &str) -> bool {
         || path == ".chief/"
         || path == ".chief/chief.db"
         || path.starts_with(".chief/chief.db-")
-        || path == ".chief/todos.yaml"
         || path == "chief.db"
         || path.starts_with("chief.db-")
-        || path == "todos.yaml"
 }
 
 pub(crate) fn resolve_last_done_todo_committed_at(
