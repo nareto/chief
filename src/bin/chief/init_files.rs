@@ -18,6 +18,7 @@ pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   mcp_servers: {} # chief-managed MCP; remove this key to defer to personal Claude/Codex/Cursor config
   max_loop_iterations: 20
   required_stable_iterations: 2
+  change_exclude: []
   agent_timeout_seconds: 2700
   # agent_wait_seconds: 60 # fixed wait between agent calls; overrides respect_limits when set
   suite_command_timeout_seconds: 1800

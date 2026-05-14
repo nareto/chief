@@ -731,6 +731,192 @@ fn run_agent_with_git_changes_detects_absolute_watch_only_file_outside_project()
 }
 
 #[test]
+fn run_agent_with_git_changes_ignores_default_chief_db_change() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(project_dir.join(".chief")).expect(".chief dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "default internal db changes should not affect convergence".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = NoopPromptStore;
+    let dirty_flag = Arc::new(AtomicBool::new(false));
+    let dirty_file = project_dir.join("agent-ran.txt");
+    let agent = OneShotDirtyAgent::new(dirty_file, dirty_flag.clone());
+    let git = DirtyTrackingGitOps::new(project_dir.clone(), ".chief/chief.db", dirty_flag);
+    let chief_config = ChiefConfig::default();
+
+    let execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
+    };
+
+    let run = execution
+        .run_agent_with_git_changes(
+            Phase::LoopFile,
+            "write chief db state".to_owned(),
+            Vec::new(),
+        )
+        .expect("agent run should complete");
+
+    assert!(
+        !run.had_git_changes,
+        "chief db changes should be excluded from convergence"
+    );
+    assert!(
+        run.touched_files.is_empty(),
+        "excluded chief db should not be reported as touched"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn run_agent_with_git_changes_applies_configured_change_exclude_to_git_snapshot() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(project_dir.join("generated")).expect("generated dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "configured change excludes should filter git snapshots".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = NoopPromptStore;
+    let dirty_flag = Arc::new(AtomicBool::new(false));
+    let dirty_file = project_dir.join("generated/output.log");
+    let agent = OneShotDirtyAgent::new(dirty_file, dirty_flag.clone());
+    let git = DirtyTrackingGitOps::new(project_dir.clone(), "generated/output.log", dirty_flag);
+    let chief_config = ChiefConfig {
+        change_exclude: vec!["generated/**".to_owned()],
+        ..ChiefConfig::default()
+    };
+
+    let execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
+    };
+
+    let run = execution
+        .run_agent_with_git_changes(
+            Phase::LoopFile,
+            "write generated output".to_owned(),
+            Vec::new(),
+        )
+        .expect("agent run should complete");
+
+    assert!(
+        !run.had_git_changes,
+        "configured change_exclude globs should filter normal git snapshots"
+    );
+    assert!(run.touched_files.is_empty());
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn run_agent_with_git_changes_applies_configured_change_exclude_to_watch_only_snapshot() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(project_dir.join("generated")).expect("generated dir should be created");
+    let watched_file = project_dir.join("generated/output.log");
+    fs::write(&watched_file, "before\n").expect("initial watched file should be written");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "configured change excludes should filter watch-only snapshots".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = NoopPromptStore;
+    let dirty_flag = Arc::new(AtomicBool::new(false));
+    let agent = OneShotDirtyAgent::new(watched_file, dirty_flag);
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig {
+        change_exclude: vec!["generated/**".to_owned()],
+        ..ChiefConfig::default()
+    };
+
+    let execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: vec!["generated".to_owned()],
+    };
+
+    let run = execution
+        .run_agent_with_git_changes(
+            Phase::LoopFile,
+            "write generated output".to_owned(),
+            Vec::new(),
+        )
+        .expect("agent run should complete");
+
+    assert!(
+        !run.had_git_changes,
+        "configured change_exclude globs should filter watch-only snapshots"
+    );
+    assert!(run.touched_files.is_empty());
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
 fn execute_suite_command_returns_timeout_exit_code() {
     let project_dir = temp_project_dir();
     fs::create_dir_all(&project_dir).expect("project dir should be created");

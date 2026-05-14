@@ -80,6 +80,8 @@ mod chief_option_help {
         "Maximum convergence iterations for loop-style flows.";
     pub(super) const REQUIRED_STABLE_ITERATIONS: &str =
         "Consecutive stable iterations required before convergence is done.";
+    pub(super) const CHANGE_EXCLUDE: &str =
+        "Additional glob patterns to exclude from convergence change detection (repeatable).";
     pub(super) const AGENT_TIMEOUT_SECONDS: &str =
         "Per-agent invocation timeout in seconds (0 disables timeout).";
     pub(super) const AGENT_WAIT_SECONDS: &str = "Fixed wait in seconds between agent calls; when set, it overrides respect_limits logic (0 means no wait).";
@@ -95,7 +97,7 @@ mod chief_option_help {
         "When true, apply agent log truncation to stdout log output too.";
 
     #[cfg(test)]
-    pub(super) const SPECS: [ChiefOptionHelpSpec; 16] = [
+    pub(super) const SPECS: [ChiefOptionHelpSpec; 17] = [
         ChiefOptionHelpSpec {
             key: "flow",
             help: FLOW,
@@ -131,6 +133,10 @@ mod chief_option_help {
         ChiefOptionHelpSpec {
             key: "required_stable_iterations",
             help: REQUIRED_STABLE_ITERATIONS,
+        },
+        ChiefOptionHelpSpec {
+            key: "change_exclude",
+            help: CHANGE_EXCLUDE,
         },
         ChiefOptionHelpSpec {
             key: "agent_timeout_seconds",
@@ -296,6 +302,14 @@ struct CliChiefOverrides {
         help_heading = "Chief Overrides"
     )]
     required_stable_iterations: Option<usize>,
+    #[arg(
+        long = "change-exclude",
+        visible_alias = "watch-exclude",
+        global = true,
+        help = chief_option_help::CHANGE_EXCLUDE,
+        help_heading = "Chief Overrides"
+    )]
+    change_exclude: Vec<String>,
     #[arg(
         long,
         global = true,
@@ -578,6 +592,7 @@ impl CliChiefOverrides {
             max_retries,
             max_loop_iterations,
             required_stable_iterations,
+            change_exclude,
             agent_timeout_seconds,
             agent_wait_seconds,
             suite_command_timeout_seconds,
@@ -606,6 +621,7 @@ impl CliChiefOverrides {
             max_retries,
             max_loop_iterations,
             required_stable_iterations,
+            change_exclude,
             agent_timeout_seconds,
             agent_wait_seconds,
             suite_command_timeout_seconds,
@@ -937,6 +953,21 @@ fn build_cli_schema() -> CliSchema {
             Vec::new(),
             &[],
             &[],
+        ),
+        schema_option(
+            Some("change-exclude"),
+            None,
+            Some("CHANGE_EXCLUDE"),
+            chief_option_help::CHANGE_EXCLUDE,
+            false,
+            true,
+            None,
+            Vec::new(),
+            &[],
+            &[
+                "Built-in excludes always ignore Chief SQLite state such as `.chief/chief.db` and `.chief/chief.db-*`.",
+                "`--watch-exclude` is accepted as an alias.",
+            ],
         ),
         schema_option(
             Some("agent-timeout-seconds"),
@@ -1559,6 +1590,7 @@ fn build_flow_explanation(flow: CliFlowValue) -> FlowExplanation {
             inputs: vec![
                 "--file <path> or --prompt <text>".to_owned(),
                 "--watch-only <path> (repeatable)".to_owned(),
+                "--change-exclude <glob> (repeatable)".to_owned(),
             ],
             disallowed_inputs: vec![
                 "Providing both --file and --prompt together.".to_owned(),
@@ -1634,6 +1666,7 @@ fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
             "required_stable_iterations",
             overrides.required_stable_iterations.is_some(),
         ),
+        ("change_exclude", !overrides.change_exclude.is_empty()),
         (
             "agent_timeout_seconds",
             overrides.agent_timeout_seconds.is_some(),

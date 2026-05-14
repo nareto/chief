@@ -1,6 +1,14 @@
 use super::*;
+use glob::Pattern;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+
+const BUILT_IN_CHANGE_EXCLUDES: &[&str] = &[
+    ".chief/chief.db",
+    ".chief/chief.db-*",
+    "chief.db",
+    "chief.db-*",
+];
 
 fn mirror_agent_chunk_to_stdout(text: &str) {
     if text.is_empty() {
@@ -70,10 +78,14 @@ impl<'a> FlowExecution<'a> {
             }
         }
 
+        let excludes = ChangeExcludes::from_config(&self.chief_config.change_exclude)?;
         let before_files = self
             .git
             .changed_files(&self.project_dir)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|file| !excludes.is_excluded(file))
+            .collect::<Vec<_>>();
 
         self.log_event(
             "info",
@@ -130,7 +142,10 @@ impl<'a> FlowExecution<'a> {
         let after_files = self
             .git
             .changed_files(&self.project_dir)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|file| !excludes.is_excluded(file))
+            .collect::<Vec<_>>();
         let new_files = after_files
             .iter()
             .filter(|file| !before_files.contains(file))
@@ -204,9 +219,13 @@ impl<'a> FlowExecution<'a> {
     }
 
     fn git_changed_files_snapshot(&self) -> Result<BTreeMap<String, String>> {
+        let excludes = ChangeExcludes::from_config(&self.chief_config.change_exclude)?;
         let files = self.git.changed_files(&self.project_dir)?;
         let mut snapshot = BTreeMap::new();
         for file in files {
+            if excludes.is_excluded(&file) {
+                continue;
+            }
             let path = self.project_dir.join(&file);
             let signature = if path.is_file() {
                 file_signature(&path)?
@@ -221,6 +240,7 @@ impl<'a> FlowExecution<'a> {
     }
 
     fn watch_path_snapshot(&self) -> Result<BTreeMap<String, String>> {
+        let excludes = ChangeExcludes::from_config(&self.chief_config.change_exclude)?;
         let mut snapshot = BTreeMap::new();
         let mut seen_watch_paths = BTreeSet::new();
 
@@ -235,7 +255,7 @@ impl<'a> FlowExecution<'a> {
                 continue;
             }
 
-            capture_path_signature(&watch_key, &watch_path, &mut snapshot)?;
+            capture_path_signature(&watch_key, &watch_path, &excludes, &mut snapshot)?;
         }
 
         Ok(snapshot)
@@ -258,8 +278,13 @@ fn file_signature(path: &Path) -> Result<String> {
 fn capture_path_signature(
     key: &str,
     path: &Path,
+    excludes: &ChangeExcludes,
     snapshot: &mut BTreeMap<String, String>,
 ) -> Result<()> {
+    if excludes.is_excluded(key) {
+        return Ok(());
+    }
+
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -288,7 +313,7 @@ fn capture_path_signature(
 
     if metadata.is_dir() {
         snapshot.insert(key.to_owned(), "dir".to_owned());
-        capture_directory_signatures(key, path, snapshot)?;
+        capture_directory_signatures(key, path, excludes, snapshot)?;
         return Ok(());
     }
 
@@ -299,6 +324,7 @@ fn capture_path_signature(
 fn capture_directory_signatures(
     prefix: &str,
     directory: &Path,
+    excludes: &ChangeExcludes,
     snapshot: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     for entry in fs::read_dir(directory)
@@ -313,10 +339,102 @@ fn capture_directory_signatures(
         let child_name = entry.file_name().to_string_lossy().to_string();
         let child_key = format!("{prefix}/{child_name}");
         let child_path = entry.path();
-        capture_path_signature(&child_key, &child_path, snapshot)?;
+        capture_path_signature(&child_key, &child_path, excludes, snapshot)?;
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct ChangeExcludes {
+    patterns: Vec<ChangeExcludePattern>,
+}
+
+impl ChangeExcludes {
+    fn from_config(configured_patterns: &[String]) -> Result<Self> {
+        let mut patterns = Vec::new();
+        for raw_pattern in BUILT_IN_CHANGE_EXCLUDES
+            .iter()
+            .copied()
+            .chain(configured_patterns.iter().map(String::as_str))
+        {
+            let Some(pattern) = ChangeExcludePattern::new(raw_pattern)? else {
+                continue;
+            };
+            patterns.push(pattern);
+        }
+
+        Ok(Self { patterns })
+    }
+
+    fn is_excluded(&self, path: &str) -> bool {
+        let normalized = normalize_change_key(path);
+        self.patterns
+            .iter()
+            .any(|pattern| pattern.matches(&normalized))
+    }
+}
+
+#[derive(Debug)]
+struct ChangeExcludePattern {
+    pattern: Pattern,
+    literal_prefix: Option<String>,
+    globstar_directory: Option<String>,
+}
+
+impl ChangeExcludePattern {
+    fn new(raw: &str) -> Result<Option<Self>> {
+        let normalized = normalize_change_key(raw);
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+
+        let pattern = Pattern::new(&normalized)
+            .with_context(|| format!("invalid change exclude glob '{raw}'"))?;
+        let literal_prefix = if has_glob_meta(&normalized) {
+            None
+        } else {
+            Some(normalized.clone())
+        };
+        let globstar_directory = normalized
+            .strip_suffix("/**")
+            .filter(|prefix| !prefix.is_empty())
+            .map(str::to_owned);
+
+        Ok(Some(Self {
+            pattern,
+            literal_prefix,
+            globstar_directory,
+        }))
+    }
+
+    fn matches(&self, path: &str) -> bool {
+        self.pattern.matches(path)
+            || self
+                .literal_prefix
+                .as_deref()
+                .map(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+                .unwrap_or(false)
+            || self
+                .globstar_directory
+                .as_deref()
+                .map(|prefix| path == prefix)
+                .unwrap_or(false)
+    }
+}
+
+fn normalize_change_key(raw: &str) -> String {
+    let mut normalized = raw.trim().replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_owned();
+    }
+    normalized
+}
+
+fn has_glob_meta(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
 }
 
 fn normalize_watch_path(raw_path: &str, project_dir: &Path) -> Option<(String, PathBuf)> {

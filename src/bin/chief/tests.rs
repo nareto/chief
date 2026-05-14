@@ -498,6 +498,10 @@ fn cli_chief_overrides_parse_complex_fields() {
         r#"["--sandbox","workspace-write"]"#,
         "--mcp-servers",
         "personal",
+        "--change-exclude",
+        "target/**",
+        "--watch-exclude",
+        "*.log",
     ])
     .expect("CLI should parse complex override flags");
 
@@ -511,6 +515,10 @@ fn cli_chief_overrides_parse_complex_fields() {
         Some(vec!["--sandbox".to_owned(), "workspace-write".to_owned()])
     );
     assert_eq!(overrides.mcp_servers, Some(None));
+    assert_eq!(
+        overrides.change_exclude,
+        vec!["target/**".to_owned(), "*.log".to_owned()]
+    );
 }
 
 #[test]
@@ -523,6 +531,7 @@ fn load_chief_yaml_with_cli_overrides_does_not_require_git_context() {
         chief: CliChiefOverrides {
             flow: Some(CliFlowValue::Refactor),
             model: Some("gpt-5.4".to_owned()),
+            change_exclude: vec!["tmp/**".to_owned()],
             ..CliChiefOverrides::default()
         },
         file: None,
@@ -542,6 +551,7 @@ fn load_chief_yaml_with_cli_overrides_does_not_require_git_context() {
         .expect("resolved config should load without git context");
     assert_eq!(chief_yaml.chief.flow, "refactor");
     assert_eq!(chief_yaml.chief.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(chief_yaml.chief.change_exclude, vec!["tmp/**"]);
 }
 
 #[test]

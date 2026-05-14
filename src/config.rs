@@ -64,6 +64,8 @@ pub struct ChiefConfig {
     pub max_loop_iterations: usize,
     #[serde(default = "default_required_stable_iterations")]
     pub required_stable_iterations: usize,
+    #[serde(default, alias = "change_exclude_globs")]
+    pub change_exclude: Vec<String>,
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
     #[serde(default)]
@@ -91,6 +93,7 @@ pub struct ChiefConfigOverrides {
     pub max_retries: Option<usize>,
     pub max_loop_iterations: Option<usize>,
     pub required_stable_iterations: Option<usize>,
+    pub change_exclude: Vec<String>,
     pub agent_timeout_seconds: Option<u64>,
     pub agent_wait_seconds: Option<u64>,
     pub suite_command_timeout_seconds: Option<u64>,
@@ -112,6 +115,7 @@ impl Default for ChiefConfig {
             max_retries: default_max_retries(),
             max_loop_iterations: default_max_loop_iterations(),
             required_stable_iterations: default_required_stable_iterations(),
+            change_exclude: Vec::new(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
             agent_wait_seconds: None,
             suite_command_timeout_seconds: default_suite_command_timeout_seconds(),
@@ -135,6 +139,7 @@ impl ChiefConfig {
             max_retries,
             max_loop_iterations,
             required_stable_iterations,
+            change_exclude,
             agent_timeout_seconds,
             agent_wait_seconds,
             suite_command_timeout_seconds,
@@ -154,6 +159,7 @@ impl ChiefConfig {
             max_retries: Some(max_retries),
             max_loop_iterations: Some(max_loop_iterations),
             required_stable_iterations: Some(required_stable_iterations),
+            change_exclude,
             agent_timeout_seconds: Some(agent_timeout_seconds),
             agent_wait_seconds,
             suite_command_timeout_seconds: Some(suite_command_timeout_seconds),
@@ -177,6 +183,7 @@ impl ChiefConfig {
             max_retries,
             max_loop_iterations,
             required_stable_iterations,
+            mut change_exclude,
             agent_timeout_seconds,
             agent_wait_seconds,
             suite_command_timeout_seconds,
@@ -196,6 +203,7 @@ impl ChiefConfig {
             max_retries: max_retries_override,
             max_loop_iterations: max_loop_iterations_override,
             required_stable_iterations: required_stable_iterations_override,
+            change_exclude: change_exclude_override,
             agent_timeout_seconds: agent_timeout_seconds_override,
             agent_wait_seconds: agent_wait_seconds_override,
             suite_command_timeout_seconds: suite_command_timeout_seconds_override,
@@ -205,6 +213,8 @@ impl ChiefConfig {
             use_agent_log_truncation_for_stdout_logs:
                 use_agent_log_truncation_for_stdout_logs_override,
         } = overrides;
+
+        change_exclude.extend(change_exclude_override);
 
         Self {
             flow: flow_override.unwrap_or(flow),
@@ -217,6 +227,7 @@ impl ChiefConfig {
             max_loop_iterations: max_loop_iterations_override.unwrap_or(max_loop_iterations),
             required_stable_iterations: required_stable_iterations_override
                 .unwrap_or(required_stable_iterations),
+            change_exclude,
             agent_timeout_seconds: agent_timeout_seconds_override.unwrap_or(agent_timeout_seconds),
             agent_wait_seconds: agent_wait_seconds_override.or(agent_wait_seconds),
             suite_command_timeout_seconds: suite_command_timeout_seconds_override
@@ -428,6 +439,30 @@ mod tests {
     }
 
     #[test]
+    fn change_exclude_defaults_to_empty() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.chief.change_exclude.is_empty());
+    }
+
+    #[test]
+    fn parse_change_exclude_globs() {
+        let yaml = "chief:\n  change_exclude: [target/**, \"*.log\"]\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            parsed.chief.change_exclude,
+            vec!["target/**".to_owned(), "*.log".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_legacy_change_exclude_globs_alias() {
+        let yaml = "chief:\n  change_exclude_globs: [generated/**]\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.change_exclude, vec!["generated/**"]);
+    }
+
+    #[test]
     fn parse_agent_timeout_zero_means_no_timeout() {
         let yaml = "chief:\n  agent_timeout_seconds: 0\n";
         let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
@@ -578,6 +613,7 @@ mod tests {
             max_retries: 5,
             max_loop_iterations: 7,
             required_stable_iterations: 3,
+            change_exclude: vec!["target/**".to_owned()],
             agent_timeout_seconds: 111,
             agent_wait_seconds: Some(12),
             suite_command_timeout_seconds: 222,

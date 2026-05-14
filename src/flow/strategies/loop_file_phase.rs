@@ -164,7 +164,6 @@ impl LoopFilePhaseStrategy {
         )?;
         Ok(LoopDecision::Stable)
     }
-
 }
 
 impl PhaseStrategy for LoopFilePhaseStrategy {

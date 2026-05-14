@@ -184,6 +184,7 @@ chief:
   max_retries: 2
   max_loop_iterations: 20
   required_stable_iterations: 2
+  change_exclude: [] # additional convergence change-detection exclude globs
   agent_timeout_seconds: 2700
   # agent_wait_seconds: 60 # fixed wait between agent calls; overrides respect_limits when set
   suite_command_timeout_seconds: 1800
@@ -221,6 +222,8 @@ Current config details worth knowing:
 - `chief.agent_wait_seconds`, when set, applies a fixed wait between agent call starts and overrides the `respect_limits`/`agentusage` pacing logic. Use `0` to bypass waiting while still disabling `respect_limits` pacing.
 - `max_retries` is the queued-work retry budget used by the worktree scheduler.
 - `max_loop_iterations` and `required_stable_iterations` control convergence behavior.
+- Chief always excludes its own SQLite runtime state (`.chief/chief.db` and sidecars) from convergence change detection.
+- `change_exclude` adds project-specific glob filters for convergence change detection; the CLI equivalent is repeatable `--change-exclude <glob>` (`--watch-exclude` is an alias).
 - `suite_command_timeout_seconds` is the default timeout for suite/readiness commands.
 - Each suite can override timeout with `command_timeout_seconds`.
 - Suites can also define `test_init`, `test_setup`, `lint_fix_command`, `cleanup_command`, `cache_paths`, `cache_key_files`, `cache_mode`, `default_target`, `file_patterns`, and `env`.

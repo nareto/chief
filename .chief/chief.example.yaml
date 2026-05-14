@@ -36,6 +36,8 @@ chief:
   max_loop_iterations: 20
   # Consecutive stable iterations required before convergence is done.
   required_stable_iterations: 2
+  # Additional glob patterns to exclude from convergence change detection (repeatable).
+  change_exclude: []
   # Per-agent invocation timeout in seconds (0 disables timeout).
   agent_timeout_seconds: 2700
   # Fixed wait in seconds between agent calls; when set, it overrides respect_limits logic (0 means no wait).
