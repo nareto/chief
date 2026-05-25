@@ -317,3 +317,7 @@ cargo test
 - `src/storage/` and `src/storage.rs`: SQLite persistence
 - `src/agent/`: `codex`, `claude`, `opencode`, and `cursor-agent` process adapters
 - `prompts/`: Markdown/Jinja prompt templates
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE).
