@@ -6,7 +6,7 @@ use crate::git::ShellGitOps;
 use crate::paths;
 use crate::prompt::EmbeddedPromptStore;
 use crate::storage::ProjectStore;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -58,16 +58,6 @@ impl ProjectContext {
     pub fn refresh(&mut self) -> Result<()> {
         self.chief_yaml = ChiefYaml::load_or_default(&self.config_path)?;
         Ok(())
-    }
-
-    pub fn ensure_chief_yaml_exists_for_run(&self) -> Result<()> {
-        if self.config_path.is_file() {
-            return Ok(());
-        }
-        Err(anyhow!(
-            "missing required chief config at {}. create .chief/chief.yaml (run `chief init` or copy .chief/chief.example.yaml)",
-            self.config_path.display()
-        ))
     }
 
     pub fn build_agent(&self, model_override: Option<String>) -> Arc<dyn CodingAgent> {

@@ -47,7 +47,6 @@ impl ChiefEngine {
     }
 
     pub fn start_run(&self) -> Result<String> {
-        self.project.ensure_chief_yaml_exists_for_run()?;
         let run_id = Uuid::new_v4().to_string();
         self.project.store.start_run(&run_id)?;
         Ok(run_id)

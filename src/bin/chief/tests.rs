@@ -100,7 +100,7 @@ fn json_object_payload(value: serde_json::Value) -> BTreeMap<String, Value> {
 }
 
 #[test]
-fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
+fn default_run_without_one_shot_input_still_requires_chief_yaml() {
     let temp = TempDir::new("run-missing-chief-yaml");
     let cli = Cli {
         project_dir: temp.path.clone(),
@@ -113,6 +113,10 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
         command: None,
     };
 
+    assert!(
+        invocation_requires_chief_yaml(&cli),
+        "empty default invocation should still require project config"
+    );
     let err = run(&cli).expect_err("run should reject projects missing chief.yaml");
     let rendered = err.to_string();
     assert!(
@@ -126,6 +130,120 @@ fn run_non_init_fails_fast_when_chief_yaml_is_missing() {
     assert!(
         !chief::paths::chief_db_path(&temp.path).exists(),
         "rejected run should not execute todo processing or create chief.db"
+    );
+}
+
+#[test]
+fn default_prompt_run_can_be_configless() {
+    let temp = TempDir::new("run-configless-prompt");
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: Some("review this file".to_owned()),
+        watch_only: vec!["findings.md".to_owned()],
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: None,
+    };
+
+    assert!(
+        !invocation_requires_chief_yaml(&cli),
+        "prompt-driven one-shot default invocation should be satisfied by defaults plus CLI flags"
+    );
+}
+
+#[test]
+fn requirements_only_default_run_can_be_configless() {
+    let temp = TempDir::new("run-configless-requirements");
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: None,
+        watch_only: Vec::new(),
+        requirements: vec!["capture these requirements".to_owned()],
+        requirements_file: Vec::new(),
+        command: None,
+    };
+
+    assert!(
+        !invocation_requires_chief_yaml(&cli),
+        "requirements-only one-shot invocation should be satisfied by defaults plus CLI flags"
+    );
+}
+
+#[test]
+fn loop_file_subcommand_can_be_configless() {
+    let temp = TempDir::new("run-configless-loop-file-subcommand");
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: None,
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: Some(Commands::LoopFile(LoopFileArgs {
+            file: None,
+            prompt: Some("review this file".to_owned()),
+            watch_only: vec!["findings.md".to_owned()],
+        })),
+    };
+
+    assert!(
+        !invocation_requires_chief_yaml(&cli),
+        "explicit loop_file one-shot invocation should be satisfied by defaults plus CLI flags"
+    );
+}
+
+#[test]
+fn loop_file_subcommand_missing_input_does_not_create_runtime_state() {
+    let temp = TempDir::new("run-configless-loop-file-missing-input");
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: None,
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: Some(Commands::LoopFile(LoopFileArgs {
+            file: None,
+            prompt: None,
+            watch_only: Vec::new(),
+        })),
+    };
+
+    let err = run(&cli).expect_err("loop_file should require --file or --prompt");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("requires either --file or --prompt"),
+        "error should direct users to provide loop_file input: {rendered}"
+    );
+    assert!(
+        !chief::paths::chief_db_path(&temp.path).exists(),
+        "input validation should fail before runtime state is initialized"
+    );
+}
+
+#[test]
+fn refactor_subcommand_still_requires_chief_yaml() {
+    let temp = TempDir::new("run-configless-refactor");
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: None,
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: Some(Commands::Refactor),
+    };
+
+    assert!(
+        invocation_requires_chief_yaml(&cli),
+        "persistent queued refactor flow should still require project config"
     );
 }
 

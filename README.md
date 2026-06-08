@@ -103,6 +103,8 @@ Without a subcommand, `chief` reads `.chief/chief.yaml`, applies CLI overrides, 
 2. `.chief/chief.yaml`
 3. CLI flags
 
+One-shot `loop_file` runs that provide `--file` or `--prompt` can run without `.chief/chief.yaml`; missing config uses the built-in defaults and an empty suite list. Persistent queued flows, suite commands, readiness checks, and backend-managed projects still expect `.chief/chief.yaml`.
+
 If the resolved flow is `loop_file`, provide exactly one of `--file` or `--prompt`.
 
 Run a file-driven loop:
@@ -263,6 +265,9 @@ suites:
 
 Current config details worth knowing:
 
+- `.chief/chief.yaml` provides project defaults. It is optional for one-shot CLI `loop_file` or requirements-only invocations when all needed options are supplied with CLI flags.
+- When `.chief/chief.yaml` is missing, Chief resolves `chief` from built-in defaults and `suites` as an empty list.
+- Persistent project workflows, backend/readiness workflows, and suite commands require `.chief/chief.yaml`.
 - `chief.agent` supports `codex`, `claude`, `opencode`, and `cursor-agent` (`cursor` is accepted as a compatibility alias).
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
 - `chief.model` can be supplied in config or as `--model`; backend project starts also accept a per-start model override.

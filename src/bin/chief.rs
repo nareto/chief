@@ -1931,7 +1931,23 @@ fn command_requires_chief_yaml(command: &Commands) -> bool {
             | Commands::List(_)
             | Commands::Explain(_)
             | Commands::Doctor(_)
+            | Commands::LoopFile(_)
     )
+}
+
+fn default_invocation_requires_chief_yaml(cli: &Cli) -> bool {
+    let has_one_shot_input = cli.file.is_some()
+        || cli.prompt.is_some()
+        || !cli.requirements.is_empty()
+        || !cli.requirements_file.is_empty();
+    !has_one_shot_input
+}
+
+fn invocation_requires_chief_yaml(cli: &Cli) -> bool {
+    cli.command
+        .as_ref()
+        .map(command_requires_chief_yaml)
+        .unwrap_or_else(|| default_invocation_requires_chief_yaml(cli))
 }
 
 fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
@@ -1964,12 +1980,7 @@ fn ensure_chief_yaml_exists(project_dir: &Path) -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    if cli
-        .command
-        .as_ref()
-        .map(command_requires_chief_yaml)
-        .unwrap_or(true)
-    {
+    if invocation_requires_chief_yaml(cli) {
         ensure_chief_yaml_exists(&cli.project_dir)?;
     }
 
@@ -2443,6 +2454,13 @@ fn run_doctor(cli: &Cli, args: &DoctorArgs) -> Result<()> {
 }
 
 fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
+    if args.file.is_none() && args.prompt.is_none() {
+        bail!("loop_file requires either --file or --prompt");
+    }
+    if args.file.is_some() && args.prompt.is_some() {
+        bail!("--file and --prompt are mutually exclusive for loop_file");
+    }
+
     let report_started_at = Utc::now();
     let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
     print_config_summary(&context, &cli.chief);
@@ -2459,7 +2477,7 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     } else if let Some(ref prompt) = args.prompt {
         ("cli-prompt".to_string(), prompt.clone())
     } else {
-        bail!("loop_file requires either --file or --prompt");
+        unreachable!("loop_file input is validated before context loading");
     };
 
     context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();

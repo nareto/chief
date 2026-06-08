@@ -61,7 +61,7 @@ fn pending_todo(text: &str) -> Todo {
 }
 
 #[test]
-fn chief_engine_start_run_requires_chief_yaml() {
+fn chief_engine_start_run_uses_default_config_when_chief_yaml_is_missing() {
     let root = TempDir::new("missing-chief-yaml");
     let project_dir = root.path.join("project");
     init_git_repo(&project_dir);
@@ -75,21 +75,20 @@ fn chief_engine_start_run_requires_chief_yaml() {
         "chief.db should not exist before start_run"
     );
 
-    let err = ChiefEngine::new(context.clone())
+    let run_id = ChiefEngine::new(context.clone())
         .start_run()
-        .expect_err("start_run should fail without chief.yaml");
-    let rendered = err.to_string();
+        .expect("start_run should use the already-resolved default config");
     assert!(
-        rendered.contains("missing required chief config"),
-        "error should explain missing config: {rendered}"
+        !run_id.trim().is_empty(),
+        "start_run should return a run id"
     );
     assert!(
-        rendered.contains("chief.yaml"),
-        "error should reference chief.yaml path: {rendered}"
+        context.store.db_path.exists(),
+        "accepted start_run should create chief.db"
     );
     assert!(
-        !context.store.db_path.exists(),
-        "rejected start_run should not create chief.db"
+        !context.config_path.exists(),
+        "start_run should not create chief.yaml as a side effect"
     );
 }
 
