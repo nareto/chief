@@ -1,6 +1,6 @@
 # Chief
 
-Chief is a Rust-based orchestration system for running coding-agent workflows against Git repositories.
+Chief is a Rust-based orchestration system for running unattended coding-agent workflows against Git repositories.
 
 This repo contains:
 
@@ -12,18 +12,24 @@ Chief stores state per target project in:
 - `.chief/chief.yaml`: project config
 - `.chief/chief.db`: SQLite state for todos, runs, jobs, events, and readiness
 
-Queued execution happens in sibling Git worktrees under:
+Queued workers, backend suite checks, and pre-run readiness checks use sibling Git worktrees under:
 
-- `../<project_name>__worktrees/chief_<job_id>`
+- `../<project_name>__worktrees/chief_<job_id>` for queued workers
+- `../<project_name>__worktrees/chief_pre_run_checks_<token>` for readiness checks
+- `../<project_name>__worktrees/chief_suite_check_<token>` for backend suite checks
 
-Successful worker branches are merged back into the project's current branch.
+Configured suite dependency caches are stored under:
+
+- `../<project_name>__worktree_cache/<suite>/<cache_key>`
+
+Successful queued worker branches are merged back into the target project's current branch.
 
 ## Runtime flows
 
 Chief currently supports two flow kinds:
 
-- `loop_file`: CLI-only. Runs a convergence loop from a Markdown task file.
-- `refactor`: claims pending SQLite todos and runs the queued cleanup flow.
+- `loop_file`: CLI-only. Builds a synthetic todo from `--file` or `--prompt`, runs convergence directly in the target checkout, and commits the result.
+- `refactor`: queue-driven. Claims pending SQLite todos, runs each todo in an isolated worker worktree, and merges successful worker branches back.
 
 Prompt templates live in this repo's [`prompts/`](./prompts) directory and are embedded into the binaries at compile time:
 
@@ -32,11 +38,13 @@ Prompt templates live in this repo's [`prompts/`](./prompts) directory and are e
 - `mechanical_cleanup.md`
 - `requirements.md`
 
-Requirements ingestion is separate from execution: it runs `prompts/requirements.md`, expects YAML shaped like `todos: [...]`, and replaces the SQLite todo queue for the target project.
+Requirements ingestion is separate from execution: it runs `prompts/requirements.md`, expects raw YAML or a fenced YAML block shaped like `todos: [...]`, replaces the SQLite todo queue for the target project, prints the resulting diff, and exits without running a flow.
 
 ## Safety notes
 
-Normal queued runs use isolated Git worktrees instead of mutating your main checkout directly.
+Normal queued runs use isolated Git worktrees instead of mutating your main checkout directly. CLI `loop_file` runs in the target checkout and is meant for single-project direct work.
+
+Agent adapters are configured for unattended automation. For example, the Codex, Claude, and Cursor adapters use their non-interactive or permission-bypass flags where required by those tools.
 
 There are still destructive operations in the system:
 
@@ -89,7 +97,13 @@ cargo run --bin chief -- --project-dir /path/to/project migrate
 
 ## CLI usage
 
-Without a subcommand, `chief` reads `.chief/chief.yaml` and resolves the flow from config. If that flow is `loop_file`, `--file` is required.
+Without a subcommand, `chief` reads `.chief/chief.yaml`, applies CLI overrides, and resolves the flow from config. Precedence is:
+
+1. defaults
+2. `.chief/chief.yaml`
+3. CLI flags
+
+If the resolved flow is `loop_file`, provide exactly one of `--file` or `--prompt`.
 
 Run a file-driven loop:
 
@@ -99,7 +113,27 @@ cargo run --bin chief -- \
   --file /path/to/task.md
 ```
 
-Equivalent explicit form:
+Run an inline prompt loop:
+
+```bash
+cargo run --bin chief -- \
+  --project-dir /path/to/project \
+  --flow loop_file \
+  --prompt "Tighten parser error messages"
+```
+
+Scope loop convergence to specific paths:
+
+```bash
+cargo run --bin chief -- \
+  --project-dir /path/to/project \
+  loop_file \
+  --prompt "Fix the generated OpenAPI client" \
+  --watch-only src/api \
+  --watch-only openapi.json
+```
+
+Equivalent explicit file form:
 
 ```bash
 cargo run --bin chief -- \
@@ -141,6 +175,17 @@ cargo run --bin chief -- \
   --requirements-file /path/to/followups.md
 ```
 
+Introspect the CLI and project config:
+
+```bash
+cargo run --bin chief -- schema --json
+cargo run --bin chief -- --project-dir /path/to/project config show
+cargo run --bin chief -- --project-dir /path/to/project config show --resolved --json
+cargo run --bin chief -- --project-dir /path/to/project list suites --json
+cargo run --bin chief -- --project-dir /path/to/project explain flow --flow refactor
+cargo run --bin chief -- --project-dir /path/to/project doctor
+```
+
 Useful maintenance commands:
 
 ```bash
@@ -166,14 +211,16 @@ cargo run --bin chief -- --project-dir /path/to/project suite test_setup --suite
 cargo run --bin chief -- --project-dir /path/to/project suite lint_fix --suite backend --target src
 ```
 
+Suite commands run in the suite's `test_root`. For commands that include `{target}`, `--target` overrides the suite's `default_target`.
+
 ## `.chief/chief.yaml`
 
 The shipped example file is `.chief/chief.example.yaml`. A minimal current config looks like this:
 
 ```yaml
 chief:
-  flow: loop_file
-  # flow: refactor
+  flow: loop_file # use `--file <path>` or `--prompt <text>`
+  # flow: refactor # queued workflow
   agent: codex
   # model: gpt-5
   # agent: cursor-agent
@@ -203,7 +250,13 @@ suites:
     default_target: .
     file_patterns: []
     lint_command: cargo clippy
+    # lint_fix_command: cargo fmt
     post_green_command: cargo test
+    # cleanup_command: pkill -f "cargo test.*$PWD" || true
+    # cache_paths: [target]
+    # cache_key_files: [Cargo.lock]
+    # cache_mode: copy # copy (default) or symlink
+    # command_timeout_seconds: 1800
     env: {}
     strip_root_from_target: true
 ```
@@ -212,21 +265,27 @@ Current config details worth knowing:
 
 - `chief.agent` supports `codex`, `claude`, `opencode`, and `cursor-agent` (`cursor` is accepted as a compatibility alias).
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
+- `chief.model` can be supplied in config or as `--model`; backend project starts also accept a per-start model override.
 - For `cursor-agent`, pass Cursor's exact model id in `chief.model` such as `gpt-5.4-xhigh`.
 - `chief init` writes `mcp_servers: {}` by default, so new projects do not inherit personal Claude/Codex/Cursor MCP servers unless you add them to `chief.yaml`.
-- `chief.mcp_servers` is agent-independent. Omit the key entirely to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for Claude, Codex, or Cursor.
+- `chief.mcp_servers` is a shared config format. Omit the key entirely to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for Claude, Codex, or Cursor.
 - `chief.mcp_servers` supports `stdio` and `streamable_http` transports. HTTP servers support JWT bearer auth with either `token` or `token_env_var`.
 - When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config, Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`, and Cursor with an isolated `HOME` containing a chief-managed `~/.cursor/mcp.json`.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.
 - `chief.respect_limits` checks usage with `agentusage` before each call and waits when needed to stay under the slowest active limit.
 - `chief.agent_wait_seconds`, when set, applies a fixed wait between agent call starts and overrides the `respect_limits`/`agentusage` pacing logic. Use `0` to bypass waiting while still disabling `respect_limits` pacing.
-- `max_retries` is the queued-work retry budget used by the worktree scheduler.
+- `agent_timeout_seconds: 0` disables the per-agent timeout. Suite command timeouts always clamp to at least one second.
+- `max_retries` is the queued-work retry budget used by the worktree scheduler. `loop_file` uses one outer retry loop and relies on convergence iterations instead.
 - `max_loop_iterations` and `required_stable_iterations` control convergence behavior.
 - Chief always excludes its own SQLite runtime state (`.chief/chief.db` and sidecars) from convergence change detection.
 - `change_exclude` adds project-specific glob filters for convergence change detection; the CLI equivalent is repeatable `--change-exclude <glob>` (`--watch-exclude` is an alias).
+- `--watch-only <path>` scopes `loop_file` stability checks to specific paths.
 - `suite_command_timeout_seconds` is the default timeout for suite/readiness commands.
 - Each suite can override timeout with `command_timeout_seconds`.
-- Suites can also define `test_init`, `test_setup`, `lint_fix_command`, `cleanup_command`, `cache_paths`, `cache_key_files`, `cache_mode`, `default_target`, `file_patterns`, and `env`.
+- `test_init` and `test_setup` prepare a suite before checks in a worker. `lint_fix_command` runs after a lint failure and is followed by a lint re-check.
+- `cleanup_command` runs after test command attempts. It is also used by readiness checks and backend suite-check endpoints for `test` runs.
+- `cache_paths` are snapshotted from a successful readiness worktree and copied or symlinked into future worker worktrees. `cache_key_files`, the suite config, and the `.chief/chief.yaml` hash determine the cache key.
+- Suites can also define `default_target`, `file_patterns`, `target_type`, `env`, and `strip_root_from_target`.
 
 The example file also includes ready-to-adapt Rust, Python, TypeScript, and Playwright suite patterns.
 
@@ -247,17 +306,24 @@ cargo run --bin chief_backend -- \
   --project /path/to/extra/repo \
   --host 0.0.0.0 \
   --port 8000 \
+  --allow-origin http://localhost:5173 \
   --default-agents-per-project 1 \
   --max-agents-per-project 8 \
-  --enable-terminal
+  --enable-terminal \
+  --verbose
 ```
 
 Important runtime behavior:
 
-- backend start only supports `refactor`
-- `loop_file` is intentionally CLI-only
-- project start runs readiness checks unless the caller sets `start_anyway`
+- backend start only supports `refactor`; `loop_file` is intentionally CLI-only
+- project start runs pre-run readiness checks unless the caller sets `start_anyway`
+- readiness checks run in a temporary worktree, execute configured `test_init`, `test_setup`, `lint`, and `test` commands, and cache a passing result by `.chief/chief.yaml` plus suite-cache inputs
+- successful readiness checks prime configured suite caches for later worker worktrees
+- backend suite-check requests run in temporary worktrees and support `test` and `lint`; `post_green` is part of normal flows, not the suite-check endpoint
+- requested agent counts are clamped to `1..=--max-agents-per-project`
+- `pause` drains active work without claiming more todos; `stop` requests cancellation of active work
 - terminal WebSocket routes are only mounted when `--enable-terminal` is set
+- `--allow-origin` can be repeated; `--allow-origin "*"` allows any origin
 - if `CHIEF_API_TOKEN` or `--api-token` is set, write/control routes require auth
 
 Accepted auth headers:
@@ -267,8 +333,10 @@ Accepted auth headers:
 
 Current API surface includes:
 
+- backend settings
 - project listing and refresh
 - start, pause, and stop controls
+- readiness stop
 - todo CRUD and delete-done
 - jobs, logs, state, events, and event streaming
 - requirements ingestion
