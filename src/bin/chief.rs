@@ -73,7 +73,7 @@ mod chief_option_help {
     pub(super) const AGENT_EXTRA_ARGS: &str =
         "Extra CLI args forwarded to the selected agent (YAML/JSON string list).";
     pub(super) const MCP_SERVERS: &str =
-        "MCP server config (`personal` or YAML/JSON object; `{}` means no servers).";
+        "Chief-managed MCP server config as a YAML/JSON object (`{}` means no servers).";
     pub(super) const MAX_RETRIES: &str =
         "Retry budget for queued todo flows (minimum effective value is 1).";
     pub(super) const MAX_LOOP_ITERATIONS: &str =
@@ -609,7 +609,8 @@ impl CliChiefOverrides {
         let mcp_servers = mcp_servers
             .as_deref()
             .map(parse_mcp_servers_override)
-            .transpose()?;
+            .transpose()?
+            .map(Some);
 
         Ok(ChiefConfigOverrides {
             flow: flow.map(|value| value.as_str().to_owned()),
@@ -639,17 +640,10 @@ fn parse_agent_extra_args_override(raw: &str) -> Result<Vec<String>> {
     )
 }
 
-fn parse_mcp_servers_override(raw: &str) -> Result<Option<BTreeMap<String, McpServerConfig>>> {
-    let trimmed = raw.trim();
-    if trimmed.eq_ignore_ascii_case("personal") {
-        return Ok(None);
-    }
-
-    serde_yaml::from_str::<BTreeMap<String, McpServerConfig>>(trimmed)
-        .map(Some)
-        .with_context(|| {
-            "--mcp-servers must be `personal` or a YAML/JSON object (for example: {} or {docs: {transport: stdio, command: npx}})"
-        })
+fn parse_mcp_servers_override(raw: &str) -> Result<BTreeMap<String, McpServerConfig>> {
+    serde_yaml::from_str::<BTreeMap<String, McpServerConfig>>(raw.trim()).with_context(|| {
+        "--mcp-servers must be a YAML/JSON object (for example: {} or {docs: {transport: stdio, command: npx}})"
+    })
 }
 
 fn apply_cli_overrides_to_context(context: &mut ProjectContext, cli: &Cli) -> Result<()> {
@@ -914,9 +908,12 @@ fn build_cli_schema() -> CliSchema {
             false,
             false,
             None,
-            vec!["personal".to_owned()],
+            Vec::new(),
             &[],
-            &["Structured values accept a YAML/JSON object describing MCP server definitions."],
+            &[
+                "Omit this flag to leave project config/default MCP behavior unchanged.",
+                "Use {} to force Chief-managed no-MCP behavior.",
+            ],
         ),
         schema_option(
             Some("max-retries"),

@@ -124,6 +124,8 @@ cargo run --bin chief -- \
   --prompt "Tighten parser error messages"
 ```
 
+For a drop-in configless script form, see [`examples/chief-one-shot.sh`](./examples/chief-one-shot.sh).
+
 Scope loop convergence to specific paths:
 
 ```bash
@@ -229,7 +231,7 @@ chief:
   # model: gpt-5.4-xhigh
   # model_reasoning_effort: high
   agent_extra_args: []
-  mcp_servers: {} # default from `chief init`; remove this key to use personal agent MCP config
+  mcp_servers: {} # default from `chief init`; remove this key to leave the agent MCP config untouched
   max_retries: 2
   max_loop_iterations: 20
   required_stable_iterations: 2
@@ -272,8 +274,8 @@ Current config details worth knowing:
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
 - `chief.model` can be supplied in config or as `--model`; backend project starts also accept a per-start model override.
 - For `cursor-agent`, pass Cursor's exact model id in `chief.model` such as `gpt-5.4-xhigh`.
-- `chief init` writes `mcp_servers: {}` by default, so new projects do not inherit personal Claude/Codex/Cursor MCP servers unless you add them to `chief.yaml`.
-- `chief.mcp_servers` is a shared config format. Omit the key entirely to preserve each CLI's normal MCP loading. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for Claude, Codex, or Cursor.
+- `chief init` writes `mcp_servers: {}` by default, so new projects deliberately run agents with no MCP servers unless you edit or remove this key.
+- `chief.mcp_servers` is a shared config format. Omit the key entirely to leave the agent MCP config untouched. Set it to `{}` to force no MCP servers. Set it to a map to let chief translate the same MCP config for Claude, Codex, or Cursor.
 - `chief.mcp_servers` supports `stdio` and `streamable_http` transports. HTTP servers support JWT bearer auth with either `token` or `token_env_var`.
 - When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config, Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`, and Cursor with an isolated `HOME` containing a chief-managed `~/.cursor/mcp.json`.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.

@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn chief_config_apply_overrides_supports_mcp_personal_mode() {
+    fn chief_config_apply_overrides_supports_mcp_unmanaged_override() {
         let config = ChiefConfig {
             mcp_servers: Some(BTreeMap::new()),
             ..ChiefConfig::default()

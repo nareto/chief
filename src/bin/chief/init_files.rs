@@ -15,7 +15,7 @@ pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   # flow: refactor # uncomment to run queued workflow
   agent: codex
   agent_extra_args: []
-  mcp_servers: {} # chief-managed MCP; remove this key to defer to personal Claude/Codex/Cursor config
+  mcp_servers: {} # chief-managed no-MCP config; remove this key to leave the agent MCP config untouched
   max_loop_iterations: 20
   required_stable_iterations: 2
   change_exclude: []

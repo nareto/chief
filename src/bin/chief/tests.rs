@@ -615,7 +615,7 @@ fn cli_chief_overrides_parse_complex_fields() {
         "--agent-extra-args",
         r#"["--sandbox","workspace-write"]"#,
         "--mcp-servers",
-        "personal",
+        r#"{docs: {transport: stdio, command: npx, args: ["-y", "@acme/docs-mcp"]}}"#,
         "--change-exclude",
         "target/**",
         "--watch-exclude",
@@ -632,10 +632,36 @@ fn cli_chief_overrides_parse_complex_fields() {
         overrides.agent_extra_args,
         Some(vec!["--sandbox".to_owned(), "workspace-write".to_owned()])
     );
-    assert_eq!(overrides.mcp_servers, Some(None));
+    let servers = overrides
+        .mcp_servers
+        .expect("mcp servers override should be present")
+        .expect("CLI override should contain Chief-managed MCP servers");
+    assert!(matches!(
+        servers.get("docs"),
+        Some(McpServerConfig::Stdio { command, args, env })
+            if command == "npx"
+                && args == &vec!["-y".to_owned(), "@acme/docs-mcp".to_owned()]
+                && env.is_empty()
+    ));
     assert_eq!(
         overrides.change_exclude,
         vec!["target/**".to_owned(), "*.log".to_owned()]
+    );
+}
+
+#[test]
+fn cli_mcp_servers_rejects_personal_keyword() {
+    let cli = Cli::try_parse_from(["chief", "--mcp-servers", "personal"])
+        .expect("CLI should accept raw mcp-servers text before conversion");
+
+    let err = cli
+        .chief
+        .to_config_overrides()
+        .expect_err("personal is no longer a supported mcp-servers value");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("--mcp-servers must be a YAML/JSON object"),
+        "error should explain the accepted shape: {rendered}"
     );
 }
 
