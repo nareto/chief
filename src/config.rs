@@ -80,6 +80,8 @@ pub struct ChiefConfig {
     pub respect_limits: bool,
     #[serde(default)]
     pub use_agent_log_truncation_for_stdout_logs: bool,
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -101,6 +103,7 @@ pub struct ChiefConfigOverrides {
     pub agent_log_max_output_chars: Option<usize>,
     pub respect_limits: Option<bool>,
     pub use_agent_log_truncation_for_stdout_logs: Option<bool>,
+    pub verbose: Option<bool>,
 }
 
 impl Default for ChiefConfig {
@@ -123,6 +126,7 @@ impl Default for ChiefConfig {
             agent_log_max_output_chars: default_agent_log_max_output_chars(),
             respect_limits: default_respect_limits(),
             use_agent_log_truncation_for_stdout_logs: false,
+            verbose: false,
         }
     }
 }
@@ -147,6 +151,7 @@ impl ChiefConfig {
             agent_log_max_output_chars,
             respect_limits,
             use_agent_log_truncation_for_stdout_logs,
+            verbose,
         } = self;
 
         ChiefConfigOverrides {
@@ -169,6 +174,7 @@ impl ChiefConfig {
             use_agent_log_truncation_for_stdout_logs: Some(
                 use_agent_log_truncation_for_stdout_logs,
             ),
+            verbose: Some(verbose),
         }
     }
 
@@ -191,6 +197,7 @@ impl ChiefConfig {
             agent_log_max_output_chars,
             respect_limits,
             use_agent_log_truncation_for_stdout_logs,
+            verbose,
         } = self;
 
         let ChiefConfigOverrides {
@@ -212,6 +219,7 @@ impl ChiefConfig {
             respect_limits: respect_limits_override,
             use_agent_log_truncation_for_stdout_logs:
                 use_agent_log_truncation_for_stdout_logs_override,
+            verbose: verbose_override,
         } = overrides;
 
         change_exclude.extend(change_exclude_override);
@@ -240,6 +248,7 @@ impl ChiefConfig {
             use_agent_log_truncation_for_stdout_logs:
                 use_agent_log_truncation_for_stdout_logs_override
                     .unwrap_or(use_agent_log_truncation_for_stdout_logs),
+            verbose: verbose_override.unwrap_or(verbose),
         }
     }
 }
@@ -621,6 +630,7 @@ mod tests {
             agent_log_max_output_chars: 444,
             respect_limits: false,
             use_agent_log_truncation_for_stdout_logs: true,
+            verbose: true,
         };
 
         let overrides = config.clone().into_overrides();

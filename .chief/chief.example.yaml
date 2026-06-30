@@ -52,6 +52,8 @@ chief:
   respect_limits: true
   # When true, apply agent log truncation to stdout log output too.
   use_agent_log_truncation_for_stdout_logs: false
+  # Print raw live agent output, including JSON event streams from JSON-mode agents.
+  verbose: false
 
 suites:
   # Execution model:

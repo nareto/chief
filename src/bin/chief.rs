@@ -95,9 +95,11 @@ mod chief_option_help {
         "When true, wait for agentusage limits before launching agent calls.";
     pub(super) const USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS: &str =
         "When true, apply agent log truncation to stdout log output too.";
+    pub(super) const VERBOSE: &str =
+        "Print raw live agent output, including JSON event streams from JSON-mode agents.";
 
     #[cfg(test)]
-    pub(super) const SPECS: [ChiefOptionHelpSpec; 17] = [
+    pub(super) const SPECS: [ChiefOptionHelpSpec; 18] = [
         ChiefOptionHelpSpec {
             key: "flow",
             help: FLOW,
@@ -165,6 +167,10 @@ mod chief_option_help {
         ChiefOptionHelpSpec {
             key: "use_agent_log_truncation_for_stdout_logs",
             help: USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS,
+        },
+        ChiefOptionHelpSpec {
+            key: "verbose",
+            help: VERBOSE,
         },
     ];
 }
@@ -359,6 +365,13 @@ struct CliChiefOverrides {
         help_heading = "Chief Overrides"
     )]
     use_agent_log_truncation_for_stdout_logs: Option<bool>,
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::VERBOSE,
+        help_heading = "Chief Overrides"
+    )]
+    verbose: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -600,6 +613,7 @@ impl CliChiefOverrides {
             agent_log_max_output_chars,
             respect_limits,
             use_agent_log_truncation_for_stdout_logs,
+            verbose,
         } = self.clone();
 
         let agent_extra_args = agent_extra_args
@@ -630,6 +644,7 @@ impl CliChiefOverrides {
             agent_log_max_output_chars,
             respect_limits,
             use_agent_log_truncation_for_stdout_logs,
+            verbose: verbose.then_some(true),
         })
     }
 }
@@ -1049,6 +1064,18 @@ fn build_cli_schema() -> CliSchema {
             bool_possible_values(),
             &[],
             &[],
+        ),
+        schema_option(
+            Some("verbose"),
+            None,
+            None,
+            chief_option_help::VERBOSE,
+            false,
+            false,
+            Some("false"),
+            Vec::new(),
+            &[],
+            &["When omitted, live raw agent output is hidden from terminal stdout."],
         ),
         schema_option(
             Some("file"),
@@ -1686,6 +1713,7 @@ fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
             "use_agent_log_truncation_for_stdout_logs",
             overrides.use_agent_log_truncation_for_stdout_logs.is_some(),
         ),
+        ("verbose", overrides.verbose),
     ];
 
     override_fields
@@ -3418,6 +3446,11 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
             .chief_yaml
             .chief
             .use_agent_log_truncation_for_stdout_logs
+    );
+    println!(
+        "{} {}",
+        format_report_key("verbose", color),
+        context.chief_yaml.chief.verbose
     );
 
     let active_overrides = active_override_names(overrides);

@@ -100,6 +100,7 @@ impl<'a> FlowExecution<'a> {
 
         let stream_project = project_name.clone();
         let stream_query_id = query_id.clone();
+        let verbose = self.chief_config.verbose;
         let out = match self.agent.run(AgentRequest {
             prompt,
             cwd: self.project_dir.clone(),
@@ -108,7 +109,9 @@ impl<'a> FlowExecution<'a> {
             cancel_signal: Some(self.cancel_signal.clone()),
             on_chunk: Some(Arc::new(move |stream, text| {
                 agent_stream::push_chunk(&stream_project, &stream_query_id, stream, text);
-                mirror_agent_chunk_to_stdout(text);
+                if verbose {
+                    mirror_agent_chunk_to_stdout(text);
+                }
             })),
         }) {
             Ok(out) => out,
