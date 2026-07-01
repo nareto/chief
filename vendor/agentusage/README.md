@@ -148,7 +148,7 @@ When some providers fail but others succeed, warnings appear as a keyed object:
 
 ## Dialog handling
 
-CLI tools sometimes show interactive prompts (trust folder, update available, terms acceptance, authentication). By default, agentusage fails with an informative error when a dialog is detected.
+CLI tools sometimes show interactive prompts (trust folder, update available, terms acceptance, authentication). By default, agentusage fails with an informative error when a dialog requiring approval is detected. Codex update prompts are skipped without updating because that does not approve trust, terms, or sandbox changes.
 
 Use `--approval-policy accept` to automatically dismiss dialogs that can be accepted with Enter (trust, update, terms, sandbox). Authentication and first-run dialogs always require manual resolution.
 

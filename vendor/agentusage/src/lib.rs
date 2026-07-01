@@ -72,10 +72,10 @@ where
         }
 
         match policy {
-            ApprovalPolicy::Fail => {
+            ApprovalPolicy::Fail if !can_dismiss_without_approval(provider, &kind) => {
                 bail!("[timeout] {}", dialog_error_message(&kind, provider));
             }
-            ApprovalPolicy::Accept => {
+            ApprovalPolicy::Fail | ApprovalPolicy::Accept => {
                 let dismissed = dismiss_dialog(&kind, provider, session)?;
                 if !dismissed {
                     bail!("[timeout] {}", dialog_error_message(&kind, provider));
@@ -91,6 +91,10 @@ where
     }
 }
 
+fn can_dismiss_without_approval(provider: &str, kind: &DialogKind) -> bool {
+    provider.eq_ignore_ascii_case("codex") && matches!(kind, DialogKind::UpdatePrompt)
+}
+
 /// Return whichever UsageData has more entries.
 fn pick_richer(a: UsageData, b: UsageData) -> UsageData {
     if a.entries.len() >= b.entries.len() {
@@ -103,6 +107,15 @@ fn pick_richer(a: UsageData, b: UsageData) -> UsageData {
 fn looks_like_codex_update_prompt(content: &str) -> bool {
     let lower = content.to_lowercase();
     lower.contains("update available") && lower.contains("codex")
+}
+
+pub(crate) fn codex_prompt_ready(content: &str) -> bool {
+    if content.contains("? for shortcuts") {
+        return true;
+    }
+
+    let lower = content.to_lowercase();
+    lower.contains("openai codex") && lower.contains("ready") && lower.contains("context")
 }
 
 fn content_tail(content: &str, max_chars: usize) -> String {
@@ -391,10 +404,10 @@ pub fn run_codex(config: &UsageConfig) -> Result<UsageData> {
         eprintln!("[verbose] Launched codex, waiting for prompt...");
     }
 
-    // Codex prompt shows "› ..." and "? for shortcuts" at the bottom.
-    // Must NOT match ">_" in the Codex banner header which appears early.
+    // Codex prompt readiness has changed across versions. Older versions show
+    // "? for shortcuts"; newer versions render readiness in the status bar.
     let prompt_result = session.wait_for(
-        |content| content.contains("? for shortcuts"),
+        codex_prompt_ready,
         prompt_timeout,
         poll_interval,
         false,
@@ -413,7 +426,7 @@ pub fn run_codex(config: &UsageConfig) -> Result<UsageData> {
             // Dialog dismissed, retry waiting for prompt
             session
                 .wait_for(
-                    |content| content.contains("? for shortcuts"),
+                    codex_prompt_ready,
                     prompt_timeout,
                     poll_interval,
                     false,
@@ -448,7 +461,10 @@ pub fn run_codex(config: &UsageConfig) -> Result<UsageData> {
     let limit_re = regex::Regex::new(r"\d+%\s*(left|used)")?;
     let mut content = session
         .wait_for(
-            |content| limit_re.is_match(content) || looks_like_codex_update_prompt(content),
+            |content| {
+                limit_re.is_match(content)
+                    || (looks_like_codex_update_prompt(content) && !codex_prompt_ready(content))
+            },
             data_timeout,
             poll_interval,
             false,
@@ -456,7 +472,10 @@ pub fn run_codex(config: &UsageConfig) -> Result<UsageData> {
         )
         .context("[timeout] Timed out waiting for Codex usage data.")?;
 
-    if looks_like_codex_update_prompt(&content) && !limit_re.is_match(&content) {
+    if looks_like_codex_update_prompt(&content)
+        && !codex_prompt_ready(&content)
+        && !limit_re.is_match(&content)
+    {
         if config.verbose {
             eprintln!(
                 "[verbose] Codex update prompt detected, selecting Skip and retrying /status"
@@ -863,6 +882,57 @@ mod tests {
         };
         let result = pick_richer(a, b);
         assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn test_codex_update_prompt_can_dismiss_without_approval() {
+        assert!(can_dismiss_without_approval(
+            "codex",
+            &DialogKind::UpdatePrompt
+        ));
+        assert!(can_dismiss_without_approval(
+            "CoDeX",
+            &DialogKind::UpdatePrompt
+        ));
+    }
+
+    #[test]
+    fn test_only_codex_update_prompt_can_dismiss_without_approval() {
+        assert!(!can_dismiss_without_approval(
+            "claude",
+            &DialogKind::UpdatePrompt
+        ));
+        assert!(!can_dismiss_without_approval(
+            "codex",
+            &DialogKind::TrustFolder
+        ));
+        assert!(!can_dismiss_without_approval(
+            "codex",
+            &DialogKind::TermsAcceptance
+        ));
+        assert!(!can_dismiss_without_approval(
+            "codex",
+            &DialogKind::SandboxTrust
+        ));
+    }
+
+    #[test]
+    fn test_codex_prompt_ready_old_footer() {
+        assert!(codex_prompt_ready(">_ OpenAI Codex\n? for shortcuts"));
+    }
+
+    #[test]
+    fn test_codex_prompt_ready_status_bar() {
+        assert!(codex_prompt_ready(
+            ">_ OpenAI Codex (v0.142.0)\ngpt-5.5 xhigh · repo · main · Ready · Context 0% used"
+        ));
+    }
+
+    #[test]
+    fn test_codex_prompt_ready_rejects_loading_banner() {
+        assert!(!codex_prompt_ready(
+            ">_ OpenAI Codex (v0.142.0)\nmodel: loading   /model to change"
+        ));
     }
 
     // ── check_command_exists ────────────────────────────────────────

@@ -47,7 +47,7 @@ fn dismiss_codex_update_prompt(session: &mut Session) -> Result<bool> {
     thread::sleep(Duration::from_millis(250));
 
     let mut content = session.capture_pane()?;
-    if content.contains("? for shortcuts") {
+    if crate::codex_prompt_ready(&content) {
         return Ok(true);
     }
 
@@ -58,7 +58,7 @@ fn dismiss_codex_update_prompt(session: &mut Session) -> Result<bool> {
         thread::sleep(Duration::from_millis(400));
 
         content = session.capture_pane()?;
-        if content.contains("? for shortcuts") {
+        if crate::codex_prompt_ready(&content) {
             return Ok(true);
         }
     }
