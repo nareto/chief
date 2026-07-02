@@ -104,6 +104,7 @@ fn default_run_without_one_shot_input_still_requires_chief_yaml() {
     let temp = TempDir::new("run-missing-chief-yaml");
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -138,6 +139,7 @@ fn default_prompt_run_can_be_configless() {
     let temp = TempDir::new("run-configless-prompt");
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: Some("review this file".to_owned()),
@@ -154,10 +156,80 @@ fn default_prompt_run_can_be_configless() {
 }
 
 #[test]
+fn one_shot_context_without_sqlite_log_does_not_create_chief_state() {
+    let temp = TempDir::new("one-shot-no-sqlite-state");
+    init_git_repo(&temp.path);
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        sqlite_log: false,
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: Some("review this file".to_owned()),
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: None,
+    };
+
+    let context = load_context_with_cli_overrides_and_sqlite_log(&temp.path, &cli, cli.sqlite_log)
+        .expect("one-shot context should load from defaults without sqlite logging");
+    let run_id = ChiefEngine::new(context.clone())
+        .start_run()
+        .expect("disabled sqlite logging should still allow a logical run id");
+
+    assert!(!run_id.trim().is_empty(), "run id should be returned");
+    assert!(
+        !chief::paths::chief_dir(&temp.path).exists(),
+        "one-shot context load and run start should not create .chief"
+    );
+    assert!(
+        !chief::paths::chief_yaml_path(&temp.path).exists(),
+        "one-shot context should not create chief.yaml"
+    );
+    assert!(
+        !chief::paths::chief_db_path(&temp.path).exists(),
+        "one-shot context should not create chief.db"
+    );
+}
+
+#[test]
+fn sqlite_log_one_shot_creates_db_when_run_starts() {
+    let temp = TempDir::new("one-shot-sqlite-log");
+    init_git_repo(&temp.path);
+    let cli = Cli {
+        project_dir: temp.path.clone(),
+        sqlite_log: true,
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: Some("review this file".to_owned()),
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: None,
+    };
+
+    let context = load_context_with_cli_overrides_and_sqlite_log(&temp.path, &cli, cli.sqlite_log)
+        .expect("one-shot context should load with sqlite logging enabled");
+    ChiefEngine::new(context)
+        .start_run()
+        .expect("enabled sqlite logging should persist run state");
+
+    assert!(
+        !chief::paths::chief_yaml_path(&temp.path).exists(),
+        "sqlite logging should not create chief.yaml"
+    );
+    assert!(
+        chief::paths::chief_db_path(&temp.path).exists(),
+        "sqlite logging should create chief.db when run state is written"
+    );
+}
+
+#[test]
 fn requirements_only_default_run_can_be_configless() {
     let temp = TempDir::new("run-configless-requirements");
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -178,6 +250,7 @@ fn loop_file_subcommand_can_be_configless() {
     let temp = TempDir::new("run-configless-loop-file-subcommand");
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -202,6 +275,7 @@ fn loop_file_subcommand_missing_input_does_not_create_runtime_state() {
     let temp = TempDir::new("run-configless-loop-file-missing-input");
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -232,6 +306,7 @@ fn refactor_subcommand_still_requires_chief_yaml() {
     let temp = TempDir::new("run-configless-refactor");
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -255,6 +330,7 @@ fn run_requires_file_when_loop_file_flow_is_selected() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -424,6 +500,14 @@ fn parse_root_file_option() {
     let cli = Cli::try_parse_from(["chief", "--file", "plan.md"])
         .expect("root --file option should parse");
     assert_eq!(cli.file, Some(PathBuf::from("plan.md")));
+}
+
+#[test]
+fn parse_sqlite_log_flag() {
+    let cli = Cli::try_parse_from(["chief", "--sqlite-log", "--prompt", "inspect"])
+        .expect("sqlite logging flag should parse");
+
+    assert!(cli.sqlite_log);
 }
 
 #[test]
@@ -672,6 +756,7 @@ fn load_chief_yaml_with_cli_overrides_does_not_require_git_context() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides {
             flow: Some(CliFlowValue::Refactor),
             model: Some("gpt-5.4".to_owned()),
@@ -726,6 +811,7 @@ fn loop_file_fails_when_input_file_is_missing() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -753,6 +839,7 @@ fn init_writes_full_default_chief_yaml_block() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,
@@ -986,6 +1073,7 @@ fn run_rejects_file_option_for_non_loop_file_flows() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides {
             flow: Some(CliFlowValue::Refactor),
             ..CliChiefOverrides::default()
@@ -1040,6 +1128,7 @@ fn migrate_moves_legacy_root_files_into_dot_chief() {
 
     let cli = Cli {
         project_dir: temp.path.clone(),
+        sqlite_log: false,
         chief: CliChiefOverrides::default(),
         file: None,
         prompt: None,

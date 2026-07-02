@@ -149,6 +149,21 @@ mod tests {
     }
 
     #[test]
+    fn embedded_prompt_store_renders_loop_file_prompt() {
+        let store =
+            EmbeddedPromptStore::from_embedded_prompts().expect("embedded prompts should validate");
+
+        let rendered = store
+            .render_json(
+                "loop_file_prompt.md",
+                &json!({"file_contents": "Tighten parser errors"}),
+            )
+            .expect("loop_file prompt should render");
+
+        assert!(rendered.contains("Tighten parser errors"));
+    }
+
+    #[test]
     fn embedded_prompt_store_reports_missing_templates() {
         let store =
             EmbeddedPromptStore::from_embedded_prompts().expect("embedded prompts should validate");

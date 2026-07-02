@@ -381,6 +381,9 @@ struct CliChiefOverrides {
 struct Cli {
     #[arg(long, default_value = ".", help_heading = "Global Options")]
     project_dir: PathBuf,
+    /// Persist run/job/event logging to .chief/chief.db for one-shot runs.
+    #[arg(long, default_value_t = false, help_heading = "Global Options")]
+    sqlite_log: bool,
     #[command(flatten)]
     chief: CliChiefOverrides,
     /// Markdown file used when running flow=loop_file via the default `chief` command.
@@ -678,7 +681,15 @@ fn load_chief_yaml_with_cli_overrides(project_dir: &Path, cli: &Cli) -> Result<C
 }
 
 fn load_context_with_cli_overrides(project_dir: &Path, cli: &Cli) -> Result<ProjectContext> {
-    let mut context = ProjectContext::load(project_dir)?;
+    load_context_with_cli_overrides_and_sqlite_log(project_dir, cli, true)
+}
+
+fn load_context_with_cli_overrides_and_sqlite_log(
+    project_dir: &Path,
+    cli: &Cli,
+    sqlite_log: bool,
+) -> Result<ProjectContext> {
+    let mut context = ProjectContext::load_with_sqlite_log(project_dir, sqlite_log)?;
     apply_cli_overrides_to_context(&mut context, cli)?;
     Ok(context)
 }
@@ -854,6 +865,18 @@ fn build_cli_schema() -> CliSchema {
             Vec::new(),
             &[],
             &["Relative paths are resolved from the current working directory."],
+        ),
+        schema_option(
+            Some("sqlite-log"),
+            None,
+            None,
+            "Persist one-shot run/job/event logging to .chief/chief.db.",
+            false,
+            false,
+            Some("false"),
+            Vec::new(),
+            &[],
+            &["When omitted, CLI-only one-shot runs do not create .chief/chief.db."],
         ),
         schema_option(
             Some("flow"),
@@ -2005,7 +2028,8 @@ fn ensure_chief_yaml_exists(project_dir: &Path) -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    if invocation_requires_chief_yaml(cli) {
+    let requires_chief_yaml = invocation_requires_chief_yaml(cli);
+    if requires_chief_yaml {
         ensure_chief_yaml_exists(&cli.project_dir)?;
     }
 
@@ -2013,7 +2037,11 @@ fn run(cli: &Cli) -> Result<()> {
         return run_command(cli, command);
     }
 
-    let context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
+    let context = load_context_with_cli_overrides_and_sqlite_log(
+        &cli.project_dir,
+        cli,
+        cli.sqlite_log || requires_chief_yaml,
+    )?;
     let flow_input = context.chief_yaml.chief.flow.trim();
     let flow_kind: FlowKind = flow_input
         .parse()
@@ -2487,7 +2515,8 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     }
 
     let report_started_at = Utc::now();
-    let mut context = load_context_with_cli_overrides(&cli.project_dir, cli)?;
+    let mut context =
+        load_context_with_cli_overrides_and_sqlite_log(&cli.project_dir, cli, cli.sqlite_log)?;
     print_config_summary(&context, &cli.chief);
 
     let (source_desc, expectations): (String, String) = if let Some(ref file) = args.file {
@@ -2697,6 +2726,9 @@ fn run_migrate(cli: &Cli) -> Result<()> {
 }
 
 fn latest_run_id(store: &ProjectStore) -> Result<Option<String>> {
+    if !store.sqlite_log_enabled() {
+        return Ok(None);
+    }
     if !store.db_path.exists() {
         return Ok(None);
     }
@@ -2785,6 +2817,9 @@ fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>> {
 }
 
 fn load_run_record(store: &ProjectStore, run_id: &str) -> Result<Option<ReportRunRecord>> {
+    if !store.sqlite_log_enabled() || !store.db_path.exists() {
+        return Ok(None);
+    }
     let conn = rusqlite::Connection::open(&store.db_path)
         .with_context(|| format!("failed to open {}", store.db_path.display()))?;
     let mut stmt = conn
@@ -2814,6 +2849,9 @@ fn load_run_record(store: &ProjectStore, run_id: &str) -> Result<Option<ReportRu
 }
 
 fn load_run_events(store: &ProjectStore, run_id: &str) -> Result<Vec<ReportEventRecord>> {
+    if !store.sqlite_log_enabled() || !store.db_path.exists() {
+        return Ok(Vec::new());
+    }
     let conn = rusqlite::Connection::open(&store.db_path)
         .with_context(|| format!("failed to open {}", store.db_path.display()))?;
     let mut stmt = conn

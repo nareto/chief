@@ -7,6 +7,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 impl ProjectStore {
     pub fn reset_in_progress_todos_to_pending(&self) -> Result<usize> {
+        if !self.sqlite_log_enabled() {
+            return Ok(0);
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let changed = tx.execute(
@@ -24,6 +27,9 @@ impl ProjectStore {
     }
 
     pub fn replace_todos(&self, todos: Vec<Todo>) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let todo_ids = todos
@@ -53,6 +59,9 @@ impl ProjectStore {
     }
 
     pub fn list_todos(&self) -> Result<Vec<Todo>> {
+        if !self.sqlite_log_enabled() {
+            return Ok(Vec::new());
+        }
         let conn = self.conn()?;
         self.list_todos_with_conn(&conn)
     }
@@ -79,6 +88,9 @@ impl ProjectStore {
         status: TodoStatus,
         done_at_commit: Option<&str>,
     ) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let changed = tx.execute(
@@ -101,6 +113,9 @@ impl ProjectStore {
 
     pub fn append_todo(&self, todo: Todo) -> Result<Todo> {
         let normalized = todo.normalize();
+        if !self.sqlite_log_enabled() {
+            return Ok(normalized);
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         self.upsert_todo_row(&tx, &normalized)?;
@@ -109,6 +124,9 @@ impl ProjectStore {
     }
 
     pub fn update_todo(&self, existing_id: &str, todo: Todo) -> Result<Todo> {
+        if !self.sqlite_log_enabled() {
+            return Ok(todo.normalize());
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
@@ -153,6 +171,9 @@ impl ProjectStore {
     }
 
     pub fn delete_todo(&self, todo_id: &str) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
@@ -166,6 +187,9 @@ impl ProjectStore {
     }
 
     pub fn delete_done_todos(&self) -> Result<usize> {
+        if !self.sqlite_log_enabled() {
+            return Ok(0);
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
@@ -178,6 +202,9 @@ impl ProjectStore {
     }
 
     pub fn clean_completed_todos_with_commit(&self) -> Result<usize> {
+        if !self.sqlite_log_enabled() {
+            return Ok(0);
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let deleted = tx.execute(

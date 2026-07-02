@@ -54,6 +54,7 @@ pub fn db_reset_required_from_anyhow(err: &anyhow::Error) -> Option<DbResetRequi
 pub struct ProjectStore {
     pub project_dir: PathBuf,
     pub db_path: PathBuf,
+    sqlite_log: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -111,10 +112,27 @@ impl ProjectStore {
         Self {
             db_path: paths::chief_db_path(&project_dir),
             project_dir,
+            sqlite_log: true,
         }
     }
 
+    pub fn without_sqlite_log(project_dir: impl AsRef<Path>) -> Self {
+        let project_dir = project_dir.as_ref().to_path_buf();
+        Self {
+            db_path: paths::chief_db_path(&project_dir),
+            project_dir,
+            sqlite_log: false,
+        }
+    }
+
+    pub fn sqlite_log_enabled(&self) -> bool {
+        self.sqlite_log
+    }
+
     pub fn init(&self) -> Result<()> {
+        if !self.sqlite_log {
+            return Ok(());
+        }
         if !self.project_dir.exists() {
             fs::create_dir_all(&self.project_dir)
                 .with_context(|| format!("failed to create {}", self.project_dir.display()))?;
@@ -128,6 +146,9 @@ impl ProjectStore {
     }
 
     pub fn reset_db(&self) -> Result<()> {
+        if !self.sqlite_log {
+            return Ok(());
+        }
         self.reset_db_file()?;
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open {} for reset", self.db_path.display()))?;

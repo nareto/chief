@@ -8,6 +8,10 @@ use std::io::{self, IsTerminal, Write};
 
 impl ProjectStore {
     pub fn record_event(&self, event: &EventRecord) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            emit_event_to_stdout(event);
+            return Ok(());
+        }
         let conn = self.conn()?;
         let payload = serde_json::to_string(&event.payload)?;
         conn.execute(
@@ -30,6 +34,9 @@ impl ProjectStore {
     }
 
     pub fn query_events(&self, query: EventQuery) -> Result<Vec<EventRecord>> {
+        if !self.sqlite_log_enabled() {
+            return Ok(Vec::new());
+        }
         let limit = if query.limit == 0 {
             100
         } else {
@@ -78,6 +85,9 @@ impl ProjectStore {
     }
 
     pub fn query_events_after_id(&self, after_id: i64, limit: usize) -> Result<Vec<EventRecord>> {
+        if !self.sqlite_log_enabled() {
+            return Ok(Vec::new());
+        }
         let limit = if limit == 0 { 200 } else { limit.min(2_000) };
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -93,6 +103,9 @@ impl ProjectStore {
     }
 
     pub fn trim_events_to_recent_runs(&self, keep_runs: usize) -> Result<usize> {
+        if !self.sqlite_log_enabled() {
+            return Ok(0);
+        }
         let keep_runs = keep_runs.max(1);
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;

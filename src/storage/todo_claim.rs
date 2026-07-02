@@ -7,6 +7,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 impl ProjectStore {
     pub fn claim_next_pending_todo(&self) -> Result<Option<Todo>> {
+        if !self.sqlite_log_enabled() {
+            return Ok(None);
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         self.normalize_legacy_attempted_todos_to_pending(&tx)?;
@@ -49,6 +52,9 @@ impl ProjectStore {
     }
 
     pub fn claim_todo(&self, todo_id: &str) -> Result<Option<Todo>> {
+        if !self.sqlite_log_enabled() {
+            return Ok(None);
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         self.normalize_legacy_attempted_todos_to_pending(&tx)?;

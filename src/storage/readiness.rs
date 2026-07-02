@@ -7,6 +7,9 @@ use serde_json::Value;
 
 impl ProjectStore {
     pub fn get_readiness_state(&self) -> Result<ProjectReadinessState> {
+        if !self.sqlite_log_enabled() {
+            return Ok(ProjectReadinessState::initial_not_checked());
+        }
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT status, summary, details, checking_started_at, checked_at, updated_at
@@ -22,6 +25,9 @@ impl ProjectStore {
     }
 
     pub fn set_readiness_checking(&self, summary: &str) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -50,6 +56,9 @@ impl ProjectStore {
         summary: &str,
         details: &Value,
     ) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         if status == ReadinessStatus::Checking {
             return Err(anyhow!(
                 "readiness result status cannot be '{}'",

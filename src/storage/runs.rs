@@ -7,6 +7,9 @@ use rusqlite::params;
 
 impl ProjectStore {
     pub fn start_run(&self, run_id: &str) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO runs (run_id, status, exit_status, started_at, ended_at) VALUES (?1, ?2, NULL, ?3, NULL)",
@@ -16,6 +19,9 @@ impl ProjectStore {
     }
 
     pub fn finish_run(&self, run_id: &str, exit_status: RunExitStatus) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let conn = self.conn()?;
         conn.execute(
             "UPDATE runs SET status = ?1, exit_status = ?2, ended_at = ?3 WHERE run_id = ?4",
@@ -30,6 +36,9 @@ impl ProjectStore {
     }
 
     pub fn upsert_job(&self, job: &JobRecord) -> Result<()> {
+        if !self.sqlite_log_enabled() {
+            return Ok(());
+        }
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO jobs (id, run_id, todo_id, status, worker_index, flow, worktree_path, started_at, ended_at, error)
@@ -60,6 +69,9 @@ impl ProjectStore {
     }
 
     pub fn list_jobs(&self, limit: usize) -> Result<Vec<JobRecord>> {
+        if !self.sqlite_log_enabled() {
+            return Ok(Vec::new());
+        }
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, run_id, todo_id, status, worker_index, flow, worktree_path, started_at, ended_at, error

@@ -7,6 +7,9 @@ use std::io::ErrorKind;
 
 impl ProjectStore {
     pub(super) fn conn(&self) -> Result<Connection> {
+        if !self.sqlite_log_enabled() {
+            anyhow::bail!("SQLite logging is disabled for this Chief run");
+        }
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open {}", self.db_path.display()))?;
         if let Err(err) = self.ensure_schema_ready(&conn) {

@@ -26,11 +26,19 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     pub fn load(project_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::load_with_sqlite_log(project_dir, true)
+    }
+
+    pub fn load_with_sqlite_log(project_dir: impl AsRef<Path>, sqlite_log: bool) -> Result<Self> {
         let project_dir = project_dir.as_ref().to_path_buf();
         let config_path = paths::chief_yaml_path(&project_dir);
         let chief_yaml = ChiefYaml::load_or_default(&config_path)?;
 
-        let store = ProjectStore::new(&project_dir);
+        let store = if sqlite_log {
+            ProjectStore::new(&project_dir)
+        } else {
+            ProjectStore::without_sqlite_log(&project_dir)
+        };
         store.init()?;
 
         let prompts = EmbeddedPromptStore::from_embedded_prompts()?;
