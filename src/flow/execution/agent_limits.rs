@@ -143,9 +143,36 @@ impl<'a> FlowExecution<'a> {
             }
         };
 
+        let reserve_percent = self.chief_config.limit_reserve_percent;
+        ensure_valid_limit_reserve_percent(reserve_percent)?;
+        if let Some(limit) = limit_below_reserve(&current_snapshot, reserve_percent) {
+            self.log_event(
+                "error",
+                Some(phase),
+                EventType::Msg,
+                format!(
+                    "Stopping before calling {} because usage limit '{}' is below the configured reserve",
+                    agent_name, limit.label
+                ),
+                payload_from_json(json!({
+                    "agent_name": agent_name,
+                    "respect_limits": true,
+                    "limit_reserve_percent": reserve_percent,
+                    "limiting_usage_label": limit.label,
+                    "percent_remaining": limit.percent_remaining,
+                })),
+            )?;
+            bail!(
+                "agent usage limit '{}' has {}% remaining, below configured reserve of {}%",
+                limit.label,
+                limit.percent_remaining,
+                reserve_percent
+            );
+        }
+
         let history = self.recent_agent_usage_history(&agent_name)?;
         let now = Utc::now();
-        let decision = compute_agent_pacing(now, current_snapshot, &history);
+        let decision = compute_agent_pacing(now, current_snapshot, &history, reserve_percent);
 
         if !decision.wait_duration.is_zero() {
             let wait_until = wait_until_timestamp(now, decision.wait_duration);
@@ -157,6 +184,7 @@ impl<'a> FlowExecution<'a> {
                 payload_from_json(json!({
                     "agent_name": agent_name,
                     "respect_limits": true,
+                    "limit_reserve_percent": reserve_percent,
                     "desired_frequency_seconds": decision
                         .desired_frequency
                         .map(|duration| duration.as_secs_f64()),
@@ -237,6 +265,7 @@ impl<'a> FlowExecution<'a> {
             payload_from_json(json!({
                 "agent_name": self.agent.name(),
                 "respect_limits": true,
+                "limit_reserve_percent": self.chief_config.limit_reserve_percent,
                 "usage": decision.current_snapshot,
                 "recent_call_count": decision.recent_call_count,
                 "observed_average_frequency_seconds": decision
@@ -395,6 +424,7 @@ fn compute_agent_pacing(
     now: chrono::DateTime<Utc>,
     current_snapshot: AgentUsageSnapshot,
     history: &[HistoricalAgentUsageEvent],
+    reserve_percent: u32,
 ) -> AgentPacingDecision {
     let recent_history = if history.len() > 10 {
         &history[history.len() - 10..]
@@ -416,7 +446,11 @@ fn compute_agent_pacing(
             continue;
         };
 
-        let candidate = desired_frequency_for_limit(limit, impact.average_percent_used_per_call);
+        let candidate = desired_frequency_for_limit(
+            limit,
+            impact.average_percent_used_per_call,
+            reserve_percent,
+        );
         if candidate > desired_frequency {
             desired_frequency = candidate;
             limiting_usage_label = candidate.map(|_| impact.label.clone());
@@ -540,16 +574,34 @@ fn average_usage_impact(
         .collect()
 }
 
+fn ensure_valid_limit_reserve_percent(reserve_percent: u32) -> Result<()> {
+    if reserve_percent > 100 {
+        bail!("limit_reserve_percent must be between 0 and 100 inclusive");
+    }
+    Ok(())
+}
+
+fn limit_below_reserve(
+    snapshot: &AgentUsageSnapshot,
+    reserve_percent: u32,
+) -> Option<&AgentUsageLimitSnapshot> {
+    snapshot
+        .limits
+        .iter()
+        .find(|limit| limit.percent_remaining < reserve_percent)
+}
+
 fn desired_frequency_for_limit(
     limit: &AgentUsageLimitSnapshot,
     average_percent_used_per_call: f64,
+    reserve_percent: u32,
 ) -> Option<Duration> {
     let reset_minutes = limit.reset_minutes?.max(0) as f64;
     if reset_minutes <= 0.0 {
         return None;
     }
 
-    if limit.percent_remaining == 0 {
+    if limit.percent_remaining <= reserve_percent {
         return Some(Duration::from_secs_f64(reset_minutes * 60.0));
     }
 
@@ -557,13 +609,13 @@ fn desired_frequency_for_limit(
         return None;
     }
 
-    let remaining = limit.percent_remaining as f64;
-    if average_percent_used_per_call >= remaining {
+    let spendable_remaining = (limit.percent_remaining - reserve_percent) as f64;
+    if average_percent_used_per_call >= spendable_remaining {
         return Some(Duration::from_secs_f64(reset_minutes * 60.0));
     }
 
     Some(Duration::from_secs_f64(
-        (reset_minutes * 60.0) * average_percent_used_per_call / remaining,
+        (reset_minutes * 60.0) * average_percent_used_per_call / spendable_remaining,
     ))
 }
 
@@ -694,6 +746,7 @@ mod tests {
             now,
             snapshot(&[("5h limit", 30, 70, 240), ("Weekly limit", 30, 70, 9_960)]),
             &history,
+            10,
         );
 
         assert_eq!(
@@ -702,12 +755,12 @@ mod tests {
         );
         assert_eq!(
             duration_seconds_ceiling(decision.desired_frequency.unwrap()) / 60,
-            711,
-            "weekly limit should dominate desired spacing"
+            830,
+            "weekly limit should dominate desired spacing while preserving the reserve"
         );
         assert_eq!(
             duration_seconds_ceiling(decision.wait_duration) / 60,
-            651,
+            770,
             "wait should subtract time since the previous call"
         );
     }
@@ -742,7 +795,8 @@ mod tests {
             snapshot: snapshot(&[("5h limit", 90, 10, 20)]),
         }];
 
-        let decision = compute_agent_pacing(now, snapshot(&[("5h limit", 5, 95, 300)]), &history);
+        let decision =
+            compute_agent_pacing(now, snapshot(&[("5h limit", 5, 95, 300)]), &history, 10);
 
         assert!(decision.desired_frequency.is_none());
         assert!(decision.wait_duration.is_zero());
@@ -761,10 +815,41 @@ mod tests {
                 requests: None,
             },
             5.0,
+            10,
         )
         .expect("exhausted limits should produce a wait");
 
         assert_eq!(duration_seconds_ceiling(frequency), 7_200);
+    }
+
+    #[test]
+    fn desired_frequency_spreads_only_spendable_usage_above_reserve() {
+        let frequency = desired_frequency_for_limit(
+            &AgentUsageLimitSnapshot {
+                label: "Weekly limit".to_owned(),
+                percent_used: 30,
+                percent_remaining: 70,
+                reset_info: "resets later".to_owned(),
+                reset_minutes: Some(9_960),
+                spent: None,
+                requests: None,
+            },
+            5.0,
+            10,
+        )
+        .expect("spendable usage should produce a desired frequency");
+
+        assert_eq!(duration_seconds_ceiling(frequency) / 60, 830);
+    }
+
+    #[test]
+    fn limit_below_reserve_detects_drained_limit() {
+        let snapshot = snapshot(&[("5h limit", 92, 8, 120), ("Weekly limit", 50, 50, 9_960)]);
+
+        assert_eq!(
+            limit_below_reserve(&snapshot, 10).map(|limit| limit.label.as_str()),
+            Some("5h limit")
+        );
     }
 
     #[test]

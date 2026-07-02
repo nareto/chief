@@ -25,6 +25,7 @@ pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
   respect_limits: true
+  limit_reserve_percent: 10
   use_agent_log_truncation_for_stdout_logs: false
   verbose: false
 "#;

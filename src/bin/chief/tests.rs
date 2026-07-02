@@ -552,6 +552,24 @@ fn parse_agent_wait_seconds_override() {
 }
 
 #[test]
+fn parse_limit_reserve_percent_override() {
+    let cli = Cli::try_parse_from([
+        "chief",
+        "--limit-reserve-percent",
+        "25",
+        "--prompt",
+        "inspect",
+    ])
+    .expect("limit reserve option should parse");
+
+    let overrides = cli
+        .chief
+        .to_config_overrides()
+        .expect("limit reserve override should convert");
+    assert_eq!(overrides.limit_reserve_percent, Some(25));
+}
+
+#[test]
 fn parse_loop_file_command() {
     let cli = Cli::try_parse_from(["chief", "loop_file", "--file", "plan.md"])
         .expect("loop_file command should parse");

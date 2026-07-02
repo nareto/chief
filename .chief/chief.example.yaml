@@ -50,6 +50,8 @@ chief:
   agent_log_max_output_chars: 1500
   # When true, wait for agentusage limits before launching agent calls.
   respect_limits: true
+  # Minimum percent of each agent usage limit to keep in reserve before stopping.
+  limit_reserve_percent: 10
   # When true, apply agent log truncation to stdout log output too.
   use_agent_log_truncation_for_stdout_logs: false
   # Print raw live agent output, including JSON event streams from JSON-mode agents.

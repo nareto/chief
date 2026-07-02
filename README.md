@@ -242,6 +242,7 @@ chief:
   agent_log_max_output_lines: 10
   agent_log_max_output_chars: 1500
   respect_limits: true
+  limit_reserve_percent: 10
   use_agent_log_truncation_for_stdout_logs: false
 
 suites:
@@ -280,6 +281,7 @@ Current config details worth knowing:
 - When `chief.mcp_servers` is set, chief runs Claude with a generated strict MCP JSON config, Codex with an isolated `CODEX_HOME` containing a chief-managed `config.toml`, and Cursor with an isolated `HOME` containing a chief-managed `~/.cursor/mcp.json`.
 - `chief.model_reasoning_effort` currently affects the `codex` adapter.
 - `chief.respect_limits` checks usage with `agentusage` before each call and waits when needed to stay under the slowest active limit.
+- `chief.limit_reserve_percent` defaults to `10`; Chief paces calls to preserve that percent of each active limit and exits instead of calling an agent if any limit is already below the reserve.
 - `chief.agent_wait_seconds`, when set, applies a fixed wait between agent call starts and overrides the `respect_limits`/`agentusage` pacing logic. Use `0` to bypass waiting while still disabling `respect_limits` pacing.
 - `agent_timeout_seconds: 0` disables the per-agent timeout. Suite command timeouts always clamp to at least one second.
 - `max_retries` is the queued-work retry budget used by the worktree scheduler. `loop_file` uses one outer retry loop and relies on convergence iterations instead.

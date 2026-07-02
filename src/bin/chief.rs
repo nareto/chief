@@ -93,13 +93,15 @@ mod chief_option_help {
         "Tail character count kept when truncating agent output in logs.";
     pub(super) const RESPECT_LIMITS: &str =
         "When true, wait for agentusage limits before launching agent calls.";
+    pub(super) const LIMIT_RESERVE_PERCENT: &str =
+        "Minimum percent of each agent usage limit to keep in reserve before stopping.";
     pub(super) const USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS: &str =
         "When true, apply agent log truncation to stdout log output too.";
     pub(super) const VERBOSE: &str =
         "Print raw live agent output, including JSON event streams from JSON-mode agents.";
 
     #[cfg(test)]
-    pub(super) const SPECS: [ChiefOptionHelpSpec; 18] = [
+    pub(super) const SPECS: [ChiefOptionHelpSpec; 19] = [
         ChiefOptionHelpSpec {
             key: "flow",
             help: FLOW,
@@ -163,6 +165,10 @@ mod chief_option_help {
         ChiefOptionHelpSpec {
             key: "respect_limits",
             help: RESPECT_LIMITS,
+        },
+        ChiefOptionHelpSpec {
+            key: "limit_reserve_percent",
+            help: LIMIT_RESERVE_PERCENT,
         },
         ChiefOptionHelpSpec {
             key: "use_agent_log_truncation_for_stdout_logs",
@@ -358,6 +364,14 @@ struct CliChiefOverrides {
         help_heading = "Chief Overrides"
     )]
     respect_limits: Option<bool>,
+    #[arg(
+        long,
+        global = true,
+        value_parser = clap::value_parser!(u32).range(0..=100),
+        help = chief_option_help::LIMIT_RESERVE_PERCENT,
+        help_heading = "Chief Overrides"
+    )]
+    limit_reserve_percent: Option<u32>,
     #[arg(
         long,
         global = true,
@@ -615,6 +629,7 @@ impl CliChiefOverrides {
             agent_log_max_output_lines,
             agent_log_max_output_chars,
             respect_limits,
+            limit_reserve_percent,
             use_agent_log_truncation_for_stdout_logs,
             verbose,
         } = self.clone();
@@ -646,6 +661,7 @@ impl CliChiefOverrides {
             agent_log_max_output_lines,
             agent_log_max_output_chars,
             respect_limits,
+            limit_reserve_percent,
             use_agent_log_truncation_for_stdout_logs,
             verbose: verbose.then_some(true),
         })
@@ -1075,6 +1091,18 @@ fn build_cli_schema() -> CliSchema {
             bool_possible_values(),
             &[],
             &[],
+        ),
+        schema_option(
+            Some("limit-reserve-percent"),
+            None,
+            Some("LIMIT_RESERVE_PERCENT"),
+            chief_option_help::LIMIT_RESERVE_PERCENT,
+            false,
+            false,
+            Some("10"),
+            Vec::new(),
+            &[],
+            &["Must be between 0 and 100 inclusive."],
         ),
         schema_option(
             Some("use-agent-log-truncation-for-stdout-logs"),
@@ -1732,6 +1760,10 @@ fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
             overrides.agent_log_max_output_chars.is_some(),
         ),
         ("respect_limits", overrides.respect_limits.is_some()),
+        (
+            "limit_reserve_percent",
+            overrides.limit_reserve_percent.is_some(),
+        ),
         (
             "use_agent_log_truncation_for_stdout_logs",
             overrides.use_agent_log_truncation_for_stdout_logs.is_some(),
@@ -3476,6 +3508,11 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
         "{} {}",
         format_report_key("respect_limits", color),
         context.chief_yaml.chief.respect_limits
+    );
+    println!(
+        "{} {}%",
+        format_report_key("limit_reserve", color),
+        context.chief_yaml.chief.limit_reserve_percent
     );
     println!(
         "{} {}",

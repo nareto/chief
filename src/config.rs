@@ -78,6 +78,8 @@ pub struct ChiefConfig {
     pub agent_log_max_output_chars: usize,
     #[serde(default = "default_respect_limits")]
     pub respect_limits: bool,
+    #[serde(default = "default_limit_reserve_percent")]
+    pub limit_reserve_percent: u32,
     #[serde(default)]
     pub use_agent_log_truncation_for_stdout_logs: bool,
     #[serde(default)]
@@ -102,6 +104,7 @@ pub struct ChiefConfigOverrides {
     pub agent_log_max_output_lines: Option<usize>,
     pub agent_log_max_output_chars: Option<usize>,
     pub respect_limits: Option<bool>,
+    pub limit_reserve_percent: Option<u32>,
     pub use_agent_log_truncation_for_stdout_logs: Option<bool>,
     pub verbose: Option<bool>,
 }
@@ -125,6 +128,7 @@ impl Default for ChiefConfig {
             agent_log_max_output_lines: default_agent_log_max_output_lines(),
             agent_log_max_output_chars: default_agent_log_max_output_chars(),
             respect_limits: default_respect_limits(),
+            limit_reserve_percent: default_limit_reserve_percent(),
             use_agent_log_truncation_for_stdout_logs: false,
             verbose: false,
         }
@@ -150,6 +154,7 @@ impl ChiefConfig {
             agent_log_max_output_lines,
             agent_log_max_output_chars,
             respect_limits,
+            limit_reserve_percent,
             use_agent_log_truncation_for_stdout_logs,
             verbose,
         } = self;
@@ -171,6 +176,7 @@ impl ChiefConfig {
             agent_log_max_output_lines: Some(agent_log_max_output_lines),
             agent_log_max_output_chars: Some(agent_log_max_output_chars),
             respect_limits: Some(respect_limits),
+            limit_reserve_percent: Some(limit_reserve_percent),
             use_agent_log_truncation_for_stdout_logs: Some(
                 use_agent_log_truncation_for_stdout_logs,
             ),
@@ -196,6 +202,7 @@ impl ChiefConfig {
             agent_log_max_output_lines,
             agent_log_max_output_chars,
             respect_limits,
+            limit_reserve_percent,
             use_agent_log_truncation_for_stdout_logs,
             verbose,
         } = self;
@@ -217,6 +224,7 @@ impl ChiefConfig {
             agent_log_max_output_lines: agent_log_max_output_lines_override,
             agent_log_max_output_chars: agent_log_max_output_chars_override,
             respect_limits: respect_limits_override,
+            limit_reserve_percent: limit_reserve_percent_override,
             use_agent_log_truncation_for_stdout_logs:
                 use_agent_log_truncation_for_stdout_logs_override,
             verbose: verbose_override,
@@ -245,6 +253,7 @@ impl ChiefConfig {
             agent_log_max_output_chars: agent_log_max_output_chars_override
                 .unwrap_or(agent_log_max_output_chars),
             respect_limits: respect_limits_override.unwrap_or(respect_limits),
+            limit_reserve_percent: limit_reserve_percent_override.unwrap_or(limit_reserve_percent),
             use_agent_log_truncation_for_stdout_logs:
                 use_agent_log_truncation_for_stdout_logs_override
                     .unwrap_or(use_agent_log_truncation_for_stdout_logs),
@@ -390,6 +399,10 @@ fn default_respect_limits() -> bool {
     true
 }
 
+fn default_limit_reserve_percent() -> u32 {
+    10
+}
+
 fn default_test_root() -> String {
     ".".to_owned()
 }
@@ -514,6 +527,20 @@ mod tests {
     }
 
     #[test]
+    fn limit_reserve_percent_defaults_to_10() {
+        let yaml = "chief: {}\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.limit_reserve_percent, 10);
+    }
+
+    #[test]
+    fn parse_limit_reserve_percent_override() {
+        let yaml = "chief:\n  limit_reserve_percent: 25\n";
+        let parsed: ChiefYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.chief.limit_reserve_percent, 25);
+    }
+
+    #[test]
     fn mcp_servers_default_to_unmanaged() {
         let parsed: ChiefYaml = serde_yaml::from_str("chief: {}\n").unwrap();
         assert!(parsed.chief.mcp_servers.is_none());
@@ -629,6 +656,7 @@ mod tests {
             agent_log_max_output_lines: 33,
             agent_log_max_output_chars: 444,
             respect_limits: false,
+            limit_reserve_percent: 25,
             use_agent_log_truncation_for_stdout_logs: true,
             verbose: true,
         };
