@@ -770,6 +770,13 @@ fn wait_until_timestamp(
         .and_then(|duration| now.checked_add_signed(duration))
 }
 
+fn format_wait_until_for_display(timestamp: chrono::DateTime<Utc>) -> String {
+    timestamp
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S %Z (%:z)")
+        .to_string()
+}
+
 fn waiting_for_usage_limit_message(
     now: chrono::DateTime<Utc>,
     agent_name: &str,
@@ -779,7 +786,7 @@ fn waiting_for_usage_limit_message(
     if let Some(wait_until) = wait_until_timestamp(now, decision.wait_duration) {
         format!(
             "Waiting until {} before calling {} to respect usage limits (~{} second(s))",
-            wait_until.to_rfc3339(),
+            format_wait_until_for_display(wait_until),
             agent_name,
             wait_seconds
         )
@@ -800,7 +807,7 @@ fn waiting_for_fixed_agent_wait_message(
     if let Some(wait_until) = wait_until_timestamp(now, decision.wait_duration) {
         format!(
             "Waiting until {} before calling {} due to fixed agent_wait_seconds (~{} second(s))",
-            wait_until.to_rfc3339(),
+            format_wait_until_for_display(wait_until),
             agent_name,
             wait_seconds
         )
@@ -1102,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_message_includes_absolute_resume_timestamp() {
+    fn waiting_message_includes_local_resume_timestamp() {
         let now = Utc.with_ymd_and_hms(2025, 3, 18, 12, 0, 0).unwrap();
         let decision = AgentPacingDecision {
             current_snapshot: snapshot(&[("5h limit", 10, 90, 300)]),
@@ -1118,9 +1125,20 @@ mod tests {
             }],
         };
 
+        let message = waiting_for_usage_limit_message(now, "codex", &decision);
+        let local_wait_until = format_wait_until_for_display(
+            wait_until_timestamp(now, decision.wait_duration).expect("wait timestamp should exist"),
+        );
+
         assert_eq!(
-            waiting_for_usage_limit_message(now, "codex", &decision),
-            "Waiting until 2025-03-18T12:01:15+00:00 before calling codex to respect usage limits (~75 second(s))"
+            message,
+            format!(
+                "Waiting until {local_wait_until} before calling codex to respect usage limits (~75 second(s))"
+            )
+        );
+        assert!(
+            !message.contains("T12:01:15+00:00"),
+            "wait message should use local display format, got: {message}"
         );
     }
 }
