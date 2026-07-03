@@ -14,5 +14,5 @@ If you don't find any, i.e. state of the codebase fully satisfies the task reque
 
 When in doubt, do the edits.
 
-When done with your work, commit all changes.
+When done with your work, commit all changes. Prefix Chief-created commit subjects with `chief: `, e.g. `chief: tighten parser errors`.
 
