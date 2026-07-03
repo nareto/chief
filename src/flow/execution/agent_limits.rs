@@ -7,6 +7,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+const PROCESS_AGENT_HISTORY_LIMIT: usize = 128;
+
 #[derive(Debug)]
 pub(super) struct AgentCallPermit {
     _guard: Option<MutexGuard<'static, ()>>,
@@ -72,6 +74,9 @@ struct HistoricalAgentUsageEvent {
     timestamp: chrono::DateTime<Utc>,
     snapshot: AgentUsageSnapshot,
 }
+
+type ProcessAgentUsageHistory = BTreeMap<String, Vec<HistoricalAgentUsageEvent>>;
+type ProcessAgentInvocationHistory = BTreeMap<String, Vec<chrono::DateTime<Utc>>>;
 
 #[derive(Debug, Clone, Serialize)]
 struct AverageUsageImpact {
@@ -245,6 +250,10 @@ impl<'a> FlowExecution<'a> {
             self.sleep_with_cancellation(decision.wait_duration)?;
         }
 
+        if !self.store.sqlite_log_enabled() {
+            record_process_agent_invocation(self.agent.name(), &self.project_dir, Utc::now());
+        }
+
         Ok(AgentCallPermit {
             _guard: Some(provider_guard),
             decision: None,
@@ -279,7 +288,18 @@ impl<'a> FlowExecution<'a> {
                 "average_usage_impact": decision.average_usage_impact,
                 "usage_impact_estimation_basis": usage_impact_estimation_basis(decision),
             })),
-        )
+        )?;
+
+        if !self.store.sqlite_log_enabled() {
+            record_process_agent_usage_history(
+                self.agent.name(),
+                &self.project_dir,
+                Utc::now(),
+                decision.current_snapshot.clone(),
+            );
+        }
+
+        Ok(())
     }
 
     pub(super) fn log_agent_fixed_wait_event(
@@ -314,6 +334,10 @@ impl<'a> FlowExecution<'a> {
         &self,
         agent_name: &str,
     ) -> Result<Vec<HistoricalAgentUsageEvent>> {
+        if !self.store.sqlite_log_enabled() {
+            return Ok(process_agent_usage_history(agent_name, &self.project_dir));
+        }
+
         let events = self.store.query_events(EventQuery {
             limit: 128,
             event_type: Some(EventType::AgentCmd),
@@ -352,6 +376,13 @@ impl<'a> FlowExecution<'a> {
         &self,
         agent_name: &str,
     ) -> Result<Vec<chrono::DateTime<Utc>>> {
+        if !self.store.sqlite_log_enabled() {
+            return Ok(process_agent_invocation_history(
+                agent_name,
+                &self.project_dir,
+            ));
+        }
+
         let events = self.store.query_events(EventQuery {
             limit: 256,
             event_type: Some(EventType::AgentCmd),
@@ -399,6 +430,88 @@ fn agent_limit_mutex(agent_name: &str) -> &'static Mutex<()> {
     let leaked = Box::leak(Box::new(Mutex::new(())));
     guard.insert(agent_name.to_owned(), leaked);
     leaked
+}
+
+fn process_history_key(agent_name: &str, project_dir: &Path) -> String {
+    format!(
+        "{}\0{}",
+        project_dir.display(),
+        agent_name.to_ascii_lowercase()
+    )
+}
+
+fn process_agent_usage_history_store() -> &'static Mutex<ProcessAgentUsageHistory> {
+    static HISTORY: OnceLock<Mutex<ProcessAgentUsageHistory>> = OnceLock::new();
+    HISTORY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn record_process_agent_usage_history(
+    agent_name: &str,
+    project_dir: &Path,
+    timestamp: chrono::DateTime<Utc>,
+    snapshot: AgentUsageSnapshot,
+) {
+    let mut guard = process_agent_usage_history_store()
+        .lock()
+        .expect("agent usage history mutex poisoned");
+    let entries = guard
+        .entry(process_history_key(agent_name, project_dir))
+        .or_default();
+    entries.push(HistoricalAgentUsageEvent {
+        timestamp,
+        snapshot,
+    });
+    if entries.len() > PROCESS_AGENT_HISTORY_LIMIT {
+        let overflow = entries.len() - PROCESS_AGENT_HISTORY_LIMIT;
+        entries.drain(0..overflow);
+    }
+}
+
+fn process_agent_usage_history(
+    agent_name: &str,
+    project_dir: &Path,
+) -> Vec<HistoricalAgentUsageEvent> {
+    process_agent_usage_history_store()
+        .lock()
+        .expect("agent usage history mutex poisoned")
+        .get(&process_history_key(agent_name, project_dir))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn process_agent_invocation_history_store() -> &'static Mutex<ProcessAgentInvocationHistory> {
+    static HISTORY: OnceLock<Mutex<ProcessAgentInvocationHistory>> = OnceLock::new();
+    HISTORY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn record_process_agent_invocation(
+    agent_name: &str,
+    project_dir: &Path,
+    timestamp: chrono::DateTime<Utc>,
+) {
+    let mut guard = process_agent_invocation_history_store()
+        .lock()
+        .expect("agent invocation history mutex poisoned");
+    let entries = guard
+        .entry(process_history_key(agent_name, project_dir))
+        .or_default();
+    entries.push(timestamp);
+    if entries.len() > PROCESS_AGENT_HISTORY_LIMIT {
+        let overflow = entries.len() - PROCESS_AGENT_HISTORY_LIMIT;
+        entries.drain(0..overflow);
+    }
+}
+
+fn process_agent_invocation_history(
+    agent_name: &str,
+    project_dir: &Path,
+) -> Vec<chrono::DateTime<Utc>> {
+    process_agent_invocation_history_store()
+        .lock()
+        .expect("agent invocation history mutex poisoned")
+        .get(&process_history_key(agent_name, project_dir))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn probe_agent_usage(agent_name: &str, cwd: &Path) -> Result<AgentUsageSnapshot> {
@@ -726,6 +839,90 @@ mod tests {
                 )
                 .collect(),
         }
+    }
+
+    fn unique_project_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("chief-agent-history-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn process_usage_history_keeps_no_sqlite_samples_by_project_and_agent() {
+        let project_dir = unique_project_dir();
+        let other_project_dir = unique_project_dir();
+        let now = Utc.with_ymd_and_hms(2025, 3, 18, 12, 0, 0).unwrap();
+
+        record_process_agent_usage_history(
+            "codex",
+            &project_dir,
+            now,
+            snapshot(&[("5h limit", 10, 90, 300)]),
+        );
+        record_process_agent_usage_history(
+            "CODEX",
+            &project_dir,
+            now + ChronoDuration::minutes(10),
+            snapshot(&[("5h limit", 20, 80, 290)]),
+        );
+        record_process_agent_usage_history(
+            "claude",
+            &project_dir,
+            now,
+            snapshot(&[("5h limit", 30, 70, 300)]),
+        );
+        record_process_agent_usage_history(
+            "codex",
+            &other_project_dir,
+            now,
+            snapshot(&[("5h limit", 40, 60, 300)]),
+        );
+
+        let history = process_agent_usage_history("codex", &project_dir);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].snapshot.limits[0].percent_used, 10);
+        assert_eq!(history[1].snapshot.limits[0].percent_used, 20);
+    }
+
+    #[test]
+    fn process_invocation_history_keeps_no_sqlite_call_starts_by_project_and_agent() {
+        let project_dir = unique_project_dir();
+        let other_project_dir = unique_project_dir();
+        let now = Utc.with_ymd_and_hms(2025, 3, 18, 12, 0, 0).unwrap();
+
+        record_process_agent_invocation("codex", &project_dir, now);
+        record_process_agent_invocation("CODEX", &project_dir, now + ChronoDuration::minutes(1));
+        record_process_agent_invocation("claude", &project_dir, now + ChronoDuration::minutes(2));
+        record_process_agent_invocation(
+            "codex",
+            &other_project_dir,
+            now + ChronoDuration::minutes(3),
+        );
+
+        let history = process_agent_invocation_history("codex", &project_dir);
+
+        assert_eq!(history, vec![now, now + ChronoDuration::minutes(1)]);
+    }
+
+    #[test]
+    fn process_usage_history_allows_second_no_sqlite_call_to_use_project_history() {
+        let project_dir = unique_project_dir();
+        let now = Utc.with_ymd_and_hms(2025, 3, 18, 12, 0, 0).unwrap();
+        record_process_agent_usage_history(
+            "codex",
+            &project_dir,
+            now - ChronoDuration::minutes(15),
+            snapshot(&[("5h limit", 10, 90, 300)]),
+        );
+
+        let decision = compute_agent_pacing(
+            now,
+            snapshot(&[("5h limit", 15, 85, 285)]),
+            &process_agent_usage_history("codex", &project_dir),
+            10,
+        );
+
+        assert_eq!(decision.recent_call_count, 1);
+        assert_eq!(usage_impact_estimation_basis(&decision), "project_history");
     }
 
     #[test]
