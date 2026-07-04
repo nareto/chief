@@ -249,11 +249,15 @@ pub enum LoopDecision {
 
 #[derive(Debug, Clone)]
 pub struct AgentOutput {
+    /// Semantic status used by Chief to decide whether the agent turn succeeded.
     pub exit_code: i32,
+    /// Raw child-process status. This can differ for protocol-aware adapters.
+    pub process_exit_code: i32,
     pub command: String,
     pub stdout: String,
     pub stderr: String,
     pub merged_output: String,
+    pub warnings: Vec<String>,
 }
 
 impl AgentOutput {
@@ -261,10 +265,12 @@ impl AgentOutput {
         let merged_output = merged_output.into();
         Self {
             exit_code: 0,
+            process_exit_code: 0,
             command: command.into(),
             stdout: merged_output.clone(),
             stderr: String::new(),
             merged_output,
+            warnings: Vec::new(),
         }
     }
 }

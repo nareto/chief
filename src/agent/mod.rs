@@ -131,6 +131,17 @@ impl PiAgent {
             mcp_servers: config.mcp_servers.clone(),
         }
     }
+
+    fn validate_protocol_extra_args(&self) -> Result<()> {
+        for arg in &self.extra_args {
+            if matches!(arg.as_str(), "-p" | "--print" | "--mode") || arg.starts_with("--mode=") {
+                return Err(anyhow!(
+                    "pi agent_extra_args must not override Chief's JSON protocol mode: {arg}"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 struct PreparedAgentLaunch {
@@ -338,7 +349,8 @@ impl CommandBackedAgent for PiAgent {
     fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
         let mut cmd = vec![
             "pi".to_owned(),
-            "-p".to_owned(),
+            "--mode".to_owned(),
+            "json".to_owned(),
             "--no-session".to_owned(),
             "--approve".to_owned(),
         ];
@@ -351,6 +363,7 @@ impl CommandBackedAgent for PiAgent {
     }
 
     fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        self.validate_protocol_extra_args()?;
         let mut launch = PreparedAgentLaunch::new(self.build_command(&request.disallowed_paths));
         if let Some(servers) = &self.mcp_servers {
             let runtime = mcp::prepare_pi_mcp_runtime(servers)?;
@@ -364,11 +377,196 @@ impl CommandBackedAgent for PiAgent {
     }
 
     fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
-        if raw_stdout.trim().is_empty() {
-            raw_stderr.trim().to_owned()
-        } else {
-            raw_stdout.trim().to_owned()
+        parse_pi_json_output(raw_stdout, raw_stderr, 0).merged_output
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PiJsonOutput {
+    exit_code: i32,
+    merged_output: String,
+    stop_reason: Option<String>,
+    warnings: Vec<String>,
+}
+
+fn parse_pi_json_output(
+    raw_stdout: &str,
+    raw_stderr: &str,
+    process_exit_code: i32,
+) -> PiJsonOutput {
+    let mut saw_agent_end = false;
+    let mut final_assistant: Option<Value> = None;
+    let mut last_assistant_message_end: Option<Value> = None;
+    let mut malformed_lines = Vec::new();
+
+    for (line_idx, line) in raw_stdout.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            malformed_lines.push(format!("line {} is not valid JSON", line_idx + 1));
+            continue;
+        };
+
+        match value.get("type").and_then(Value::as_str) {
+            Some("agent_end") => {
+                saw_agent_end = true;
+                final_assistant = value
+                    .get("messages")
+                    .and_then(last_assistant_from_messages)
+                    .or(final_assistant);
+            }
+            Some("message_end") => {
+                if let Some(message) = value.get("message")
+                    && message.get("role").and_then(Value::as_str) == Some("assistant")
+                {
+                    last_assistant_message_end = Some(message.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut warnings = malformed_lines;
+    if !saw_agent_end {
+        return pi_protocol_failure(
+            process_exit_code,
+            raw_stdout,
+            raw_stderr,
+            warnings,
+            "pi JSON protocol did not emit agent_end",
+        );
+    }
+
+    let assistant = final_assistant.or_else(|| {
+        if last_assistant_message_end.is_some() {
+            warnings.push(
+                "pi agent_end did not include an assistant message; using last message_end"
+                    .to_owned(),
+            );
+        }
+        last_assistant_message_end
+    });
+    let Some(assistant) = assistant else {
+        return pi_protocol_failure(
+            process_exit_code,
+            raw_stdout,
+            raw_stderr,
+            warnings,
+            "pi JSON protocol ended without an assistant message",
+        );
+    };
+
+    let stop_reason = assistant
+        .get("stopReason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let assistant_text = extract_pi_assistant_text(&assistant);
+    let error_message = assistant
+        .get("errorMessage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    match stop_reason.as_deref() {
+        Some("stop") => {
+            if process_exit_code != 0 {
+                warnings.push(format!(
+                    "pi process exited with code {process_exit_code} after a successful assistant response"
+                ));
+            }
+            PiJsonOutput {
+                exit_code: 0,
+                merged_output: assistant_text,
+                stop_reason,
+                warnings,
+            }
+        }
+        Some(reason) => {
+            let detail = error_message
+                .or_else(|| (!assistant_text.trim().is_empty()).then_some(assistant_text))
+                .unwrap_or_else(|| format!("pi assistant stopped with reason {reason}"));
+            PiJsonOutput {
+                exit_code: if process_exit_code != 0 {
+                    process_exit_code
+                } else {
+                    1
+                },
+                merged_output: detail,
+                stop_reason,
+                warnings,
+            }
+        }
+        None => pi_protocol_failure(
+            process_exit_code,
+            raw_stdout,
+            raw_stderr,
+            warnings,
+            "pi assistant message did not include stopReason",
+        ),
+    }
+}
+
+fn pi_protocol_failure(
+    process_exit_code: i32,
+    raw_stdout: &str,
+    raw_stderr: &str,
+    warnings: Vec<String>,
+    message: &str,
+) -> PiJsonOutput {
+    let raw_output = format!("{}\n{}", raw_stdout.trim(), raw_stderr.trim())
+        .trim()
+        .to_owned();
+    let merged_output = if raw_output.is_empty() {
+        message.to_owned()
+    } else {
+        format!("{message}\n{raw_output}")
+    };
+    PiJsonOutput {
+        exit_code: if process_exit_code != 0 {
+            process_exit_code
+        } else {
+            1
+        },
+        merged_output,
+        stop_reason: None,
+        warnings,
+    }
+}
+
+fn last_assistant_from_messages(messages: &Value) -> Option<Value> {
+    messages.as_array()?.iter().rev().find_map(|message| {
+        (message.get("role").and_then(Value::as_str) == Some("assistant")).then(|| message.clone())
+    })
+}
+
+fn extract_pi_assistant_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(chunks)) => chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                Value::String(text) => Some(text.as_str()),
+                Value::Object(obj) => obj.get("text").and_then(Value::as_str).filter(|_| {
+                    matches!(
+                        obj.get("type").and_then(Value::as_str),
+                        Some("text") | Some("output_text") | None
+                    )
+                }),
+                _ => None,
+            })
+            .collect::<String>(),
+        _ => String::new(),
+    }
+}
+
+fn process_exit_code(output: &Output, wait_state: WaitState) -> i32 {
+    if wait_state == WaitState::TimedOut {
+        124
+    } else {
+        output.status.code().unwrap_or(1)
     }
 }
 
@@ -426,16 +624,93 @@ fn run_command_backed_agent(
         );
     }
 
+    let exit_code = process_exit_code(&output, wait_state);
     Ok(AgentOutput {
-        exit_code: if wait_state == WaitState::TimedOut {
-            124
-        } else {
-            output.status.code().unwrap_or(1)
-        },
+        exit_code,
+        process_exit_code: exit_code,
         command: shell_join(&command),
         stdout,
         stderr,
         merged_output,
+        warnings: Vec::new(),
+    })
+}
+
+fn run_pi_agent(agent: &PiAgent, request: AgentRequest) -> Result<AgentOutput> {
+    let launch = agent.prepare_launch(&request)?;
+    if launch.command.is_empty() {
+        return Err(anyhow!("agent command is empty"));
+    }
+    let command = launch.command.clone();
+
+    let mut process = Command::new(&command[0]);
+    process.args(&command[1..]);
+    process.envs(&launch.env);
+    process.current_dir(&request.cwd);
+    process.stdin(Stdio::piped());
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    configure_process_group(&mut process);
+
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("failed to spawn agent command: {}", shell_join(&command)))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(request.prompt.as_bytes())
+            .context("failed to write prompt to agent stdin")?;
+    }
+
+    // Pi JSON mode is a machine protocol; keep raw JSON out of Chief's live stream.
+    let (output, wait_state) = wait_with_timeout(
+        child,
+        request.timeout_seconds,
+        request.cancel_signal.as_deref(),
+        None,
+    )
+    .context("failed while waiting for agent output")?;
+
+    if wait_state == WaitState::Cancelled {
+        return Err(anyhow!(AgentCancelledError));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let raw_process_exit_code = process_exit_code(&output, wait_state);
+
+    let mut parsed = parse_pi_json_output(&stdout, &stderr, raw_process_exit_code);
+    if wait_state == WaitState::TimedOut {
+        parsed.exit_code = 124;
+        parsed.merged_output = if parsed.merged_output.trim().is_empty() {
+            format!(
+                "agent timed out after {} second(s) and was terminated.",
+                request.timeout_seconds.unwrap_or_default()
+            )
+        } else {
+            format!(
+                "agent timed out after {} second(s) and was terminated.\n{}",
+                request.timeout_seconds.unwrap_or_default(),
+                parsed.merged_output
+            )
+        };
+    }
+
+    if parsed.exit_code == 0
+        && !parsed.merged_output.is_empty()
+        && let Some(callback) = request.on_chunk.as_ref()
+    {
+        callback(AgentOutputStream::Stdout, &parsed.merged_output);
+    }
+
+    Ok(AgentOutput {
+        exit_code: parsed.exit_code,
+        process_exit_code: raw_process_exit_code,
+        command: shell_join(&command),
+        stdout,
+        stderr,
+        merged_output: parsed.merged_output,
+        warnings: parsed.warnings,
     })
 }
 
@@ -485,7 +760,7 @@ impl CodingAgent for PiAgent {
     }
 
     fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
-        run_command_backed_agent(self, request)
+        run_pi_agent(self, request)
     }
 }
 

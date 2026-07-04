@@ -425,30 +425,62 @@ fn parse_cursor_json_output_handles_invalid_json() {
 // ── PiAgent tests ───────────────────────────────────────────────
 
 #[test]
-fn pi_command_uses_non_interactive_mode() {
+fn pi_command_uses_json_protocol_mode() {
     let agent = PiAgent {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: None,
     };
     let command = agent.build_command(&[]);
-    assert!(command.contains(&"-p".to_owned()));
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--mode", "json"]),
+        "pi command should request JSON mode: {command:?}"
+    );
     assert!(command.contains(&"--no-session".to_owned()));
     assert!(command.contains(&"--approve".to_owned()));
+    assert!(!command.iter().any(|arg| arg == "-p"));
+    assert!(!command.iter().any(|arg| arg == "--print"));
     assert!(!command.iter().any(|arg| arg == "-"));
 }
 
 #[test]
-fn pi_parse_output_falls_back_to_stderr() {
-    let agent = PiAgent {
-        model: None,
-        extra_args: Vec::new(),
-        mcp_servers: None,
-    };
-    assert_eq!(
-        agent.parse_output("", "unknown option: -"),
-        "unknown option: -"
+fn pi_json_parser_treats_successful_assistant_stop_as_success_despite_raw_exit_one() {
+    let output = r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"All done"}],"stopReason":"stop"}],"willRetry":false}"#;
+
+    let parsed = parse_pi_json_output(output, "", 1);
+
+    assert_eq!(parsed.exit_code, 0);
+    assert_eq!(parsed.merged_output, "All done");
+    assert_eq!(parsed.stop_reason.as_deref(), Some("stop"));
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("process exited with code 1")),
+        "raw nonzero process exit should be preserved as a warning: {parsed:?}"
     );
+}
+
+#[test]
+fn pi_json_parser_preserves_assistant_error_as_failure() {
+    let output = r#"{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"error","errorMessage":"provider exploded"}],"willRetry":false}"#;
+
+    let parsed = parse_pi_json_output(output, "", 0);
+
+    assert_eq!(parsed.exit_code, 1);
+    assert_eq!(parsed.merged_output, "provider exploded");
+    assert_eq!(parsed.stop_reason.as_deref(), Some("error"));
+}
+
+#[test]
+fn pi_json_parser_requires_agent_end() {
+    let parsed = parse_pi_json_output("", "unknown option: -", 1);
+
+    assert_eq!(parsed.exit_code, 1);
+    assert!(parsed.merged_output.contains("did not emit agent_end"));
+    assert!(parsed.merged_output.contains("unknown option"));
 }
 
 #[test]
@@ -526,4 +558,26 @@ fn pi_command_passes_extra_args() {
     let agent = PiAgent::from_config(&config, None);
     let command = agent.build_command(&[]);
     assert!(command.contains(&"--verbose".to_owned()));
+}
+
+#[test]
+fn pi_prepare_launch_rejects_extra_args_that_override_protocol_mode() {
+    let config = ChiefConfig {
+        agent_extra_args: vec!["--mode".to_owned(), "text".to_owned()],
+        ..ChiefConfig::default()
+    };
+    let agent = PiAgent::from_config(&config, None);
+    let result = agent.prepare_launch(&AgentRequest {
+        prompt: "test".to_owned(),
+        cwd: std::env::temp_dir(),
+        timeout_seconds: None,
+        disallowed_paths: Vec::new(),
+        cancel_signal: None,
+        on_chunk: None,
+    });
+    let err = result
+        .err()
+        .expect("protocol mode overrides should be rejected");
+
+    assert!(err.to_string().contains("JSON protocol mode"));
 }

@@ -69,16 +69,19 @@ pub fn execute_suite_command(
             );
         }
     }
+    let exit_code = if wait_state == WaitState::TimedOut {
+        124
+    } else {
+        output.status.code().unwrap_or(1)
+    };
     Ok(AgentOutput {
-        exit_code: if wait_state == WaitState::TimedOut {
-            124
-        } else {
-            output.status.code().unwrap_or(1)
-        },
+        exit_code,
+        process_exit_code: exit_code,
         command: command.to_owned(),
         merged_output,
         stdout,
         stderr,
+        warnings: Vec::new(),
     })
 }
 

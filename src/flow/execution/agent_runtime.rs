@@ -24,21 +24,35 @@ fn agent_failure_message(
     max_chars: usize,
 ) -> String {
     let raw_output = if out.merged_output.trim().is_empty() {
-        format!("{}\n{}", out.stdout.trim(), out.stderr.trim())
-            .trim()
-            .to_owned()
+        out.stdout.trim().to_owned()
     } else {
         out.merged_output.trim().to_owned()
     };
     let output_tail = tail_output_chars(&tail_output_lines(&raw_output, max_lines), max_chars);
+    let stderr_tail =
+        tail_output_chars(&tail_output_lines(out.stderr.trim(), max_lines), max_chars);
 
     let mut message = format!(
         "agent {agent_name} failed with exit code {} while running `{}`",
         out.exit_code, out.command
     );
+    if out.process_exit_code != out.exit_code {
+        message.push_str(&format!(
+            "\nagent process exited with raw code {}",
+            out.process_exit_code
+        ));
+    }
     if !output_tail.trim().is_empty() {
         message.push_str("\nagent output tail:\n");
         message.push_str(output_tail.trim());
+    }
+    if !stderr_tail.trim().is_empty() && stderr_tail.trim() != output_tail.trim() {
+        message.push_str("\nagent stderr tail:\n");
+        message.push_str(stderr_tail.trim());
+    }
+    if !out.warnings.is_empty() {
+        message.push_str("\nagent warnings:\n");
+        message.push_str(&out.warnings.join("\n"));
     }
     message
 }
@@ -174,13 +188,31 @@ impl<'a> FlowExecution<'a> {
             format!("Agent response ({})", phase.as_str()),
             payload_from_json(json!({
                 "exit_code": out.exit_code,
+                "process_exit_code": out.process_exit_code,
                 "command": out.command,
                 "output": out.merged_output,
                 "stdout": out.stdout,
                 "stderr": out.stderr,
+                "warnings": out.warnings,
                 "agent_query_id": query_id,
             })),
         )?;
+
+        if !out.warnings.is_empty() {
+            self.log_event(
+                "warning",
+                Some(phase),
+                EventType::PhaseChange,
+                "agent completed with warnings",
+                payload_from_json(json!({
+                    "exit_code": out.exit_code,
+                    "process_exit_code": out.process_exit_code,
+                    "command": out.command,
+                    "warnings": out.warnings,
+                    "agent_query_id": query_id,
+                })),
+            )?;
+        }
 
         if out.exit_code != 0 {
             let message = agent_failure_message(
@@ -196,10 +228,12 @@ impl<'a> FlowExecution<'a> {
                 "agent invocation failed; aborting without retry",
                 payload_from_json(json!({
                     "exit_code": out.exit_code,
+                    "process_exit_code": out.process_exit_code,
                     "command": out.command,
                     "output": out.merged_output,
                     "stdout": out.stdout,
                     "stderr": out.stderr,
+                    "warnings": out.warnings,
                     "agent_query_id": query_id,
                 })),
             )?;

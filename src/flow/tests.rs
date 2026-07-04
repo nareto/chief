@@ -126,10 +126,33 @@ impl CodingAgent for SuccessfulAgent {
     fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
         Ok(AgentOutput {
             exit_code: 0,
+            process_exit_code: 0,
             command: "success-agent".to_owned(),
             stdout: String::new(),
             stderr: String::new(),
             merged_output: String::new(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SuccessfulWarningAgent;
+
+impl CodingAgent for SuccessfulWarningAgent {
+    fn name(&self) -> &str {
+        "success-warning"
+    }
+
+    fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
+        Ok(AgentOutput {
+            exit_code: 0,
+            process_exit_code: 1,
+            command: "success-warning-agent".to_owned(),
+            stdout: "ok".to_owned(),
+            stderr: String::new(),
+            merged_output: "ok".to_owned(),
+            warnings: vec!["raw process exited with code 1".to_owned()],
         })
     }
 }
@@ -145,10 +168,12 @@ impl CodingAgent for FailingAgent {
     fn run(&self, _request: AgentRequest) -> Result<AgentOutput> {
         Ok(AgentOutput {
             exit_code: 2,
+            process_exit_code: 2,
             command: "failing-agent --bad-flag".to_owned(),
             stdout: String::new(),
             stderr: "unknown option: --bad-flag".to_owned(),
             merged_output: "unknown option: --bad-flag".to_owned(),
+            warnings: Vec::new(),
         })
     }
 }
@@ -185,10 +210,12 @@ impl CodingAgent for OneShotDirtyAgent {
 
         Ok(AgentOutput {
             exit_code: 0,
+            process_exit_code: 0,
             command: "one-shot-dirty-agent".to_owned(),
             stdout: String::new(),
             stderr: String::new(),
             merged_output: String::new(),
+            warnings: Vec::new(),
         })
     }
 }
@@ -495,10 +522,12 @@ impl CodingAgent for OneShotHeadAdvanceAgent {
 
         Ok(AgentOutput {
             exit_code: 0,
+            process_exit_code: 0,
             command: "one-shot-head-advance-agent".to_owned(),
             stdout: String::new(),
             stderr: String::new(),
             merged_output: String::new(),
+            warnings: Vec::new(),
         })
     }
 }
@@ -750,6 +779,79 @@ fn run_agent_fails_fast_on_nonzero_agent_exit() {
             .iter()
             .any(|event| event.event_type == EventType::Diff),
         "diff detection should not run after a failed agent invocation"
+    );
+
+    let _ = fs::remove_dir_all(&project_dir);
+}
+
+#[test]
+fn run_agent_continues_when_semantic_exit_succeeds_with_process_warning() {
+    let project_dir = temp_project_dir();
+    fs::create_dir_all(&project_dir).expect("project dir should be created");
+    let store = ProjectStore::new(&project_dir);
+    store.init().expect("store init should succeed");
+
+    let todo = Todo {
+        id: "todo-1".to_owned(),
+        todo: "agent raw process warning should not abort".to_owned(),
+        expectations: String::new(),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let prompts = NoopPromptStore;
+    let agent = SuccessfulWarningAgent;
+    let git = NoopGitOps {
+        root: project_dir.clone(),
+    };
+    let chief_config = ChiefConfig::default();
+
+    let execution = FlowExecution {
+        run_id: "run-1".to_owned(),
+        job_id: "job-1".to_owned(),
+        worker_index: 1,
+        project_dir: project_dir.clone(),
+        store: &store,
+        prompts: &prompts,
+        agent: &agent,
+        git: &git,
+        chief_config: &chief_config,
+        all_suites: &[],
+        todo,
+        cancel_signal: Arc::new(AtomicBool::new(false)),
+        prepared_suites: RefCell::new(BTreeSet::new()),
+        convergence_watch_paths: Vec::new(),
+    };
+
+    let output = execution
+        .run_agent(Phase::LoopFile, "trigger warning".to_owned(), Vec::new())
+        .expect("semantic success should not abort on raw process warning");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.process_exit_code, 1);
+
+    let events = store
+        .query_events(crate::storage::EventQuery {
+            limit: 20,
+            event_type: None,
+            phase: Some(Phase::LoopFile),
+            level: None,
+            contains_text: None,
+        })
+        .expect("events should query");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == EventType::PhaseChange
+                && event.msg == "agent completed with warnings"),
+        "raw process warning should be logged visibly"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::PhaseFailure),
+        "semantic success should not log a phase failure"
     );
 
     let _ = fs::remove_dir_all(&project_dir);
