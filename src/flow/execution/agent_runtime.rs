@@ -3,6 +3,46 @@ use glob::Pattern;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+fn tail_output_chars(output: &str, max_chars: usize) -> String {
+    let max_chars = max_chars.max(1);
+    let char_count = output.chars().count();
+    if char_count <= max_chars {
+        return output.to_owned();
+    }
+
+    let tail = output
+        .chars()
+        .skip(char_count - max_chars)
+        .collect::<String>();
+    format!("...{tail}")
+}
+
+fn agent_failure_message(
+    agent_name: &str,
+    out: &AgentOutput,
+    max_lines: usize,
+    max_chars: usize,
+) -> String {
+    let raw_output = if out.merged_output.trim().is_empty() {
+        format!("{}\n{}", out.stdout.trim(), out.stderr.trim())
+            .trim()
+            .to_owned()
+    } else {
+        out.merged_output.trim().to_owned()
+    };
+    let output_tail = tail_output_chars(&tail_output_lines(&raw_output, max_lines), max_chars);
+
+    let mut message = format!(
+        "agent {agent_name} failed with exit code {} while running `{}`",
+        out.exit_code, out.command
+    );
+    if !output_tail.trim().is_empty() {
+        message.push_str("\nagent output tail:\n");
+        message.push_str(output_tail.trim());
+    }
+    message
+}
+
 const BUILT_IN_CHANGE_EXCLUDES: &[&str] = &[
     ".chief/chief.db",
     ".chief/chief.db-*",
@@ -141,6 +181,30 @@ impl<'a> FlowExecution<'a> {
                 "agent_query_id": query_id,
             })),
         )?;
+
+        if out.exit_code != 0 {
+            let message = agent_failure_message(
+                self.agent.name(),
+                &out,
+                self.chief_config.agent_log_max_output_lines,
+                self.chief_config.agent_log_max_output_chars,
+            );
+            self.log_event(
+                "error",
+                Some(phase),
+                EventType::PhaseFailure,
+                "agent invocation failed; aborting without retry",
+                payload_from_json(json!({
+                    "exit_code": out.exit_code,
+                    "command": out.command,
+                    "output": out.merged_output,
+                    "stdout": out.stdout,
+                    "stderr": out.stderr,
+                    "agent_query_id": query_id,
+                })),
+            )?;
+            return Err(anyhow!(AgentInvocationError::new(message)));
+        }
 
         let after_files = self
             .git

@@ -347,7 +347,6 @@ impl CommandBackedAgent for PiAgent {
             cmd.push("--model".to_owned());
             cmd.push(model.clone());
         }
-        cmd.push("-".to_owned());
         cmd
     }
 
@@ -364,8 +363,12 @@ impl CommandBackedAgent for PiAgent {
         Ok(launch)
     }
 
-    fn parse_output(&self, raw_stdout: &str, _raw_stderr: &str) -> String {
-        raw_stdout.trim().to_owned()
+    fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
+        if raw_stdout.trim().is_empty() {
+            raw_stderr.trim().to_owned()
+        } else {
+            raw_stdout.trim().to_owned()
+        }
     }
 }
 

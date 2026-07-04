@@ -435,7 +435,20 @@ fn pi_command_uses_non_interactive_mode() {
     assert!(command.contains(&"-p".to_owned()));
     assert!(command.contains(&"--no-session".to_owned()));
     assert!(command.contains(&"--approve".to_owned()));
-    assert_eq!(command.last().map(|s| s.as_str()), Some("-"));
+    assert!(!command.iter().any(|arg| arg == "-"));
+}
+
+#[test]
+fn pi_parse_output_falls_back_to_stderr() {
+    let agent = PiAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: None,
+    };
+    assert_eq!(
+        agent.parse_output("", "unknown option: -"),
+        "unknown option: -"
+    );
 }
 
 #[test]
@@ -446,9 +459,11 @@ fn pi_command_includes_model_from_config() {
     };
     let agent = PiAgent::from_config(&config, None);
     let command = agent.build_command(&[]);
-    assert!(command
-        .windows(2)
-        .any(|window| window == ["--model", "openai/gpt-5.2-xhigh"]));
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--model", "openai/gpt-5.2-xhigh"])
+    );
 }
 
 #[test]
@@ -459,9 +474,11 @@ fn pi_command_prefers_runtime_model_override() {
     };
     let agent = PiAgent::from_config(&config, Some("anthropic/sonnet".to_owned()));
     let command = agent.build_command(&[]);
-    assert!(command
-        .windows(2)
-        .any(|window| window == ["--model", "anthropic/sonnet"]));
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--model", "anthropic/sonnet"])
+    );
 }
 
 #[test]

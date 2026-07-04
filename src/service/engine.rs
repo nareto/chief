@@ -4,7 +4,9 @@ use super::{
 };
 use crate::agent::{AgentCancelledError, is_agent_cancelled_error};
 use crate::domain::{EventType, Phase, RunExitStatus, Todo};
-use crate::flow::{FlowExecution, FlowKind, TodoOutcome, build_flow};
+use crate::flow::{
+    FlowExecution, FlowKind, TodoOutcome, build_flow, is_agent_invocation_error,
+};
 use crate::git::{
     GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, git_output_has_transient_lock_contention_signature,
     run_git_command_with_retry,
@@ -324,7 +326,10 @@ impl ChiefEngine {
     }
 
     fn classify_runtime_error(&self, err: anyhow::Error) -> OrchestratorError {
-        if is_known_unrecoverable_error(&err) || is_agent_cancelled_error(&err) {
+        if is_known_unrecoverable_error(&err)
+            || is_agent_cancelled_error(&err)
+            || is_agent_invocation_error(&err)
+        {
             OrchestratorError::unrecoverable(err)
         } else {
             OrchestratorError::retryable(err)

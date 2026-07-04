@@ -141,6 +141,32 @@ struct SinglePromptFailureContext {
     other_failures: Vec<SinglePromptFailureItem>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AgentInvocationError {
+    message: String,
+}
+
+impl AgentInvocationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentInvocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for AgentInvocationError {}
+
+pub(crate) fn is_agent_invocation_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AgentInvocationError>().is_some())
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 struct SinglePromptFailureItem {
     event_id: i64,
