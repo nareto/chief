@@ -421,3 +421,92 @@ fn parse_cursor_json_output_handles_invalid_json() {
     let result = parse_cursor_json_output("not json");
     assert_eq!(result, "");
 }
+
+// ── PiAgent tests ───────────────────────────────────────────────
+
+#[test]
+fn pi_command_uses_non_interactive_mode() {
+    let agent = PiAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: None,
+    };
+    let command = agent.build_command(&[]);
+    assert!(command.contains(&"-p".to_owned()));
+    assert!(command.contains(&"--no-session".to_owned()));
+    assert!(command.contains(&"--approve".to_owned()));
+    assert_eq!(command.last().map(|s| s.as_str()), Some("-"));
+}
+
+#[test]
+fn pi_command_includes_model_from_config() {
+    let config = ChiefConfig {
+        model: Some("openai/gpt-5.2-xhigh".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = PiAgent::from_config(&config, None);
+    let command = agent.build_command(&[]);
+    assert!(command
+        .windows(2)
+        .any(|window| window == ["--model", "openai/gpt-5.2-xhigh"]));
+}
+
+#[test]
+fn pi_command_prefers_runtime_model_override() {
+    let config = ChiefConfig {
+        model: Some("openai/gpt-5.2-xhigh".to_owned()),
+        ..ChiefConfig::default()
+    };
+    let agent = PiAgent::from_config(&config, Some("anthropic/sonnet".to_owned()));
+    let command = agent.build_command(&[]);
+    assert!(command
+        .windows(2)
+        .any(|window| window == ["--model", "anthropic/sonnet"]));
+}
+
+#[test]
+fn pi_command_includes_mcp_config_path_when_servers_configured() {
+    let servers = BTreeMap::from([(
+        "test".to_owned(),
+        McpServerConfig::Stdio {
+            command: "echo".to_owned(),
+            args: vec!["hello".to_owned()],
+            env: BTreeMap::new(),
+        },
+    )]);
+    let agent = PiAgent {
+        model: None,
+        extra_args: Vec::new(),
+        mcp_servers: Some(servers),
+    };
+    let launch = agent
+        .prepare_launch(&AgentRequest {
+            prompt: "test".to_owned(),
+            cwd: std::env::temp_dir(),
+            timeout_seconds: None,
+            disallowed_paths: Vec::new(),
+            cancel_signal: None,
+            on_chunk: None,
+        })
+        .expect("prepare_launch should succeed");
+    let mcp_idx = launch
+        .command
+        .iter()
+        .position(|arg| arg == "--mcp-config")
+        .expect("should include --mcp-config");
+    assert!(
+        launch.command[mcp_idx + 1].contains("mcp.json"),
+        "config path should be an mcp.json file"
+    );
+}
+
+#[test]
+fn pi_command_passes_extra_args() {
+    let config = ChiefConfig {
+        agent_extra_args: vec!["--verbose".to_owned()],
+        ..ChiefConfig::default()
+    };
+    let agent = PiAgent::from_config(&config, None);
+    let command = agent.build_command(&[]);
+    assert!(command.contains(&"--verbose".to_owned()));
+}

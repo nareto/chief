@@ -552,6 +552,26 @@ fn resolve_jwt_auth(auth: &Option<McpServerAuthConfig>) -> Result<Option<JwtToke
     }
 }
 
+pub(super) struct PiMcpRuntime {
+    pub(super) config_path: PathBuf,
+    pub(super) scratch_dir: AgentScratchDir,
+}
+
+pub(super) fn prepare_pi_mcp_runtime(
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> Result<PiMcpRuntime> {
+    let scratch_dir = AgentScratchDir::new("pi-mcp")?;
+    let config = ClaudeMcpConfig {
+        mcp_servers: build_claude_servers(servers)?,
+    };
+    let json = serde_json::to_string_pretty(&config).context("failed to serialize Pi MCP config")?;
+    let config_path = scratch_dir.write_text_file("mcp.json", &json)?;
+    Ok(PiMcpRuntime {
+        config_path,
+        scratch_dir,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,6 +727,26 @@ args = ["-y", "user-server"]
                 .expect("copied cursor auth should be readable"),
             r#"{"accessToken":"abc","refreshToken":"def"}"#
         );
+    }
+
+    #[test]
+    fn prepare_pi_runtime_renders_http_jwt_env_var() {
+        let servers = BTreeMap::from([(
+            "sentry".to_owned(),
+            McpServerConfig::StreamableHttp {
+                url: "https://mcp.sentry.dev/mcp".to_owned(),
+                auth: Some(McpServerAuthConfig::Jwt {
+                    token: None,
+                    token_env_var: Some("SENTRY_TOKEN".to_owned()),
+                }),
+            },
+        )]);
+
+        let runtime = prepare_pi_mcp_runtime(&servers).expect("Pi MCP runtime should work");
+        let rendered =
+            fs::read_to_string(&runtime.config_path).expect("Pi MCP JSON should be readable");
+        assert!(rendered.contains("\"type\": \"http\""));
+        assert!(rendered.contains("\"Authorization\": \"Bearer ${SENTRY_TOKEN}\""));
     }
 
     #[test]

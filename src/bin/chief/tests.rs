@@ -675,6 +675,12 @@ fn cli_help_text_matches_chief_example_comments() {
         "CLI help should include a concrete cursor-agent model example; help output:\n{}",
         help
     );
+
+    assert!(
+        help.contains("--agent pi --model"),
+        "CLI help should include a concrete pi model example; help output:\n{}",
+        help
+    );
 }
 
 #[test]
@@ -694,7 +700,7 @@ fn cli_schema_lists_typed_values_and_introspection_commands() {
         .expect("agent option should exist");
     assert_eq!(
         agent_option.possible_values,
-        vec!["codex", "claude", "opencode", "cursor-agent"]
+        vec!["codex", "claude", "opencode", "cursor-agent", "pi"]
     );
 
     let command_names: BTreeSet<_> = schema

@@ -118,6 +118,15 @@ impl<'a> FlowExecution<'a> {
             });
         }
 
+        // pi does not have a first-party usage CLI; skip usage pacing.
+        if self.agent.name().eq_ignore_ascii_case("pi") {
+            return Ok(AgentCallPermit {
+                _guard: None,
+                decision: None,
+                fixed_wait_decision: None,
+            });
+        }
+
         let agent_name = self.agent.name().to_owned();
         let provider_guard = agent_limit_mutex(&agent_name)
             .lock()

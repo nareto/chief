@@ -43,6 +43,7 @@ For CLI-only discovery, use `chief schema --json`, `chief config show --resolved
 const CHIEF_AFTER_HELP: &str = "Examples:
   chief --flow loop_file --prompt \"Tighten the parser error messages\"
   chief --agent cursor-agent --model gpt-5.4-xhigh --prompt \"Tighten the parser error messages\"
+  chief --agent pi --model openai/gpt-5 --prompt \"Tighten the parser error messages\"
   chief loop_file --file prompts/task.md
   chief suite test --suite backend --target src/bin/chief.rs
   chief schema --json
@@ -67,8 +68,8 @@ mod chief_option_help {
     }
 
     pub(super) const FLOW: &str = "Flow to run (`loop_file` or `refactor`).";
-    pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, `opencode`, or `cursor-agent`; `cursor` is also accepted).";
-    pub(super) const MODEL: &str = "Model override passed to the selected agent (for `cursor-agent`, use Cursor's exact model id such as `gpt-5.4-xhigh`).";
+    pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, `opencode`, `cursor-agent`, or `pi`).";
+    pub(super) const MODEL: &str = "Model override passed to the selected agent (for `cursor-agent`, use Cursor's exact model id such as `gpt-5.4-xhigh`; for `pi`, use `provider/model_id` format such as `openai/gpt-5`).";
     pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, or `xhigh`).";
     pub(super) const AGENT_EXTRA_ARGS: &str =
         "Extra CLI args forwarded to the selected agent (YAML/JSON string list).";
@@ -215,6 +216,8 @@ enum CliAgentValue {
     Opencode,
     #[value(name = "cursor-agent", alias = "cursor")]
     CursorAgent,
+    #[value(name = "pi")]
+    Pi,
 }
 
 impl CliAgentValue {
@@ -224,6 +227,7 @@ impl CliAgentValue {
             Self::Claude => "claude",
             Self::Opencode => "opencode",
             Self::CursorAgent => "cursor-agent",
+            Self::Pi => "pi",
         }
     }
 }
@@ -1783,6 +1787,7 @@ fn resolved_agent_binary(agent_name: &str) -> (&'static str, Option<String>) {
         "claude" => ("claude", None),
         "opencode" => ("opencode", None),
         "cursor" | "cursor-agent" => ("cursor-agent", None),
+        "pi" => ("pi", None),
         "codex" => ("codex", None),
         other => (
             "codex",

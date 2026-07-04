@@ -10,7 +10,7 @@ fi
 
 chief \
   --project-dir . \
-  --agent codex \
+  --agent codex \   # or claude, opencode, cursor-agent, pi
   --mcp-servers '{}' \
   --respect-limits true \
   --max-loop-iterations 8 \

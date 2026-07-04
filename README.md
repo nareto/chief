@@ -62,7 +62,7 @@ For the CLI and backend:
 - Git
 - a supported coding-agent CLI on `PATH`
   - `codex` is the default
-  - `claude`, `opencode`, and `cursor-agent` are also supported
+  - `claude`, `opencode`, `cursor-agent`, and `pi` are also supported
 
 ## Quick start for a target project
 
@@ -271,7 +271,7 @@ Current config details worth knowing:
 - `.chief/chief.yaml` provides project defaults. It is optional for one-shot CLI `loop_file` or requirements-only invocations when all needed options are supplied with CLI flags.
 - When `.chief/chief.yaml` is missing, Chief resolves `chief` from built-in defaults and `suites` as an empty list.
 - Persistent project workflows, backend/readiness workflows, and suite commands require `.chief/chief.yaml`.
-- `chief.agent` supports `codex`, `claude`, `opencode`, and `cursor-agent` (`cursor` is accepted as a compatibility alias).
+- `chief.agent` supports `codex`, `claude`, `opencode`, `cursor-agent`, and `pi` (`cursor` is accepted as a compatibility alias).
 - `chief.agent_extra_args` is passed directly to the agent CLI invocation.
 - `chief.model` can be supplied in config or as `--model`; backend project starts also accept a per-start model override.
 - For `cursor-agent`, pass Cursor's exact model id in `chief.model` such as `gpt-5.4-xhigh`.
@@ -392,7 +392,7 @@ cargo test
 - `src/scheduler/`: multi-worker scheduling and worktree lifecycle
 - `src/flow/`: flow definitions, loop policy, prompt phases, and suite execution
 - `src/storage/` and `src/storage.rs`: SQLite persistence
-- `src/agent/`: `codex`, `claude`, `opencode`, and `cursor-agent` process adapters
+- `src/agent/`: `codex`, `claude`, `opencode`, `cursor-agent`, and `pi` process adapters
 - `prompts/`: Markdown/Jinja prompt templates
 
 ## License

@@ -116,6 +116,23 @@ impl CursorAgent {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PiAgent {
+    model: Option<String>,
+    extra_args: Vec<String>,
+    mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+}
+
+impl PiAgent {
+    pub fn from_config(config: &ChiefConfig, model_override: Option<String>) -> Self {
+        Self {
+            model: model_override.or_else(|| config.model.clone()),
+            extra_args: config.agent_extra_args.clone(),
+            mcp_servers: config.mcp_servers.clone(),
+        }
+    }
+}
+
 struct PreparedAgentLaunch {
     command: Vec<String>,
     env: BTreeMap<String, String>,
@@ -317,6 +334,41 @@ impl CommandBackedAgent for CursorAgent {
     }
 }
 
+impl CommandBackedAgent for PiAgent {
+    fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
+        let mut cmd = vec![
+            "pi".to_owned(),
+            "-p".to_owned(),
+            "--no-session".to_owned(),
+            "--approve".to_owned(),
+        ];
+        cmd.extend(self.extra_args.iter().cloned());
+        if let Some(model) = &self.model {
+            cmd.push("--model".to_owned());
+            cmd.push(model.clone());
+        }
+        cmd.push("-".to_owned());
+        cmd
+    }
+
+    fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        let mut launch = PreparedAgentLaunch::new(self.build_command(&request.disallowed_paths));
+        if let Some(servers) = &self.mcp_servers {
+            let runtime = mcp::prepare_pi_mcp_runtime(servers)?;
+            launch.command.extend([
+                "--mcp-config".to_owned(),
+                runtime.config_path.display().to_string(),
+            ]);
+            launch.scratch_dir = Some(runtime.scratch_dir);
+        }
+        Ok(launch)
+    }
+
+    fn parse_output(&self, raw_stdout: &str, _raw_stderr: &str) -> String {
+        raw_stdout.trim().to_owned()
+    }
+}
+
 fn run_command_backed_agent(
     agent: &impl CommandBackedAgent,
     request: AgentRequest,
@@ -417,6 +469,16 @@ impl CodingAgent for OpencodeAgent {
 impl CodingAgent for CursorAgent {
     fn name(&self) -> &str {
         "cursor-agent"
+    }
+
+    fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
+        run_command_backed_agent(self, request)
+    }
+}
+
+impl CodingAgent for PiAgent {
+    fn name(&self) -> &str {
+        "pi"
     }
 
     fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
