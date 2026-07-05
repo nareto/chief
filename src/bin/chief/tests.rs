@@ -511,6 +511,51 @@ fn parse_sqlite_log_flag() {
 }
 
 #[test]
+fn parse_verbosity_option_and_aliases() {
+    let quiet = Cli::try_parse_from(["chief", "--verbosity", "quiet", "--prompt", "inspect"])
+        .expect("verbosity option should parse");
+    assert_eq!(quiet.chief.verbosity, Some(CliVerbosityValue::Quiet));
+    assert_eq!(
+        resolve_output_verbosity(false, &quiet.chief).expect("quiet should resolve"),
+        CliVerbosityValue::Quiet
+    );
+
+    let silent = Cli::try_parse_from(["chief", "--silent", "--prompt", "inspect"])
+        .expect("silent alias should parse");
+    assert_eq!(
+        resolve_output_verbosity(false, &silent.chief).expect("silent should resolve"),
+        CliVerbosityValue::Silent
+    );
+
+    let verbose = Cli::try_parse_from(["chief", "--verbose", "--prompt", "inspect"])
+        .expect("verbose alias should parse");
+    assert_eq!(
+        resolve_output_verbosity(false, &verbose.chief).expect("verbose should resolve"),
+        CliVerbosityValue::Verbose
+    );
+}
+
+#[test]
+fn resolve_output_verbosity_rejects_conflicting_aliases() {
+    let cli = Cli::try_parse_from([
+        "chief",
+        "--silent",
+        "--verbosity",
+        "verbose",
+        "--prompt",
+        "inspect",
+    ])
+    .expect("clap should accept values before Chief validates semantic conflicts");
+
+    let err = resolve_output_verbosity(false, &cli.chief)
+        .expect_err("silent should conflict with verbose verbosity");
+    assert!(
+        err.to_string().contains("--silent conflicts"),
+        "conflict should be explained: {err:#}"
+    );
+}
+
+#[test]
 fn parse_root_flow_option_accepts_loop_file_alias() {
     let cli = Cli::try_parse_from(["chief", "--flow", "loop-file", "--prompt", "ship it"])
         .expect("root --flow should accept loop-file alias");
@@ -1086,6 +1131,82 @@ fn build_cli_run_report_counts_until_pass_iterations_and_uses_cached_usage_snaps
             .limits[0]
             .percent_remaining,
         30
+    );
+}
+
+#[test]
+fn build_cli_run_report_uses_in_memory_events_without_sqlite_log() {
+    let temp = TempDir::new("run-report-in-memory");
+    init_git_repo(&temp.path);
+
+    let context = ProjectContext::load_with_sqlite_log(&temp.path, false)
+        .expect("project context should load without sqlite logging");
+    let run_id = ChiefEngine::new(context.clone())
+        .start_run()
+        .expect("logical run id should be created without sqlite");
+
+    context
+        .log_project_event(
+            &run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::PhaseChange,
+            "convergence loop iteration 1/10",
+            BTreeMap::new(),
+        )
+        .expect("in-memory iteration event should be recorded");
+    context
+        .log_project_event(
+            &run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::AgentPrompt,
+            "Agent prompt (loop_file)",
+            BTreeMap::new(),
+        )
+        .expect("in-memory agent prompt should be recorded");
+    context
+        .log_project_event(
+            &run_id,
+            None,
+            None,
+            "info",
+            Some(Phase::LoopFile),
+            EventType::AgentResponse,
+            "Agent response (loop_file)",
+            json_object_payload(serde_json::json!({
+                "exit_code": 0,
+                "output": "final assistant summary",
+            })),
+        )
+        .expect("in-memory agent response should be recorded");
+
+    let report = build_cli_run_report(
+        &context,
+        Some(&run_id),
+        None,
+        chrono::Utc::now(),
+        RunExitStatus::Success,
+        Some("fallback reason"),
+    )
+    .expect("report should build from in-memory events");
+
+    assert_eq!(report.iterations, 1);
+    assert_eq!(report.agent_calls, 1);
+    assert_eq!(
+        report.last_agent_message,
+        Some(ReportAgentMessage {
+            text: "final assistant summary".to_owned(),
+            exit_code: Some(0),
+        })
+    );
+    assert!(
+        !chief::paths::chief_db_path(&temp.path).exists(),
+        "in-memory reporting should not create chief.db"
     );
 }
 

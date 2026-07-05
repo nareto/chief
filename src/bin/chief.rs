@@ -18,7 +18,9 @@ use chief::orchestrator::OrchestratorError;
 use chief::paths;
 use chief::scheduler::Scheduler;
 use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry};
-use chief::storage::{EventQuery, ProjectStore, db_reset_required_from_anyhow};
+use chief::storage::{
+    EventQuery, ProjectStore, db_reset_required_from_anyhow, set_event_stdout_enabled,
+};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension;
@@ -68,7 +70,8 @@ mod chief_option_help {
     }
 
     pub(super) const FLOW: &str = "Flow to run (`loop_file` or `refactor`).";
-    pub(super) const AGENT: &str = "Agent binary to use (`codex`, `claude`, `opencode`, `cursor-agent`, or `pi`).";
+    pub(super) const AGENT: &str =
+        "Agent binary to use (`codex`, `claude`, `opencode`, `cursor-agent`, or `pi`).";
     pub(super) const MODEL: &str = "Model override passed to the selected agent (for `cursor-agent`, use Cursor's exact model id such as `gpt-5.4-xhigh`; for `pi`, use `provider/model_id` format such as `openai/gpt-5`).";
     pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, or `xhigh`).";
     pub(super) const AGENT_EXTRA_ARGS: &str =
@@ -98,6 +101,10 @@ mod chief_option_help {
         "Minimum percent of each agent usage limit to keep in reserve before stopping.";
     pub(super) const USE_AGENT_LOG_TRUNCATION_FOR_STDOUT_LOGS: &str =
         "When true, apply agent log truncation to stdout log output too.";
+    pub(super) const VERBOSITY: &str =
+        "Terminal output level (`silent`, `quiet`, `normal`, or `verbose`).";
+    pub(super) const SILENT: &str =
+        "Alias for `--verbosity silent`; suppress non-error terminal output.";
     pub(super) const VERBOSE: &str =
         "Print raw live agent output, including JSON event streams from JSON-mode agents.";
 
@@ -255,6 +262,45 @@ impl CliReasoningEffortValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+enum CliVerbosityValue {
+    #[value(name = "silent")]
+    Silent,
+    #[value(name = "quiet")]
+    Quiet,
+    #[value(name = "normal")]
+    Normal,
+    #[value(name = "verbose")]
+    Verbose,
+}
+
+impl CliVerbosityValue {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Silent => "silent",
+            Self::Quiet => "quiet",
+            Self::Normal => "normal",
+            Self::Verbose => "verbose",
+        }
+    }
+
+    fn shows_progress(self) -> bool {
+        matches!(self, Self::Normal | Self::Verbose)
+    }
+
+    fn shows_report(self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+
+    fn shows_last_agent_message(self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+
+    fn mirrors_agent_chunks(self) -> bool {
+        matches!(self, Self::Verbose)
+    }
+}
+
 #[derive(Debug, Clone, Args, Default)]
 struct CliChiefOverrides {
     #[arg(
@@ -383,6 +429,21 @@ struct CliChiefOverrides {
         help_heading = "Chief Overrides"
     )]
     use_agent_log_truncation_for_stdout_logs: Option<bool>,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = chief_option_help::VERBOSITY,
+        help_heading = "Chief Overrides"
+    )]
+    verbosity: Option<CliVerbosityValue>,
+    #[arg(
+        long,
+        global = true,
+        help = chief_option_help::SILENT,
+        help_heading = "Chief Overrides"
+    )]
+    silent: bool,
     #[arg(
         long,
         global = true,
@@ -635,6 +696,8 @@ impl CliChiefOverrides {
             respect_limits,
             limit_reserve_percent,
             use_agent_log_truncation_for_stdout_logs,
+            verbosity: _,
+            silent: _,
             verbose,
         } = self.clone();
 
@@ -684,10 +747,56 @@ fn parse_mcp_servers_override(raw: &str) -> Result<BTreeMap<String, McpServerCon
     })
 }
 
+fn resolve_output_verbosity(
+    config_verbose: bool,
+    overrides: &CliChiefOverrides,
+) -> Result<CliVerbosityValue> {
+    let mut verbosity = if config_verbose {
+        CliVerbosityValue::Verbose
+    } else {
+        CliVerbosityValue::Normal
+    };
+
+    if let Some(level) = overrides.verbosity {
+        verbosity = level;
+    }
+
+    if overrides.verbose {
+        if let Some(level) = overrides.verbosity
+            && level != CliVerbosityValue::Verbose
+        {
+            bail!("--verbose conflicts with --verbosity {}", level.as_str());
+        }
+        verbosity = CliVerbosityValue::Verbose;
+    }
+
+    if overrides.silent {
+        if let Some(level) = overrides.verbosity
+            && level != CliVerbosityValue::Silent
+        {
+            bail!("--silent conflicts with --verbosity {}", level.as_str());
+        }
+        if overrides.verbose {
+            bail!("--silent conflicts with --verbose");
+        }
+        verbosity = CliVerbosityValue::Silent;
+    }
+
+    Ok(verbosity)
+}
+
+fn apply_output_verbosity(context: &mut ProjectContext, cli: &Cli) -> Result<CliVerbosityValue> {
+    let verbosity = resolve_output_verbosity(context.chief_yaml.chief.verbose, &cli.chief)?;
+    context.chief_yaml.chief.verbose = verbosity.mirrors_agent_chunks();
+    set_event_stdout_enabled(verbosity.shows_progress());
+    Ok(verbosity)
+}
+
 fn apply_cli_overrides_to_context(context: &mut ProjectContext, cli: &Cli) -> Result<()> {
     let overrides = cli.chief.to_config_overrides()?;
     let current = std::mem::take(&mut context.chief_yaml.chief);
     context.chief_yaml.chief = current.apply_overrides(overrides);
+    let _ = apply_output_verbosity(context, cli)?;
     Ok(())
 }
 
@@ -697,6 +806,8 @@ fn load_chief_yaml_with_cli_overrides(project_dir: &Path, cli: &Cli) -> Result<C
     let overrides = cli.chief.to_config_overrides()?;
     let current = std::mem::take(&mut chief_yaml.chief);
     chief_yaml.chief = current.apply_overrides(overrides);
+    let verbosity = resolve_output_verbosity(chief_yaml.chief.verbose, &cli.chief)?;
+    chief_yaml.chief.verbose = verbosity.mirrors_agent_chunks();
     Ok(chief_yaml)
 }
 
@@ -1121,6 +1232,33 @@ fn build_cli_schema() -> CliSchema {
             &[],
         ),
         schema_option(
+            Some("verbosity"),
+            None,
+            Some("VERBOSITY"),
+            chief_option_help::VERBOSITY,
+            false,
+            false,
+            Some("normal"),
+            enum_possible_values::<CliVerbosityValue>(),
+            &[],
+            &[
+                "quiet prints the final report and last agent message without progress events.",
+                "verbose also streams raw live agent output.",
+            ],
+        ),
+        schema_option(
+            Some("silent"),
+            None,
+            None,
+            chief_option_help::SILENT,
+            false,
+            false,
+            Some("false"),
+            Vec::new(),
+            &[],
+            &["Conflicts with --verbose and non-silent --verbosity values."],
+        ),
+        schema_option(
             Some("verbose"),
             None,
             None,
@@ -1130,7 +1268,9 @@ fn build_cli_schema() -> CliSchema {
             Some("false"),
             Vec::new(),
             &[],
-            &["When omitted, live raw agent output is hidden from terminal stdout."],
+            &[
+                "Equivalent to --verbosity verbose; conflicts with --silent and non-verbose --verbosity values.",
+            ],
         ),
         schema_option(
             Some("file"),
@@ -1772,6 +1912,8 @@ fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
             "use_agent_log_truncation_for_stdout_logs",
             overrides.use_agent_log_truncation_for_stdout_logs.is_some(),
         ),
+        ("verbosity", overrides.verbosity.is_some()),
+        ("silent", overrides.silent),
         ("verbose", overrides.verbose),
     ];
 
@@ -2126,7 +2268,8 @@ fn run(cli: &Cli) -> Result<()> {
 fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKind) -> Result<()> {
     let report_started_at = Utc::now();
     context.chief_yaml.chief.flow = flow_kind.as_str().to_owned();
-    print_config_summary(&context, &cli.chief);
+    let verbosity = apply_output_verbosity(&mut context, cli)?;
+    print_config_summary(&context, &cli.chief, verbosity);
     let engine = ChiefEngine::new(context.clone());
     let max_retries = context.chief_yaml.chief.max_retries.max(1);
     let head_before = context.git.head_commit(&context.project_dir).ok();
@@ -2137,15 +2280,17 @@ fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKi
         cli.chief.model.clone(),
         max_retries,
         |outcome| {
-            println!(
-                "completed todo {}{}",
-                outcome.todo_id,
-                outcome
-                    .commit_hash
-                    .as_deref()
-                    .map(|hash| format!(" @ {hash}"))
-                    .unwrap_or_default()
-            );
+            if verbosity.shows_progress() {
+                println!(
+                    "completed todo {}{}",
+                    outcome.todo_id,
+                    outcome
+                        .commit_hash
+                        .as_deref()
+                        .map(|hash| format!(" @ {hash}"))
+                        .unwrap_or_default()
+                );
+            }
         },
         |attempt, total, err| {
             eprintln!("run failed ({attempt}/{total}): {err:#}");
@@ -2169,10 +2314,10 @@ fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKi
     };
 
     match &queue_result {
-        Ok(()) => {
+        Ok(()) if verbosity.shows_progress() => {
             println!("all todos are done");
         }
-        Err(_) => {}
+        _ => {}
     }
     if let Err(err) = print_cli_run_report(
         &context,
@@ -2181,6 +2326,7 @@ fn run_todo_queue_flow(cli: &Cli, mut context: ProjectContext, flow_kind: FlowKi
         report_started_at,
         exit_status,
         exit_reason.as_deref(),
+        verbosity,
     ) {
         eprintln!("warning: failed to print run report: {err:#}");
     }
@@ -2554,7 +2700,8 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     let report_started_at = Utc::now();
     let mut context =
         load_context_with_cli_overrides_and_sqlite_log(&cli.project_dir, cli, cli.sqlite_log)?;
-    print_config_summary(&context, &cli.chief);
+    let verbosity = apply_output_verbosity(&mut context, cli)?;
+    print_config_summary(&context, &cli.chief, verbosity);
 
     let (source_desc, expectations): (String, String) = if let Some(ref file) = args.file {
         let file_path = if file.is_absolute() {
@@ -2572,7 +2719,9 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     };
 
     context.chief_yaml.chief.flow = FlowKind::LoopFile.as_str().to_owned();
-    println!("loop_file: started {}", source_desc);
+    if verbosity.shows_progress() {
+        println!("loop_file: started {}", source_desc);
+    }
     let head_before = context.git.head_commit(&context.project_dir).ok();
 
     let synthetic_todo = Todo {
@@ -2608,7 +2757,9 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         Arc::new(AtomicBool::new(false)),
         1,
         |attempt, total, err| {
-            println!("loop_file: retry {attempt}/{total} failed: {err:#}");
+            if verbosity.shows_progress() {
+                println!("loop_file: retry {attempt}/{total} failed: {err:#}");
+            }
         },
     );
 
@@ -2636,7 +2787,9 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         }
     };
 
-    if let Ok(outcome) = &result {
+    if let Ok(outcome) = &result
+        && verbosity.shows_progress()
+    {
         println!(
             "completed loop_file {}{}",
             outcome.todo_id,
@@ -2657,6 +2810,7 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
         report_started_at,
         exit_status,
         exit_reason.as_deref(),
+        verbosity,
     ) {
         eprintln!("warning: failed to print run report: {err:#}");
     }
@@ -2803,6 +2957,12 @@ struct StableIterationProgress {
     converged: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReportAgentMessage {
+    text: String,
+    exit_code: Option<i64>,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct ReportAgentUsageLimit {
     label: String,
@@ -2843,6 +3003,7 @@ struct CliRunReport {
     wait_seconds_applied: f64,
     commits: Vec<String>,
     agent_name: String,
+    last_agent_message: Option<ReportAgentMessage>,
     usage_snapshot: Option<ReportAgentUsageSnapshot>,
     usage_source: Option<&'static str>,
 }
@@ -2885,9 +3046,22 @@ fn load_run_record(store: &ProjectStore, run_id: &str) -> Result<Option<ReportRu
     .transpose()
 }
 
+fn report_event_from_record(event: chief::domain::EventRecord) -> ReportEventRecord {
+    ReportEventRecord {
+        level: event.level,
+        msg: event.msg,
+        event_type: event.event_type.as_str().to_owned(),
+        payload: event.payload,
+    }
+}
+
 fn load_run_events(store: &ProjectStore, run_id: &str) -> Result<Vec<ReportEventRecord>> {
     if !store.sqlite_log_enabled() || !store.db_path.exists() {
-        return Ok(Vec::new());
+        return Ok(store
+            .in_memory_events_for_run(run_id)?
+            .into_iter()
+            .map(report_event_from_record)
+            .collect());
     }
     let conn = rusqlite::Connection::open(&store.db_path)
         .with_context(|| format!("failed to open {}", store.db_path.display()))?;
@@ -3051,6 +3225,24 @@ fn format_usage_snapshot_lines(snapshot: &ReportAgentUsageSnapshot) -> Vec<Strin
         .collect()
 }
 
+fn last_agent_message_from_events(events: &[ReportEventRecord]) -> Option<ReportAgentMessage> {
+    events.iter().rev().find_map(|event| {
+        if event.event_type != "agent_response" {
+            return None;
+        }
+        let text = event
+            .payload
+            .get("output")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        Some(ReportAgentMessage {
+            text: text.to_owned(),
+            exit_code: event.payload.get("exit_code").and_then(Value::as_i64),
+        })
+    })
+}
+
 fn derive_exit_reason(
     status: &str,
     events: &[ReportEventRecord],
@@ -3168,6 +3360,7 @@ fn build_cli_run_report(
         .iter()
         .rev()
         .find_map(|event| parse_stable_iteration_progress(&event.msg));
+    let last_agent_message = last_agent_message_from_events(&events);
     let usage_snapshot_from_events = events.iter().rev().find_map(|event| {
         event
             .payload
@@ -3266,6 +3459,7 @@ fn build_cli_run_report(
         wait_seconds_applied,
         commits,
         agent_name: context.chief_yaml.chief.agent.clone(),
+        last_agent_message,
         usage_snapshot,
         usage_source,
     })
@@ -3405,6 +3599,31 @@ fn render_cli_run_report(report: &CliRunReport) -> String {
     lines.join("\n")
 }
 
+fn render_last_agent_message(message: &ReportAgentMessage) -> String {
+    let color = should_use_color_stdout();
+    let divider = style(
+        "================================================================",
+        "\x1b[90m",
+        color,
+    );
+    let mut lines = vec![
+        divider.clone(),
+        style("LAST AGENT MESSAGE", "\x1b[1;37m", color),
+        divider.clone(),
+    ];
+    if let Some(exit_code) = message.exit_code {
+        lines.push(format!(
+            "{} {}",
+            format_report_key("agent_exit", color),
+            exit_code
+        ));
+        lines.push(String::new());
+    }
+    lines.push(message.text.trim().to_owned());
+    lines.push(divider);
+    lines.join("\n")
+}
+
 fn print_cli_run_report(
     context: &ProjectContext,
     run_id: Option<&str>,
@@ -3412,7 +3631,12 @@ fn print_cli_run_report(
     started_at_fallback: DateTime<Utc>,
     exit_status_fallback: RunExitStatus,
     exit_reason_fallback: Option<&str>,
+    verbosity: CliVerbosityValue,
 ) -> Result<()> {
+    if !verbosity.shows_report() && !verbosity.shows_last_agent_message() {
+        return Ok(());
+    }
+
     let report = build_cli_run_report(
         context,
         run_id,
@@ -3421,11 +3645,26 @@ fn print_cli_run_report(
         exit_status_fallback,
         exit_reason_fallback,
     )?;
-    println!("{}", render_cli_run_report(&report));
+    if verbosity.shows_report() {
+        println!("{}", render_cli_run_report(&report));
+    }
+    if verbosity.shows_last_agent_message()
+        && let Some(message) = &report.last_agent_message
+    {
+        println!("{}", render_last_agent_message(message));
+    }
     Ok(())
 }
 
-fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides) {
+fn print_config_summary(
+    context: &ProjectContext,
+    overrides: &CliChiefOverrides,
+    verbosity: CliVerbosityValue,
+) {
+    if !verbosity.shows_progress() {
+        return;
+    }
+
     let color = should_use_color_stdout();
     let divider = style(
         "================================================================",
@@ -3529,8 +3768,8 @@ fn print_config_summary(context: &ProjectContext, overrides: &CliChiefOverrides)
     );
     println!(
         "{} {}",
-        format_report_key("verbose", color),
-        context.chief_yaml.chief.verbose
+        format_report_key("verbosity", color),
+        verbosity.as_str()
     );
 
     let active_overrides = active_override_names(overrides);

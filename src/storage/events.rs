@@ -5,10 +5,18 @@ use anyhow::{Context, Result};
 use rusqlite::params;
 use serde_json::Value;
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static EVENT_STDOUT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_event_stdout_enabled(enabled: bool) {
+    EVENT_STDOUT_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 impl ProjectStore {
     pub fn record_event(&self, event: &EventRecord) -> Result<()> {
         if !self.sqlite_log_enabled() {
+            self.record_in_memory_event(event)?;
             emit_event_to_stdout(event);
             return Ok(());
         }
@@ -156,6 +164,10 @@ fn emit_event_to_stdout(event: &EventRecord) {
 }
 
 fn should_emit_event_to_stdout() -> bool {
+    if !EVENT_STDOUT_ENABLED.load(Ordering::Relaxed) {
+        return false;
+    }
+
     match std::env::var("CHIEF_EVENT_STDOUT") {
         Ok(value) => {
             let normalized = value.trim().to_ascii_lowercase();

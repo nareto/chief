@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::error::Error as StdError;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 mod events;
 mod parsing;
@@ -15,6 +16,8 @@ mod runs;
 mod schema;
 mod todo_claim;
 mod todos;
+
+pub use events::set_event_stdout_enabled;
 
 #[derive(Debug, Clone)]
 pub struct DbResetRequiredError {
@@ -55,6 +58,7 @@ pub struct ProjectStore {
     pub project_dir: PathBuf,
     pub db_path: PathBuf,
     sqlite_log: bool,
+    memory_events: Arc<Mutex<Vec<crate::domain::EventRecord>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +117,7 @@ impl ProjectStore {
             db_path: paths::chief_db_path(&project_dir),
             project_dir,
             sqlite_log: true,
+            memory_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -122,11 +127,35 @@ impl ProjectStore {
             db_path: paths::chief_db_path(&project_dir),
             project_dir,
             sqlite_log: false,
+            memory_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn sqlite_log_enabled(&self) -> bool {
         self.sqlite_log
+    }
+
+    pub fn in_memory_events_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::domain::EventRecord>> {
+        let events = self
+            .memory_events
+            .lock()
+            .map_err(|err| anyhow::anyhow!("in-memory event log is poisoned: {err}"))?;
+        Ok(events
+            .iter()
+            .filter(|event| event.run_id == run_id)
+            .cloned()
+            .collect())
+    }
+
+    fn record_in_memory_event(&self, event: &crate::domain::EventRecord) -> Result<()> {
+        self.memory_events
+            .lock()
+            .map_err(|err| anyhow::anyhow!("in-memory event log is poisoned: {err}"))?
+            .push(event.clone());
+        Ok(())
     }
 
     pub fn init(&self) -> Result<()> {
