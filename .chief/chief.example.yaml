@@ -11,7 +11,7 @@ chief:
   # Cursor example: use the exact Cursor model id in `model`.
   # agent: cursor-agent
   # model: gpt-5.4-xhigh
-  # Reasoning effort for model adapters that support it (`low`, `medium`, `high`, or `xhigh`).
+  # Reasoning effort for model adapters that support it (`low`, `medium`, `high`, `xhigh`, or `max`).
   # model_reasoning_effort: high
   # Extra CLI args forwarded to the selected agent (YAML/JSON string list).
   agent_extra_args: []

@@ -73,7 +73,7 @@ mod chief_option_help {
     pub(super) const AGENT: &str =
         "Agent binary to use (`codex`, `claude`, `opencode`, `cursor-agent`, or `pi`).";
     pub(super) const MODEL: &str = "Model override passed to the selected agent (for `cursor-agent`, use Cursor's exact model id such as `gpt-5.4-xhigh`; for `pi`, use `provider/model_id` format such as `openai/gpt-5`).";
-    pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, or `xhigh`).";
+    pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, `xhigh`, or `max`).";
     pub(super) const AGENT_EXTRA_ARGS: &str =
         "Extra CLI args forwarded to the selected agent (YAML/JSON string list).";
     pub(super) const MCP_SERVERS: &str =
@@ -249,6 +249,8 @@ enum CliReasoningEffortValue {
     High,
     #[value(name = "xhigh")]
     Xhigh,
+    #[value(name = "max")]
+    Max,
 }
 
 impl CliReasoningEffortValue {
@@ -258,6 +260,7 @@ impl CliReasoningEffortValue {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }

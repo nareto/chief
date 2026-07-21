@@ -569,18 +569,18 @@ fn parse_agent_and_reasoning_options_use_typed_values() {
     let cli = Cli::try_parse_from([
         "chief",
         "--agent",
-        "cursor",
+        "codex",
         "--model-reasoning-effort",
-        "xhigh",
+        "max",
         "--prompt",
         "inspect",
     ])
     .expect("typed agent and reasoning options should parse");
 
-    assert_eq!(cli.chief.agent, Some(CliAgentValue::CursorAgent));
+    assert_eq!(cli.chief.agent, Some(CliAgentValue::Codex));
     assert_eq!(
         cli.chief.model_reasoning_effort,
-        Some(CliReasoningEffortValue::Xhigh)
+        Some(CliReasoningEffortValue::Max)
     );
 }
 

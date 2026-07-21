@@ -187,7 +187,7 @@ impl CommandBackedAgent for CodexAgent {
             cmd.push("--config".to_owned());
             cmd.push(format!(
                 "model_reasoning_effort=\"{}\"",
-                normalize_codex_reasoning_effort(reasoning_effort)
+                reasoning_effort.trim()
             ));
         }
         cmd.push("-".to_owned());
@@ -761,13 +761,6 @@ impl CodingAgent for PiAgent {
 
     fn run(&self, request: AgentRequest) -> Result<AgentOutput> {
         run_pi_agent(self, request)
-    }
-}
-
-fn normalize_codex_reasoning_effort(raw: &str) -> &str {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "xhigh" => "high",
-        _ => raw.trim(),
     }
 }
 

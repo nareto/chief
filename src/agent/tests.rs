@@ -26,9 +26,9 @@ fn codex_command_uses_full_permissions_without_sandbox() {
 }
 
 #[test]
-fn codex_reasoning_effort_maps_xhigh_to_high() {
+fn codex_reasoning_effort_passes_xhigh_through() {
     let agent = CodexAgent {
-        model: Some("gpt-5".to_owned()),
+        model: Some("gpt-5.6-sol".to_owned()),
         model_reasoning_effort: Some("xhigh".to_owned()),
         extra_args: Vec::new(),
         mcp_servers: None,
@@ -38,8 +38,26 @@ fn codex_reasoning_effort_maps_xhigh_to_high() {
     assert!(
         command
             .iter()
-            .any(|arg| arg == "model_reasoning_effort=\"high\""),
-        "codex command should normalize xhigh to high: {command:?}"
+            .any(|arg| arg == "model_reasoning_effort=\"xhigh\""),
+        "codex command should preserve xhigh: {command:?}"
+    );
+}
+
+#[test]
+fn codex_reasoning_effort_passes_max_through() {
+    let agent = CodexAgent {
+        model: Some("gpt-5.6-sol".to_owned()),
+        model_reasoning_effort: Some("max".to_owned()),
+        extra_args: Vec::new(),
+        mcp_servers: None,
+    };
+
+    let command = agent.build_command(&[]);
+    assert!(
+        command
+            .iter()
+            .any(|arg| arg == "model_reasoning_effort=\"max\""),
+        "codex command should preserve max: {command:?}"
     );
 }
 
