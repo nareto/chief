@@ -8,9 +8,10 @@ if [[ -z "${PROMPT//[[:space:]]/}" ]]; then
   exit 64
 fi
 
+# Other agents: claude, opencode, cursor-agent, pi.
 chief \
   --project-dir . \
-  --agent codex \   # or claude, opencode, cursor-agent, pi
+  --agent codex \
   --mcp-servers '{}' \
   --respect-limits true \
   --max-loop-iterations 8 \
