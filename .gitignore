@@ -16,3 +16,4 @@ frontend/tsconfig.tsbuildinfo
 .env
 
 .chief/chief.example.yaml
+/.pi-subagents/
