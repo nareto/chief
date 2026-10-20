@@ -1,8 +1,11 @@
 # Chief
 
-Chief runs coding agents (Codex, Claude Code, Cursor, opencode, pi) unattended against a Git repository and keeps calling them until their output stops changing.
+Chief is an implementation of the [Ralph Wiggum loop](https://ghuntley.com/ralph/), Geoffrey Huntley's technique of running a coding agent on the same prompt over and over, with some niceties on top:
 
-`chief review` uses that loop to review a branch: the agent writes findings to a YAML file, and chief stops once a pass finds nothing new.
+- it stops by itself once a pass changes nothing, instead of looping forever;
+- it runs Codex, Claude Code, Cursor, opencode or pi unattended against a Git repository;
+- it paces calls to stay under Codex and Claude subscription usage limits;
+- `chief review` uses the loop to review a branch: the agent writes findings to a YAML file, and chief stops once a pass finds nothing new.
 
 ## Install
 
