@@ -3,7 +3,7 @@
 `chief review` asks an agent to review the current branch and record what it finds in a YAML file. It runs the same convergence loop as the other flows, but the agent may only write the findings file, and chief never commits.
 
 ```bash
-chief review --agent claude --max-loop-iterations 5
+chief review --agent claude --model claude-sonnet-5-5 --agent-sandbox native --max-loop-iterations 5
 ```
 
 It works in any Git repository and does not need `.chief/chief.yaml`.
@@ -89,8 +89,8 @@ A review needs only read access plus write access to one file inside the reposit
 
 [`examples/github-review.yml`](../examples/github-review.yml) is a ready-to-copy workflow:
 
-1. installs Claude Code and chief (`cargo install --locked chief --git https://github.com/nareto/chief`);
-2. runs `chief review --agent claude --base origin/<PR base> --max-loop-iterations 5` with only `ANTHROPIC_API_KEY` in the environment;
+1. installs Claude Code, chief (`cargo install --locked chief --git https://github.com/nareto/chief`), and `bubblewrap` and `socat` for Claude Code's sandbox, then lets `bubblewrap` create user namespaces under Ubuntu's AppArmor policy;
+2. runs `chief review --agent claude --model claude-sonnet-5-5 --agent-sandbox native --base origin/<PR base> --max-loop-iterations 5` with only `ANTHROPIC_API_KEY` in the environment;
 3. renders the findings to Markdown and posts a new PR comment on every run with `gh pr comment`, using the job's `GITHUB_TOKEN` (`pull-requests: write`);
 4. fails the job if any finding is P0 or P1.
 

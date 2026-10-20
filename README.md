@@ -20,9 +20,11 @@ You also need `git` and at least one agent CLI on `PATH` (`codex` is the default
 ```bash
 cd your-repo
 git switch your-feature-branch
-chief review --agent claude --max-loop-iterations 5
+chief review --agent claude --model claude-sonnet-5-5 --agent-sandbox native --max-loop-iterations 5
 cat .chief/review/findings.yaml
 ```
+
+`--agent-sandbox native` keeps Claude Code's own sandbox on, so the reviewing agent can only write inside the repository. On Linux that sandbox needs `bubblewrap` and `socat`; see [docs/safety.md](./docs/safety.md).
 
 How it converges: every pass starts a fresh agent with no memory of earlier passes. It reads the findings file, reviews the diff against the base branch and appends only findings that are not already listed. Chief stops after the first pass that adds nothing, or after `--max-loop-iterations` passes.
 

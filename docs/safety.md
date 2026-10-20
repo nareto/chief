@@ -31,6 +31,8 @@ Chief keeps the agent's own sandbox on and grants only the permissions an unatte
 | cursor-agent | `--force --trust --sandbox enabled` | Terminal commands run in Cursor's sandbox. `--force` is needed because print mode otherwise only proposes edits. MCP servers are not auto-approved. |
 | opencode, pi | rejected | Chief knows no sandbox flag for them, so it refuses to start rather than pretend. Use `bypass` inside an isolated environment. |
 
+On Linux, Claude Code's sandbox needs `bubblewrap` and `socat`. On Ubuntu 24.04 and later, the default AppArmor policy also stops `bubblewrap` from creating user namespaces until you add a profile for it; Claude Code's [sandboxing docs](https://code.claude.com/docs/en/sandboxing) give the profile, and [`examples/github-review.yml`](../examples/github-review.yml) installs it on GitHub's Ubuntu runners. If the sandbox cannot start, Claude Code exits instead of running unsandboxed, so a missing setup shows up as a failed run.
+
 What `native` does not do:
 
 - Each sandbox covers that agent's command execution. Built-in file tools (Claude's Edit and Write, Cursor's file writes) follow the agent's permission rules, not the OS sandbox. Claude limits auto-approved edits to the working directory; for Cursor, add `Write()` deny rules in `~/.cursor/cli-config.json` or `.cursor/cli.json` if you need limits.
