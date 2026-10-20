@@ -277,8 +277,14 @@ pub use command_exec::{
     suite_command_cwd, suite_command_for_kind, terminate_process_tree,
 };
 pub use execution::FlowExecution;
-pub use loop_policy::{ConvergenceLoopPolicy, LoopPolicy, PhaseStrategy, UntilPassLoopPolicy};
-pub use strategies::{ExecutionFlow, LoopFileFlow, RefactorFlow, TodoFlow, build_flow};
+pub use loop_policy::{
+    ConvergenceLoopPolicy, ConvergenceNotReachedError, LoopPolicy, PhaseStrategy,
+    UntilPassLoopPolicy, convergence_not_reached,
+};
+pub use strategies::{
+    ExecutionFlow, LoopFileFlow, RefactorFlow, ReviewContractViolation, ReviewFlow, ReviewSpec,
+    TodoFlow, build_flow,
+};
 
 #[cfg(test)]
 pub(crate) use suite_checks::run_lint_checks;
@@ -448,5 +454,7 @@ fn changed_paths_between_snapshots(
     touched.into_iter().collect()
 }
 
+#[cfg(test)]
+mod review_tests;
 #[cfg(test)]
 mod tests;

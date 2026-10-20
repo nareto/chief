@@ -153,8 +153,31 @@ impl LoopPolicy for ConvergenceLoopPolicy {
             ),
             BTreeMap::new(),
         )?;
-        Err(anyhow!("convergence loop failed to converge"))
+        Err(anyhow!(ConvergenceNotReachedError {
+            max_loops: self.max_loops
+        }))
     }
+}
+
+/// Returned by [`ConvergenceLoopPolicy`] when every iteration was used without
+/// reaching the required number of stable iterations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConvergenceNotReachedError {
+    pub max_loops: usize,
+}
+
+impl fmt::Display for ConvergenceNotReachedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("convergence loop failed to converge")
+    }
+}
+
+impl std::error::Error for ConvergenceNotReachedError {}
+
+pub fn convergence_not_reached(err: &anyhow::Error) -> Option<ConvergenceNotReachedError> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<ConvergenceNotReachedError>())
+        .copied()
 }
 
 #[derive(Debug, Clone)]

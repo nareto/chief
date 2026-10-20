@@ -7,6 +7,7 @@ pub mod git;
 pub mod orchestrator;
 pub mod paths;
 pub mod prompt;
+pub mod review;
 pub mod scheduler;
 pub mod service;
 pub mod storage;

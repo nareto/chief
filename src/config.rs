@@ -57,6 +57,8 @@ pub struct ChiefConfig {
     #[serde(default)]
     pub agent_extra_args: Vec<String>,
     #[serde(default)]
+    pub agent_sandbox: AgentSandbox,
+    #[serde(default)]
     pub mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
     #[serde(default = "default_max_retries")]
     pub max_retries: usize,
@@ -93,6 +95,7 @@ pub struct ChiefConfigOverrides {
     pub model: Option<String>,
     pub model_reasoning_effort: Option<String>,
     pub agent_extra_args: Option<Vec<String>>,
+    pub agent_sandbox: Option<AgentSandbox>,
     pub mcp_servers: Option<Option<BTreeMap<String, McpServerConfig>>>,
     pub max_retries: Option<usize>,
     pub max_loop_iterations: Option<usize>,
@@ -117,6 +120,7 @@ impl Default for ChiefConfig {
             model: None,
             model_reasoning_effort: None,
             agent_extra_args: Vec::new(),
+            agent_sandbox: AgentSandbox::default(),
             mcp_servers: None,
             max_retries: default_max_retries(),
             max_loop_iterations: default_max_loop_iterations(),
@@ -143,6 +147,7 @@ impl ChiefConfig {
             model,
             model_reasoning_effort,
             agent_extra_args,
+            agent_sandbox,
             mcp_servers,
             max_retries,
             max_loop_iterations,
@@ -165,6 +170,7 @@ impl ChiefConfig {
             model,
             model_reasoning_effort,
             agent_extra_args: Some(agent_extra_args),
+            agent_sandbox: Some(agent_sandbox),
             mcp_servers: Some(mcp_servers),
             max_retries: Some(max_retries),
             max_loop_iterations: Some(max_loop_iterations),
@@ -191,6 +197,7 @@ impl ChiefConfig {
             model,
             model_reasoning_effort,
             agent_extra_args,
+            agent_sandbox,
             mcp_servers,
             max_retries,
             max_loop_iterations,
@@ -213,6 +220,7 @@ impl ChiefConfig {
             model: model_override,
             model_reasoning_effort: model_reasoning_effort_override,
             agent_extra_args: agent_extra_args_override,
+            agent_sandbox: agent_sandbox_override,
             mcp_servers: mcp_servers_override,
             max_retries: max_retries_override,
             max_loop_iterations: max_loop_iterations_override,
@@ -238,6 +246,7 @@ impl ChiefConfig {
             model: model_override.or(model),
             model_reasoning_effort: model_reasoning_effort_override.or(model_reasoning_effort),
             agent_extra_args: agent_extra_args_override.unwrap_or(agent_extra_args),
+            agent_sandbox: agent_sandbox_override.unwrap_or(agent_sandbox),
             mcp_servers: mcp_servers_override.unwrap_or(mcp_servers),
             max_retries: max_retries_override.unwrap_or(max_retries),
             max_loop_iterations: max_loop_iterations_override.unwrap_or(max_loop_iterations),
@@ -258,6 +267,27 @@ impl ChiefConfig {
                 use_agent_log_truncation_for_stdout_logs_override
                     .unwrap_or(use_agent_log_truncation_for_stdout_logs),
             verbose: verbose_override.unwrap_or(verbose),
+        }
+    }
+}
+
+/// How chief launches agents with respect to their own sandbox and approvals.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSandbox {
+    /// Disable the agent's sandbox and approval prompts (each backend's
+    /// "dangerous"/"force" flags). Run chief inside a container or VM.
+    #[default]
+    Bypass,
+    /// Keep the agent's own sandbox on (codex, claude, cursor-agent only).
+    Native,
+}
+
+impl AgentSandbox {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bypass => "bypass",
+            Self::Native => "native",
         }
     }
 }
@@ -638,6 +668,7 @@ mod tests {
             model: Some("sonnet".to_owned()),
             model_reasoning_effort: Some("high".to_owned()),
             agent_extra_args: vec!["--dangerously-skip-permissions".to_owned()],
+            agent_sandbox: AgentSandbox::Native,
             mcp_servers: Some(BTreeMap::from([(
                 "docs".to_owned(),
                 McpServerConfig::Stdio {
@@ -664,6 +695,15 @@ mod tests {
         let overrides = config.clone().into_overrides();
         let applied = ChiefConfig::default().apply_overrides(overrides);
         assert_eq!(applied, config);
+    }
+
+    #[test]
+    fn agent_sandbox_parses_from_yaml_and_defaults_to_bypass() {
+        let parsed: ChiefYaml = serde_yaml::from_str("chief:\n  agent_sandbox: native\n").unwrap();
+        assert_eq!(parsed.chief.agent_sandbox, AgentSandbox::Native);
+        let defaulted: ChiefYaml = serde_yaml::from_str("chief:\n  agent: claude\n").unwrap();
+        assert_eq!(defaulted.chief.agent_sandbox, AgentSandbox::Bypass);
+        assert!(serde_yaml::from_str::<ChiefYaml>("chief:\n  agent_sandbox: off\n").is_err());
     }
 
     #[test]

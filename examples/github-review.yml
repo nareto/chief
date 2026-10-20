@@ -1,0 +1,124 @@
+# Review every pull request with `chief review`, post the findings as a new PR
+# comment, and fail the check when any finding would block the merge (P0/P1).
+#
+# Setup:
+#   1. Copy this file to .github/workflows/chief-review.yml.
+#   2. Add a repository secret ANTHROPIC_API_KEY. Prefer a key with a spend
+#      limit: the agent reads untrusted PR content and runs with this key in
+#      its environment.
+#
+# To use another agent, swap the install step, the --agent flag and the key
+# (for example `npm install -g @openai/codex`, `--agent codex`, OPENAI_API_KEY).
+#
+# Pull requests from forks get no secrets and a read-only token, so the
+# review and comment steps fail there. Do not switch to `pull_request_target`
+# to work around it: that runs untrusted code with write access.
+name: chief review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chief-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # chief review's default findings path.
+      FINDINGS: .chief/review/findings.yaml
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so `git merge-base origin/<base> HEAD` works.
+          fetch-depth: 0
+          # Keep the token out of .git/config; the agent never needs it.
+          persist-credentials: false
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Install chief
+        run: cargo install --locked chief --git https://github.com/nareto/chief
+
+      # Only the model API key is passed here; no GitHub token.
+      # chief's default agent_sandbox is `bypass` (the agent's own sandbox and
+      # approvals are off). The runner is a throwaway VM, which is the
+      # isolation chief expects in that mode. See docs/safety.md for
+      # `--agent-sandbox native`.
+      # --respect-limits false: usage-limit pacing reads subscription quotas,
+      # which an API key does not have.
+      - name: Review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          chief review \
+            --agent claude \
+            --base "origin/$BASE_REF" \
+            --max-loop-iterations 5 \
+            --respect-limits false
+
+      # A new comment on every run, so each push gets its own review record.
+      - name: Post findings
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        run: |
+          {
+            echo "## chief review"
+            echo
+            echo "Commit \`$HEAD_SHA\`."
+            if [ "$REVIEW_OUTCOME" != "success" ]; then
+              echo
+              echo "**The review did not finish (step outcome: $REVIEW_OUTCOME). Findings below are partial; see the workflow log.**"
+            fi
+            echo
+            if [ -s "$FINDINGS" ]; then
+              yq -o=json '.findings // []' "$FINDINGS" | jq -r '
+                if length == 0 then "No findings."
+                else
+                  "\(length) finding(s), \(map(select(.severity == "P0" or .severity == "P1")) | length) blocking (P0/P1).\n",
+                  (sort_by(.severity)[] |
+                    "### \(.severity): \(.title)\n" +
+                    "`\(.file)\(if .line then ":\(.line)" else "" end)`\n\n" +
+                    "\(.why)\n" +
+                    (if .suggestion then "\n**Suggestion:** \(.suggestion)\n" else "" end))
+                end'
+            else
+              echo "No findings."
+            fi
+          } > review-comment.md
+          # GitHub caps comment bodies at 65536 characters.
+          head -c 60000 review-comment.md > review-comment.trimmed.md
+          gh pr comment "$PR_NUMBER" --body-file review-comment.trimmed.md
+
+      - name: Fail on blocking findings
+        if: ${{ !cancelled() }}
+        run: |
+          if [ ! -s "$FINDINGS" ]; then
+            echo "No findings file; nothing blocks the merge."
+            exit 0
+          fi
+          blocking=$(yq -o=json '.findings // []' "$FINDINGS" \
+            | jq '[.[] | select(.severity == "P0" or .severity == "P1")] | length')
+          if [ "$blocking" -gt 0 ]; then
+            echo "::error::chief review found $blocking blocking finding(s) (P0/P1)."
+            exit 1
+          fi
+          echo "No blocking findings."

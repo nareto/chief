@@ -64,6 +64,10 @@ pub trait GitOps: Send + Sync {
     fn repo_root(&self) -> &Path;
     fn head_commit(&self, cwd: &Path) -> Result<String>;
     fn changed_files(&self, cwd: &Path) -> Result<Vec<String>>;
+    /// Changed files that git already tracks (untracked files are excluded).
+    fn tracked_changed_files(&self, cwd: &Path) -> Result<Vec<String>> {
+        self.changed_files(cwd)
+    }
     fn diff(&self, cwd: &Path, against_ref: Option<&str>) -> Result<String>;
     fn diff_summary_for_files(&self, cwd: &Path, files: &[String]) -> Result<String>;
     fn commit_committer_timestamp_rfc3339(&self, cwd: &Path, commit_hash: &str) -> Result<String>;
@@ -134,6 +138,15 @@ impl GitOps for ShellGitOps {
 
     fn changed_files(&self, cwd: &Path) -> Result<Vec<String>> {
         let output = self.run_capture(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
+        let files = output
+            .lines()
+            .filter_map(|line| line.split_whitespace().last().map(str::to_owned))
+            .collect();
+        Ok(files)
+    }
+
+    fn tracked_changed_files(&self, cwd: &Path) -> Result<Vec<String>> {
+        let output = self.run_capture(cwd, &["status", "--porcelain", "--untracked-files=no"])?;
         let files = output
             .lines()
             .filter_map(|line| line.split_whitespace().last().map(str::to_owned))

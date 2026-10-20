@@ -635,7 +635,7 @@ fn run_agent_with_git_changes_detects_watch_only_file_changes_outside_git_tracki
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
 
-    let watched_relative = "wf_helpers/.review_pr_findings/123_findings.yaml";
+    let watched_relative = "review_output/findings.yaml";
     let watched_file = project_dir.join(watched_relative);
     let watched_parent = watched_file
         .parent()
@@ -865,7 +865,7 @@ fn run_agent_with_git_changes_detects_absolute_watch_only_file_outside_project()
     let store = ProjectStore::new(&project_dir);
     store.init().expect("store init should succeed");
 
-    let watched_file = findings_root.join("wf_helpers/.review_pr_findings/123_findings.yaml");
+    let watched_file = findings_root.join("review_output/findings.yaml");
     let watched_parent = watched_file
         .parent()
         .expect("watched file path should have a parent directory");

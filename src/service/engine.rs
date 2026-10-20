@@ -5,7 +5,8 @@ use super::{
 use crate::agent::{AgentCancelledError, is_agent_cancelled_error};
 use crate::domain::{EventType, Phase, RunExitStatus, Todo};
 use crate::flow::{
-    FlowExecution, FlowKind, TodoOutcome, build_flow, is_agent_invocation_error,
+    FlowExecution, FlowKind, ReviewFlow, ReviewSpec, TodoFlow, TodoOutcome, build_flow,
+    is_agent_invocation_error,
 };
 use crate::git::{
     GIT_TRANSIENT_LOCK_RETRY_ATTEMPTS, GitOps, git_output_has_transient_lock_contention_signature,
@@ -30,6 +31,26 @@ mod requirements;
 #[derive(Debug, Clone)]
 pub struct ChiefEngine {
     pub project: ProjectContext,
+}
+
+/// Inputs for [`ChiefEngine::run_review_once`].
+pub struct ReviewRun {
+    pub spec: ReviewSpec,
+    pub max_loop_iterations: usize,
+    pub required_stable_iterations: usize,
+    pub model_override: Option<String>,
+    pub cancel_signal: Arc<AtomicBool>,
+}
+
+struct FlowRun<'a> {
+    run_id: &'a str,
+    job_id: &'a str,
+    worker_index: usize,
+    todo: Todo,
+    work_dir: PathBuf,
+    model_override: Option<String>,
+    convergence_watch_paths: Vec<String>,
+    cancel_signal: Arc<AtomicBool>,
 }
 
 impl ChiefEngine {
@@ -81,23 +102,81 @@ impl ChiefEngine {
             self.project.chief_yaml.chief.max_loop_iterations,
             self.project.chief_yaml.chief.required_stable_iterations,
         );
-        let agent = self.project.build_agent(model_override);
+        self.run_flow_once(
+            flow.as_ref(),
+            FlowRun {
+                run_id,
+                job_id,
+                worker_index,
+                todo,
+                work_dir,
+                model_override,
+                convergence_watch_paths,
+                cancel_signal,
+            },
+        )
+    }
+
+    /// Run `chief review` once in the project directory: converge on the
+    /// findings file and never commit.
+    pub fn run_review_once(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        todo: Todo,
+        review: ReviewRun,
+    ) -> OrchestratorResult<TodoOutcome> {
+        let ReviewRun {
+            spec,
+            max_loop_iterations,
+            required_stable_iterations,
+            model_override,
+            cancel_signal,
+        } = review;
+        if cancel_signal.load(Ordering::SeqCst) {
+            return Err(OrchestratorError::unrecoverable(anyhow!(
+                AgentCancelledError
+            )));
+        }
+        let convergence_watch_paths = vec![spec.findings_path.clone()];
+        let flow = ReviewFlow::new(spec, max_loop_iterations, required_stable_iterations);
+        self.run_flow_once(
+            &flow,
+            FlowRun {
+                run_id,
+                job_id,
+                worker_index: 1,
+                todo,
+                work_dir: self.project.project_dir.clone(),
+                model_override,
+                convergence_watch_paths,
+                cancel_signal,
+            },
+        )
+    }
+
+    fn run_flow_once(
+        &self,
+        flow: &dyn TodoFlow,
+        run: FlowRun<'_>,
+    ) -> OrchestratorResult<TodoOutcome> {
+        let agent = self.project.build_agent(run.model_override);
 
         let mut execution = FlowExecution {
-            run_id: run_id.to_owned(),
-            job_id: job_id.to_owned(),
-            worker_index,
-            project_dir: work_dir,
+            run_id: run.run_id.to_owned(),
+            job_id: run.job_id.to_owned(),
+            worker_index: run.worker_index,
+            project_dir: run.work_dir,
             store: &self.project.store,
             prompts: &self.project.prompts,
             agent: agent.as_ref(),
             git: &self.project.git,
             chief_config: &self.project.chief_yaml.chief,
             all_suites: &self.project.chief_yaml.suites,
-            todo,
-            cancel_signal,
+            todo: run.todo,
+            cancel_signal: run.cancel_signal,
             prepared_suites: RefCell::new(std::collections::BTreeSet::new()),
-            convergence_watch_paths,
+            convergence_watch_paths: run.convergence_watch_paths,
         };
 
         flow.run_todo(&mut execution)

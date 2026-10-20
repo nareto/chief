@@ -10,14 +10,17 @@ mod tests;
 
 use agentusage::{ApprovalPolicy, UsageConfig, run_claude, run_codex};
 use anyhow::{Context, Result, bail};
-use chief::config::{ChiefConfigOverrides, ChiefYaml, McpServerConfig, TestSuiteConfig};
+use chief::config::{
+    AgentSandbox, ChiefConfigOverrides, ChiefYaml, McpServerConfig, TestSuiteConfig,
+};
 use chief::domain::{JobStatus, RunExitStatus, Todo, TodoStatus};
-use chief::flow::FlowKind;
+use chief::flow::{FlowKind, ReviewSpec, convergence_not_reached};
 use chief::git::GitOps;
 use chief::orchestrator::OrchestratorError;
 use chief::paths;
+use chief::review;
 use chief::scheduler::Scheduler;
-use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry};
+use chief::service::{ChiefEngine, ProjectContext, ProjectRegistry, ReviewRun};
 use chief::storage::{
     EventQuery, ProjectStore, db_reset_required_from_anyhow, set_event_stdout_enabled,
 };
@@ -39,10 +42,12 @@ const CHIEF_LONG_ABOUT: &str = "Chief orchestrates project flows, suite commands
 The default `chief` invocation resolves its flow from config and then runs one of two behaviors:\n\
 - `loop_file`: execute a single convergence task from `--file` or `--prompt`\n\
 - `refactor`: process queued todos from the SQLite project queue\n\n\
+`chief review` runs a read-only review loop over the current branch and writes findings to YAML.\n\n\
 For CLI-only discovery, use `chief schema --json`, `chief config show --resolved`,\n\
 `chief list suites`, `chief explain flow`, and `chief doctor`.";
 
 const CHIEF_AFTER_HELP: &str = "Examples:
+  chief review --agent claude --max-loop-iterations 5
   chief --flow loop_file --prompt \"Tighten the parser error messages\"
   chief --agent cursor-agent --model gpt-5.4-xhigh --prompt \"Tighten the parser error messages\"
   chief --agent pi --model openai/gpt-5 --prompt \"Tighten the parser error messages\"
@@ -76,6 +81,7 @@ mod chief_option_help {
     pub(super) const MODEL_REASONING_EFFORT: &str = "Reasoning effort for model adapters that support it (`low`, `medium`, `high`, `xhigh`, or `max`).";
     pub(super) const AGENT_EXTRA_ARGS: &str =
         "Extra CLI args forwarded to the selected agent (YAML/JSON string list).";
+    pub(super) const AGENT_SANDBOX: &str = "Agent sandbox mode: `bypass` turns the agent's own sandbox and approvals off; `native` keeps them on (codex, claude, cursor-agent only).";
     pub(super) const MCP_SERVERS: &str =
         "Chief-managed MCP server config as a YAML/JSON object (`{}` means no servers).";
     pub(super) const MAX_RETRIES: &str =
@@ -109,7 +115,7 @@ mod chief_option_help {
         "Print raw live agent output, including JSON event streams from JSON-mode agents.";
 
     #[cfg(test)]
-    pub(super) const SPECS: [ChiefOptionHelpSpec; 19] = [
+    pub(super) const SPECS: [ChiefOptionHelpSpec; 20] = [
         ChiefOptionHelpSpec {
             key: "flow",
             help: FLOW,
@@ -129,6 +135,10 @@ mod chief_option_help {
         ChiefOptionHelpSpec {
             key: "agent_extra_args",
             help: AGENT_EXTRA_ARGS,
+        },
+        ChiefOptionHelpSpec {
+            key: "agent_sandbox",
+            help: AGENT_SANDBOX,
         },
         ChiefOptionHelpSpec {
             key: "mcp_servers",
@@ -240,6 +250,23 @@ impl CliAgentValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+enum CliAgentSandboxValue {
+    #[value(name = "bypass")]
+    Bypass,
+    #[value(name = "native")]
+    Native,
+}
+
+impl CliAgentSandboxValue {
+    fn to_config(self) -> AgentSandbox {
+        match self {
+            Self::Bypass => AgentSandbox::Bypass,
+            Self::Native => AgentSandbox::Native,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
 enum CliReasoningEffortValue {
     #[value(name = "low")]
     Low,
@@ -339,6 +366,14 @@ struct CliChiefOverrides {
         help_heading = "Chief Overrides"
     )]
     agent_extra_args: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = chief_option_help::AGENT_SANDBOX,
+        help_heading = "Chief Overrides"
+    )]
+    agent_sandbox: Option<CliAgentSandboxValue>,
     #[arg(
         long,
         global = true,
@@ -505,6 +540,8 @@ enum Commands {
     /// Execute one loop_file flow run from a markdown file.
     #[command(name = "loop_file", visible_alias = "loop-file")]
     LoopFile(LoopFileArgs),
+    #[command(about = review_help::ABOUT, long_about = review_help::LONG_ABOUT)]
+    Review(ReviewArgs),
     /// Run queued todos using the refactor flow.
     Refactor,
     /// Print a self-describing schema for the CLI.
@@ -602,6 +639,36 @@ struct LoopFileArgs {
 }
 
 #[derive(Debug, Args)]
+struct ReviewArgs {
+    #[arg(long, help = review_help::BASE)]
+    base: Option<String>,
+    #[arg(long, help = review_help::FINDINGS)]
+    findings: Option<PathBuf>,
+}
+
+mod review_help {
+    pub(super) const ABOUT: &str = "Review the current branch against a base and write findings to YAML (read-only, never commits).";
+    pub(super) const LONG_ABOUT: &str = "Review the current branch against a base and write findings to YAML (read-only, never commits).\n\n\
+Each pass starts a fresh agent with no memory of earlier passes; the findings file is the only shared state. \
+The loop stops after a pass that adds no new findings (leaves the findings file untouched). \
+--max-loop-iterations caps the passes.\n\n\
+Exit 0 whatever the findings; exit 1 on errors, including running out of passes before convergence. \
+Gate merges on the findings file (for example, fail on any P0/P1).";
+    pub(super) const BASE: &str = "Base ref to review against; the review covers `git merge-base <BASE> HEAD` to the working tree. Default: first existing of origin/HEAD, origin/main, origin/master, main, master.";
+    pub(super) const FINDINGS: &str = "Findings YAML file the agent appends to. Default: .chief/review/findings.yaml (git-ignored by a .gitignore chief writes next to it).";
+    pub(super) const BASE_DEFAULT: &str =
+        "origin/HEAD | origin/main | origin/master | main | master";
+    pub(super) const FINDINGS_DEFAULT: &str = ".chief/review/findings.yaml";
+    pub(super) const NOTES: [&str; 5] = [
+        "Each pass starts a fresh agent with no memory of earlier passes; the findings file is the only shared state.",
+        "The loop stops after a pass that leaves the findings file untouched (override with --required-stable-iterations); --max-loop-iterations caps the passes.",
+        "chief.yaml's required_stable_iterations does not apply to review; only the CLI flag does.",
+        "Fails if the agent edits tracked files other than the findings file or moves HEAD; chief never commits during review.",
+        "Exit 0 whatever the findings; exit 1 on errors, including running out of passes before convergence.",
+    ];
+}
+
+#[derive(Debug, Args)]
 struct SchemaArgs {
     /// Emit machine-readable JSON instead of human-readable text.
     #[arg(long, default_value_t = false)]
@@ -659,6 +726,15 @@ struct ExplainArgs {
 enum ExplainCommand {
     /// Explain how a flow behaves and which inputs it expects.
     Flow(ExplainFlowArgs),
+    /// Explain how `chief review` behaves and which inputs it expects.
+    Review(ExplainReviewArgs),
+}
+
+#[derive(Debug, Args)]
+struct ExplainReviewArgs {
+    /// Emit machine-readable JSON instead of human-readable text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -686,6 +762,7 @@ impl CliChiefOverrides {
             model,
             model_reasoning_effort,
             agent_extra_args,
+            agent_sandbox,
             mcp_servers,
             max_retries,
             max_loop_iterations,
@@ -720,6 +797,7 @@ impl CliChiefOverrides {
             model,
             model_reasoning_effort: model_reasoning_effort.map(|value| value.as_str().to_owned()),
             agent_extra_args,
+            agent_sandbox: agent_sandbox.map(CliAgentSandboxValue::to_config),
             mcp_servers,
             max_retries,
             max_loop_iterations,
@@ -1073,6 +1151,21 @@ fn build_cli_schema() -> CliSchema {
             &["Accepts a YAML/JSON string list such as [] or [\"--sandbox\",\"workspace-write\"]."],
         ),
         schema_option(
+            Some("agent-sandbox"),
+            None,
+            Some("AGENT_SANDBOX"),
+            chief_option_help::AGENT_SANDBOX,
+            false,
+            false,
+            Some("bypass"),
+            enum_possible_values::<CliAgentSandboxValue>(),
+            &[],
+            &[
+                "bypass: codex --dangerously-bypass-approvals-and-sandbox, claude --dangerously-skip-permissions, cursor-agent --force --sandbox disabled, pi --approve.",
+                "native: codex --sandbox workspace-write, claude --permission-mode acceptEdits with sandbox settings, cursor-agent --force --sandbox enabled without --approve-mcps; opencode and pi are rejected.",
+            ],
+        ),
+        schema_option(
             Some("mcp-servers"),
             None,
             Some("MCP_SERVERS"),
@@ -1376,6 +1469,7 @@ fn build_cli_schema() -> CliSchema {
             "CLI flags".to_owned(),
         ],
         examples: vec![
+            "chief review --agent claude --max-loop-iterations 5".to_owned(),
             "chief --flow loop_file --prompt \"Tighten the parser error messages\"".to_owned(),
             "chief loop_file --file prompts/task.md".to_owned(),
             "chief suite test --suite backend --target src/bin/chief.rs".to_owned(),
@@ -1591,6 +1685,45 @@ fn build_cli_schema() -> CliSchema {
                 notes: vec!["Global override flags are also accepted.".to_owned()],
             },
             SchemaCommand {
+                name: "review".to_owned(),
+                aliases: Vec::new(),
+                about: review_help::ABOUT.to_owned(),
+                options: vec![
+                    schema_option(
+                        Some("base"),
+                        None,
+                        Some("BASE"),
+                        review_help::BASE,
+                        false,
+                        false,
+                        Some(review_help::BASE_DEFAULT),
+                        Vec::new(),
+                        &[],
+                        &[],
+                    ),
+                    schema_option(
+                        Some("findings"),
+                        None,
+                        Some("FINDINGS"),
+                        review_help::FINDINGS,
+                        false,
+                        false,
+                        Some(review_help::FINDINGS_DEFAULT),
+                        Vec::new(),
+                        &[],
+                        &["Findings accumulate across runs; delete the file to start over."],
+                    ),
+                ],
+                subcommands: Vec::new(),
+                notes: review_help::NOTES
+                    .iter()
+                    .map(|note| (*note).to_owned())
+                    .chain(std::iter::once(
+                        "Global override flags are also accepted.".to_owned(),
+                    ))
+                    .collect(),
+            },
+            SchemaCommand {
                 name: "refactor".to_owned(),
                 aliases: Vec::new(),
                 about: "Run queued todos using the refactor flow.".to_owned(),
@@ -1688,24 +1821,46 @@ fn build_cli_schema() -> CliSchema {
                 aliases: Vec::new(),
                 about: "Explain flow behavior and expected inputs.".to_owned(),
                 options: Vec::new(),
-                subcommands: vec![SchemaCommand {
-                    name: "flow".to_owned(),
-                    aliases: Vec::new(),
-                    about: "Explain how a flow behaves and which inputs it expects.".to_owned(),
-                    options: vec![
-                        schema_option(
-                            Some("flow"),
-                            None,
-                            Some("FLOW"),
-                            "Flow to describe. Defaults to the resolved flow for this project.",
-                            false,
-                            false,
-                            None,
-                            enum_possible_values::<CliFlowValue>(),
-                            &[],
-                            &[],
-                        ),
-                        schema_option(
+                subcommands: vec![
+                    SchemaCommand {
+                        name: "flow".to_owned(),
+                        aliases: Vec::new(),
+                        about: "Explain how a flow behaves and which inputs it expects.".to_owned(),
+                        options: vec![
+                            schema_option(
+                                Some("flow"),
+                                None,
+                                Some("FLOW"),
+                                "Flow to describe. Defaults to the resolved flow for this project.",
+                                false,
+                                false,
+                                None,
+                                enum_possible_values::<CliFlowValue>(),
+                                &[],
+                                &[],
+                            ),
+                            schema_option(
+                                Some("json"),
+                                None,
+                                Some("JSON"),
+                                "Emit machine-readable JSON instead of human-readable text.",
+                                false,
+                                false,
+                                Some("false"),
+                                bool_possible_values(),
+                                &[],
+                                &[],
+                            ),
+                        ],
+                        subcommands: Vec::new(),
+                        notes: vec!["Global override flags are also accepted.".to_owned()],
+                    },
+                    SchemaCommand {
+                        name: "review".to_owned(),
+                        aliases: Vec::new(),
+                        about: "Explain how `chief review` behaves and which inputs it expects."
+                            .to_owned(),
+                        options: vec![schema_option(
                             Some("json"),
                             None,
                             Some("JSON"),
@@ -1716,11 +1871,11 @@ fn build_cli_schema() -> CliSchema {
                             bool_possible_values(),
                             &[],
                             &[],
-                        ),
-                    ],
-                    subcommands: Vec::new(),
-                    notes: vec!["Global override flags are also accepted.".to_owned()],
-                }],
+                        )],
+                        subcommands: Vec::new(),
+                        notes: Vec::new(),
+                    },
+                ],
                 notes: Vec::new(),
             },
             SchemaCommand {
@@ -1845,6 +2000,35 @@ fn build_flow_explanation(flow: CliFlowValue) -> FlowExplanation {
     }
 }
 
+fn build_review_explanation() -> FlowExplanation {
+    FlowExplanation {
+            flow: "review".to_owned(),
+            summary: review_help::ABOUT.to_owned(),
+            execution_model: "Each pass starts a fresh agent that reads the findings file, reviews `git diff <merge-base>`, and appends only new findings. The loop stops after a pass that leaves the findings file untouched; --max-loop-iterations caps the passes. Chief never commits and fails if the agent edits other tracked files or moves HEAD."
+                .to_owned(),
+            inputs: vec![
+                "--base <ref> (default: origin/HEAD, origin/main, origin/master, main, master)"
+                    .to_owned(),
+                "--findings <path> (default: .chief/review/findings.yaml)".to_owned(),
+                "--max-loop-iterations <n>, --required-stable-iterations <n> (default 1 for review)"
+                    .to_owned(),
+            ],
+            disallowed_inputs: vec![
+                "--file, --prompt and --watch-only are not used; the findings file is the only watched path."
+                    .to_owned(),
+                "--flow does not apply; review only runs through `chief review`.".to_owned(),
+            ],
+            prompt_sources: vec![
+                "Embedded prompts/review.md, rendered with the base, merge-base and findings path."
+                    .to_owned(),
+            ],
+            examples: vec![
+                "chief review --agent claude --max-loop-iterations 5".to_owned(),
+                "chief review --base origin/main --findings review.yaml".to_owned(),
+            ],
+    }
+}
+
 fn resolve_project_dir(project_dir: &Path) -> Result<PathBuf> {
     if project_dir.is_absolute() {
         return Ok(project_dir.to_path_buf());
@@ -1878,6 +2062,7 @@ fn active_override_names(overrides: &CliChiefOverrides) -> Vec<&'static str> {
             overrides.model_reasoning_effort.is_some(),
         ),
         ("agent_extra_args", overrides.agent_extra_args.is_some()),
+        ("agent_sandbox", overrides.agent_sandbox.is_some()),
         ("mcp_servers", overrides.mcp_servers.is_some()),
         ("max_retries", overrides.max_retries.is_some()),
         (
@@ -2162,6 +2347,7 @@ fn command_requires_chief_yaml(command: &Commands) -> bool {
             | Commands::Explain(_)
             | Commands::Doctor(_)
             | Commands::LoopFile(_)
+            | Commands::Review(_)
     )
 }
 
@@ -2189,6 +2375,7 @@ fn run_command(cli: &Cli, command: &Commands) -> Result<()> {
         Commands::TailEvents(args) => run_tail_events(cli, args),
         Commands::Suite(args) => suite_commands::run_suite_command(cli, args),
         Commands::LoopFile(args) => run_loop_file(cli, args),
+        Commands::Review(args) => run_review(cli, args),
         Commands::Refactor => run_refactor(cli),
         Commands::Schema(args) => run_schema(args),
         Commands::Config(args) => run_config(cli, args),
@@ -2628,6 +2815,7 @@ fn run_list_suites(cli: &Cli, args: &ListSuitesArgs) -> Result<()> {
 fn run_explain(cli: &Cli, args: &ExplainArgs) -> Result<()> {
     match &args.command {
         ExplainCommand::Flow(args) => run_explain_flow(cli, args),
+        ExplainCommand::Review(args) => run_explain_review(args),
     }
 }
 
@@ -2645,9 +2833,15 @@ fn run_explain_flow(cli: &Cli, args: &ExplainFlowArgs) -> Result<()> {
             .with_context(|| format!("invalid flow '{}'", chief_yaml.chief.flow.trim()))?;
         CliFlowValue::from_flow_kind(flow_kind)
     };
-    let explanation = build_flow_explanation(flow);
+    print_flow_explanation(build_flow_explanation(flow), args.json)
+}
 
-    if args.json {
+fn run_explain_review(args: &ExplainReviewArgs) -> Result<()> {
+    print_flow_explanation(build_review_explanation(), args.json)
+}
+
+fn print_flow_explanation(explanation: FlowExplanation, json: bool) -> Result<()> {
+    if json {
         println!("{}", serde_json::to_string_pretty(&explanation)?);
         return Ok(());
     }
@@ -2822,6 +3016,202 @@ fn run_loop_file(cli: &Cli, args: &LoopFileArgs) -> Result<()> {
     match result {
         Ok(_) => Ok(()),
         Err(err) => Err(err.into_error()).context("loop_file execution failed"),
+    }
+}
+
+/// Resolve where the findings file lives: `(path shown to the agent, absolute path)`.
+fn resolve_review_findings_path(
+    project_dir: &Path,
+    requested: Option<&Path>,
+) -> Result<(String, PathBuf)> {
+    let Some(requested) = requested else {
+        review::ensure_review_dir_ignored(project_dir)?;
+        let absolute = review::default_findings_path(project_dir);
+        return Ok((review::default_findings_relative_path(), absolute));
+    };
+    let absolute = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        project_dir.join(requested)
+    };
+    if absolute.is_dir() {
+        bail!(
+            "--findings must be a file path, got a directory: {}",
+            absolute.display()
+        );
+    }
+    if absolute == review::default_findings_path(project_dir) {
+        review::ensure_review_dir_ignored(project_dir)?;
+    } else if let Some(parent) = absolute.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    Ok((
+        review::display_findings_path(project_dir, &absolute),
+        absolute,
+    ))
+}
+
+fn render_review_summary(findings_path: &str, findings: &review::FindingsFile) -> String {
+    let counts = findings.count_by_severity();
+    let breakdown = review::Severity::ALL
+        .iter()
+        .map(|severity| {
+            format!(
+                "{} {}",
+                severity.as_str(),
+                counts.get(severity).copied().unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "review: {} finding(s) in {findings_path} ({breakdown}); {} would block the merge (P0/P1)",
+        findings.findings.len(),
+        findings.blocking_count()
+    )
+}
+
+fn run_review(cli: &Cli, args: &ReviewArgs) -> Result<()> {
+    let report_started_at = Utc::now();
+    let mut context =
+        load_context_with_cli_overrides_and_sqlite_log(&cli.project_dir, cli, cli.sqlite_log)?;
+    let verbosity = apply_output_verbosity(&mut context, cli)?;
+
+    let base = review::resolve_review_base(&context.project_dir, args.base.as_deref())?;
+    let (findings_display, findings_abs) =
+        resolve_review_findings_path(&context.project_dir, args.findings.as_deref())?;
+    let existing = review::load_findings(&findings_abs).with_context(|| {
+        format!(
+            "existing findings file {} is invalid; fix it or delete it to start over",
+            findings_abs.display()
+        )
+    })?;
+
+    let required_stable_iterations = cli
+        .chief
+        .required_stable_iterations
+        .unwrap_or(review::DEFAULT_REVIEW_REQUIRED_STABLE_ITERATIONS)
+        .max(1);
+    let max_loop_iterations = context.chief_yaml.chief.max_loop_iterations.max(1);
+    context.chief_yaml.chief.flow = "review".to_owned();
+    context.chief_yaml.chief.required_stable_iterations = required_stable_iterations;
+    print_config_summary(&context, &cli.chief, verbosity);
+
+    if verbosity.shows_progress() {
+        println!(
+            "review: {} (merge-base {}) -> {} ({} existing finding(s))",
+            base.name,
+            base.merge_base,
+            findings_display,
+            existing.findings.len()
+        );
+    }
+    let head_before = context.git.head_commit(&context.project_dir).ok();
+
+    let todo_key = format!("review:{}:{}", base.merge_base, findings_display);
+    let synthetic_todo = Todo {
+        id: Todo::compute_id(&todo_key, findings_display.as_str()),
+        todo: format!("review: {} since {}", findings_display, base.name),
+        expectations: format!(
+            "Review the branch against {} and record findings in {}",
+            base.name, findings_display
+        ),
+        priority: 1,
+        test_suites: Vec::new(),
+        status: TodoStatus::Pending,
+        done_at_commit: None,
+    };
+
+    let engine = ChiefEngine::new(context.clone());
+    let run_id = engine.start_run()?;
+    let mut job = context.create_job(
+        &run_id,
+        1,
+        FlowKind::LoopFile,
+        Some(synthetic_todo.id.clone()),
+        None,
+    )?;
+    job = context.set_job_status(job, JobStatus::Running, None)?;
+
+    let spec = ReviewSpec {
+        base_ref: base.name.clone(),
+        merge_base: base.merge_base.clone(),
+        findings_path: findings_display.clone(),
+        findings_abs_path: findings_abs.clone(),
+    };
+    let result = engine.run_review_once(
+        &run_id,
+        &job.id,
+        synthetic_todo,
+        ReviewRun {
+            spec,
+            max_loop_iterations,
+            required_stable_iterations,
+            model_override: cli.chief.model.clone(),
+            cancel_signal: Arc::new(AtomicBool::new(false)),
+        },
+    );
+
+    let exit_status = match &result {
+        Ok(_) => RunExitStatus::Success,
+        Err(err) if err.is_unrecoverable() => RunExitStatus::UnrecoverableFailure,
+        Err(_) => RunExitStatus::Failure,
+    };
+    let exit_reason = match &result {
+        Ok(_) => "review converged".to_owned(),
+        Err(err) => err.to_string(),
+    };
+    let finalize_result = match &result {
+        Ok(_) => context
+            .set_job_status(job, JobStatus::Completed, None)
+            .and_then(|_| engine.finish_run(&run_id, RunExitStatus::Success)),
+        Err(err) => {
+            let _ = context.set_job_status(job, JobStatus::Failed, Some(err.to_string()));
+            engine.finish_run(&run_id, exit_status)
+        }
+    };
+    if let Err(err) = &finalize_result {
+        eprintln!("warning: failed to finalize review run state: {err:#}");
+    }
+    if let Err(err) = print_cli_run_report(
+        &context,
+        Some(run_id.as_str()),
+        head_before.as_deref(),
+        report_started_at,
+        exit_status,
+        Some(exit_reason.as_str()),
+        verbosity,
+    ) {
+        eprintln!("warning: failed to print run report: {err:#}");
+    }
+
+    match review::load_findings(&findings_abs) {
+        Ok(findings) => {
+            let summary = render_review_summary(&findings_display, &findings);
+            if result.is_err() {
+                eprintln!("{summary}");
+            } else if verbosity.shows_report() {
+                println!("{summary}");
+            }
+        }
+        Err(err) => eprintln!("warning: could not read findings after review: {err:#}"),
+    }
+    finalize_result?;
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let err = err.into_error();
+            if let Some(not_reached) = convergence_not_reached(&err) {
+                bail!(
+                    "review did not converge within {} pass(es): the last pass still added findings. Findings so far are in {}; raise --max-loop-iterations to keep going",
+                    not_reached.max_loops,
+                    findings_display
+                );
+            }
+            Err(err).context("review failed")
+        }
     }
 }
 
@@ -3712,6 +4102,11 @@ fn print_config_summary(
             context.chief_yaml.chief.agent_extra_args.join(" ")
         );
     }
+    println!(
+        "{} {}",
+        format_report_key("agent_sandbox", color),
+        context.chief_yaml.chief.agent_sandbox.as_str()
+    );
     if let Some(ref mcp) = context.chief_yaml.chief.mcp_servers {
         println!(
             "{} {:?}",

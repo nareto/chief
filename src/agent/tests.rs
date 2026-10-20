@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{McpServerAuthConfig, McpServerConfig};
+use crate::config::{AgentSandbox, McpServerAuthConfig, McpServerConfig};
 
 #[test]
 fn codex_command_uses_full_permissions_without_sandbox() {
@@ -8,6 +8,7 @@ fn codex_command_uses_full_permissions_without_sandbox() {
         model_reasoning_effort: None,
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&["src".to_owned()]);
@@ -32,6 +33,7 @@ fn codex_reasoning_effort_passes_xhigh_through() {
         model_reasoning_effort: Some("xhigh".to_owned()),
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&[]);
@@ -50,6 +52,7 @@ fn codex_reasoning_effort_passes_max_through() {
         model_reasoning_effort: Some("max".to_owned()),
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&[]);
@@ -67,6 +70,7 @@ fn claude_command_uses_full_permissions_mode() {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&["src".to_owned()]);
@@ -137,6 +141,7 @@ fn claude_prepare_launch_uses_strict_mcp_config_when_managed() {
                 }),
             },
         )])),
+        sandbox: AgentSandbox::Bypass,
     };
     let request = AgentRequest {
         prompt: "test".to_owned(),
@@ -217,6 +222,7 @@ fn opencode_command_uses_json_format() {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&[]);
@@ -278,6 +284,7 @@ fn opencode_command_includes_stdin_dash() {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&[]);
@@ -328,6 +335,7 @@ fn cursor_command_uses_headless_json_mode_with_full_permissions() {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
 
     let command = agent.build_command(&[]);
@@ -390,6 +398,7 @@ fn cursor_prepare_launch_uses_isolated_home_when_managed_mcp_is_enabled() {
                 env: BTreeMap::new(),
             },
         )])),
+        sandbox: AgentSandbox::Bypass,
     };
     let request = AgentRequest {
         prompt: "test".to_owned(),
@@ -448,6 +457,7 @@ fn pi_command_uses_json_protocol_mode() {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: None,
+        sandbox: AgentSandbox::Bypass,
     };
     let command = agent.build_command(&[]);
     assert!(
@@ -545,6 +555,7 @@ fn pi_command_includes_mcp_config_path_when_servers_configured() {
         model: None,
         extra_args: Vec::new(),
         mcp_servers: Some(servers),
+        sandbox: AgentSandbox::Bypass,
     };
     let launch = agent
         .prepare_launch(&AgentRequest {
@@ -598,4 +609,122 @@ fn pi_prepare_launch_rejects_extra_args_that_override_protocol_mode() {
         .expect("protocol mode overrides should be rejected");
 
     assert!(err.to_string().contains("JSON protocol mode"));
+}
+
+fn native_config() -> ChiefConfig {
+    ChiefConfig {
+        agent_sandbox: AgentSandbox::Native,
+        ..ChiefConfig::default()
+    }
+}
+
+#[test]
+fn default_config_uses_bypass_sandbox_mode() {
+    assert_eq!(ChiefConfig::default().agent_sandbox, AgentSandbox::Bypass);
+    let command = CodexAgent::from_config(&ChiefConfig::default(), None).build_command(&[]);
+    assert!(
+        command
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+        "default codex command should keep the bypass flag: {command:?}"
+    );
+}
+
+#[test]
+fn codex_native_sandbox_uses_workspace_write() {
+    let command = CodexAgent::from_config(&native_config(), None).build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--sandbox", "workspace-write"]),
+        "native codex command should keep the workspace-write sandbox: {command:?}"
+    );
+    assert!(
+        !command.iter().any(|arg| arg.starts_with("--dangerously")),
+        "native codex command must not bypass the sandbox: {command:?}"
+    );
+    assert_eq!(command.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn claude_native_sandbox_uses_accept_edits_and_sandbox_settings() {
+    let command = ClaudeAgent::from_config(&native_config(), None).build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--permission-mode", "acceptEdits"]),
+        "native claude command should use acceptEdits: {command:?}"
+    );
+    let settings_index = command
+        .iter()
+        .position(|arg| arg == "--settings")
+        .expect("native claude command should pass --settings");
+    let settings: Value = serde_json::from_str(&command[settings_index + 1])
+        .expect("claude sandbox settings should be valid JSON");
+    assert_eq!(settings["sandbox"]["enabled"], Value::Bool(true));
+    assert_eq!(settings["sandbox"]["failIfUnavailable"], Value::Bool(true));
+    assert_eq!(
+        settings["sandbox"]["allowUnsandboxedCommands"],
+        Value::Bool(false)
+    );
+    assert!(
+        !command
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"),
+        "native claude command must not skip permissions: {command:?}"
+    );
+}
+
+#[test]
+fn cursor_native_sandbox_enables_sandbox_and_skips_mcp_auto_approval() {
+    let command = CursorAgent::from_config(&native_config(), None).build_command(&[]);
+    assert!(
+        command
+            .windows(2)
+            .any(|window| window == ["--sandbox", "enabled"]),
+        "native cursor command should enable the sandbox: {command:?}"
+    );
+    assert!(command.iter().any(|arg| arg == "--trust"));
+    assert!(
+        command.iter().any(|arg| arg == "--force"),
+        "print mode only applies edits with --force: {command:?}"
+    );
+    assert!(
+        !command
+            .windows(2)
+            .any(|window| window == ["--sandbox", "disabled"]),
+        "native cursor command must not disable the sandbox: {command:?}"
+    );
+    assert!(
+        !command.iter().any(|arg| arg == "--approve-mcps"),
+        "native cursor command must not auto-approve MCP servers: {command:?}"
+    );
+}
+
+#[test]
+fn opencode_and_pi_reject_native_sandbox() {
+    let request = AgentRequest {
+        prompt: String::new(),
+        cwd: std::env::temp_dir(),
+        timeout_seconds: None,
+        disallowed_paths: Vec::new(),
+        cancel_signal: None,
+        on_chunk: None,
+    };
+    let opencode = OpencodeAgent::from_config(&native_config(), None);
+    let err = opencode
+        .prepare_launch(&request)
+        .err()
+        .expect("opencode should reject native sandbox mode");
+    assert!(err.to_string().contains("not supported for opencode"));
+
+    let pi = PiAgent::from_config(&native_config(), None);
+    let err = pi
+        .prepare_launch(&request)
+        .err()
+        .expect("pi should reject native sandbox mode");
+    assert!(err.to_string().contains("not supported for pi"));
+
+    let bypass = OpencodeAgent::from_config(&ChiefConfig::default(), None);
+    assert!(bypass.prepare_launch(&request).is_ok());
 }

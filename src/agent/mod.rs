@@ -1,6 +1,39 @@
+//! Agent backends.
+//!
+//! # Sandbox and approvals
+//!
+//! Chief runs every agent non-interactively, so nobody is there to answer an
+//! approval prompt. `chief.agent_sandbox` picks one of two launch modes:
+//!
+//! * `bypass` (default): chief turns the agent's own sandbox and approvals off.
+//!   - codex: `--dangerously-bypass-approvals-and-sandbox`
+//!   - claude: `--dangerously-skip-permissions`
+//!   - cursor-agent: `--force --trust --approve-mcps --sandbox disabled`
+//!   - pi: `--approve`
+//!   - opencode: chief passes no permission flag; opencode's own permission
+//!     config decides
+//!
+//!   The agent can then read and write anything the chief process can. Run it
+//!   in a container, VM or throwaway checkout.
+//! * `native`: chief keeps the agent's own sandbox on.
+//!   - codex: `--sandbox workspace-write` (writes limited to the workspace,
+//!     `.git` stays read-only, no network by default)
+//!   - claude: `--permission-mode acceptEdits` plus
+//!     `--settings` enabling Claude's sandbox with `failIfUnavailable` and
+//!     `allowUnsandboxedCommands: false` (no silent unsandboxed fallback)
+//!   - cursor-agent: `--force --trust --sandbox enabled`, without
+//!     `--approve-mcps`. Print mode only applies edits with `--force`; the
+//!     sandbox confines terminal commands, while file-tool writes follow the
+//!     `Write()` rules in Cursor's permission config
+//!   - opencode and pi: rejected, because chief knows no sandbox flag for them.
+//!
+//! [`AgentRequest::disallowed_paths`] is not enforced by any backend: every
+//! `build_command` ignores it and current callers always pass an empty list.
+//! Do not rely on it to protect files.
+
 mod mcp;
 
-use crate::config::{ChiefConfig, McpServerConfig};
+use crate::config::{AgentSandbox, ChiefConfig, McpServerConfig};
 use crate::domain::{AgentOutput, WaitState};
 use crate::flow::{configure_process_group, terminate_process_tree};
 use anyhow::{Context, Result, anyhow};
@@ -19,6 +52,8 @@ pub struct AgentRequest {
     pub prompt: String,
     pub cwd: PathBuf,
     pub timeout_seconds: Option<u64>,
+    /// Paths the agent should not write. Not enforced by any backend yet; see
+    /// the module docs.
     pub disallowed_paths: Vec<String>,
     pub cancel_signal: Option<Arc<AtomicBool>>,
     pub on_chunk: Option<AgentChunkCallback>,
@@ -52,6 +87,7 @@ pub struct CodexAgent {
     model_reasoning_effort: Option<String>,
     extra_args: Vec<String>,
     mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    sandbox: AgentSandbox,
 }
 
 impl CodexAgent {
@@ -61,6 +97,7 @@ impl CodexAgent {
             model_reasoning_effort: config.model_reasoning_effort.clone(),
             extra_args: config.agent_extra_args.clone(),
             mcp_servers: config.mcp_servers.clone(),
+            sandbox: config.agent_sandbox,
         }
     }
 }
@@ -70,6 +107,7 @@ pub struct ClaudeAgent {
     model: Option<String>,
     extra_args: Vec<String>,
     mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    sandbox: AgentSandbox,
 }
 
 impl ClaudeAgent {
@@ -78,6 +116,7 @@ impl ClaudeAgent {
             model: model_override.or_else(|| config.model.clone()),
             extra_args: config.agent_extra_args.clone(),
             mcp_servers: config.mcp_servers.clone(),
+            sandbox: config.agent_sandbox,
         }
     }
 }
@@ -87,6 +126,7 @@ pub struct OpencodeAgent {
     model: Option<String>,
     extra_args: Vec<String>,
     mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    sandbox: AgentSandbox,
 }
 
 impl OpencodeAgent {
@@ -95,6 +135,7 @@ impl OpencodeAgent {
             model: model_override.or_else(|| config.model.clone()),
             extra_args: config.agent_extra_args.clone(),
             mcp_servers: config.mcp_servers.clone(),
+            sandbox: config.agent_sandbox,
         }
     }
 }
@@ -104,6 +145,7 @@ pub struct CursorAgent {
     model: Option<String>,
     extra_args: Vec<String>,
     mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    sandbox: AgentSandbox,
 }
 
 impl CursorAgent {
@@ -112,6 +154,7 @@ impl CursorAgent {
             model: model_override.or_else(|| config.model.clone()),
             extra_args: config.agent_extra_args.clone(),
             mcp_servers: config.mcp_servers.clone(),
+            sandbox: config.agent_sandbox,
         }
     }
 }
@@ -121,6 +164,7 @@ pub struct PiAgent {
     model: Option<String>,
     extra_args: Vec<String>,
     mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    sandbox: AgentSandbox,
 }
 
 impl PiAgent {
@@ -129,6 +173,7 @@ impl PiAgent {
             model: model_override.or_else(|| config.model.clone()),
             extra_args: config.agent_extra_args.clone(),
             mcp_servers: config.mcp_servers.clone(),
+            sandbox: config.agent_sandbox,
         }
     }
 
@@ -160,6 +205,19 @@ impl PreparedAgentLaunch {
     }
 }
 
+const CLAUDE_NATIVE_SANDBOX_SETTINGS: &str =
+    r#"{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false}}"#;
+
+fn reject_native_sandbox(agent: &str, sandbox: AgentSandbox) -> Result<()> {
+    if sandbox == AgentSandbox::Native {
+        return Err(anyhow!(
+            "agent_sandbox: native is not supported for {agent}: chief knows no sandbox flag for it. \
+Use codex, claude or cursor-agent, or set agent_sandbox: bypass and isolate chief yourself"
+        ));
+    }
+    Ok(())
+}
+
 trait CommandBackedAgent {
     fn build_command(&self, disallowed_paths: &[String]) -> Vec<String>;
     fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
@@ -172,12 +230,15 @@ trait CommandBackedAgent {
 
 impl CommandBackedAgent for CodexAgent {
     fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
-        let mut cmd = vec![
-            "codex".to_owned(),
-            "exec".to_owned(),
-            "--json".to_owned(),
-            "--dangerously-bypass-approvals-and-sandbox".to_owned(),
-        ];
+        let mut cmd = vec!["codex".to_owned(), "exec".to_owned(), "--json".to_owned()];
+        match self.sandbox {
+            AgentSandbox::Bypass => {
+                cmd.push("--dangerously-bypass-approvals-and-sandbox".to_owned());
+            }
+            AgentSandbox::Native => {
+                cmd.extend(["--sandbox".to_owned(), "workspace-write".to_owned()]);
+            }
+        }
         cmd.extend(self.extra_args.iter().cloned());
         if let Some(model) = &self.model {
             cmd.push("-m".to_owned());
@@ -219,13 +280,17 @@ impl CommandBackedAgent for CodexAgent {
 
 impl CommandBackedAgent for ClaudeAgent {
     fn build_command(&self, _disallowed_paths: &[String]) -> Vec<String> {
-        let mut cmd = vec![
-            "claude".to_owned(),
-            "-p".to_owned(),
-            "-".to_owned(),
-            "--dangerously-skip-permissions".to_owned(),
-            "--verbose".to_owned(),
-        ];
+        let mut cmd = vec!["claude".to_owned(), "-p".to_owned(), "-".to_owned()];
+        match self.sandbox {
+            AgentSandbox::Bypass => cmd.push("--dangerously-skip-permissions".to_owned()),
+            AgentSandbox::Native => cmd.extend([
+                "--permission-mode".to_owned(),
+                "acceptEdits".to_owned(),
+                "--settings".to_owned(),
+                CLAUDE_NATIVE_SANDBOX_SETTINGS.to_owned(),
+            ]),
+        }
+        cmd.push("--verbose".to_owned());
         cmd.extend(self.extra_args.iter().cloned());
         if let Some(model) = &self.model {
             cmd.push("--model".to_owned());
@@ -274,6 +339,13 @@ impl CommandBackedAgent for OpencodeAgent {
         cmd
     }
 
+    fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        reject_native_sandbox("opencode", self.sandbox)?;
+        Ok(PreparedAgentLaunch::new(
+            self.build_command(&request.disallowed_paths),
+        ))
+    }
+
     fn parse_output(&self, raw_stdout: &str, raw_stderr: &str) -> String {
         let parsed = parse_opencode_json_output(raw_stdout);
         if parsed.trim().is_empty() {
@@ -291,12 +363,22 @@ impl CommandBackedAgent for CursorAgent {
             "-p".to_owned(),
             "--output-format".to_owned(),
             "json".to_owned(),
-            "--force".to_owned(),
-            "--trust".to_owned(),
-            "--approve-mcps".to_owned(),
-            "--sandbox".to_owned(),
-            "disabled".to_owned(),
         ];
+        match self.sandbox {
+            AgentSandbox::Bypass => cmd.extend([
+                "--force".to_owned(),
+                "--trust".to_owned(),
+                "--approve-mcps".to_owned(),
+                "--sandbox".to_owned(),
+                "disabled".to_owned(),
+            ]),
+            AgentSandbox::Native => cmd.extend([
+                "--force".to_owned(),
+                "--trust".to_owned(),
+                "--sandbox".to_owned(),
+                "enabled".to_owned(),
+            ]),
+        }
         cmd.extend(self.extra_args.iter().cloned());
         if let Some(model) = &self.model {
             cmd.push("--model".to_owned());
@@ -363,6 +445,7 @@ impl CommandBackedAgent for PiAgent {
     }
 
     fn prepare_launch(&self, request: &AgentRequest) -> Result<PreparedAgentLaunch> {
+        reject_native_sandbox("pi", self.sandbox)?;
         self.validate_protocol_extra_args()?;
         let mut launch = PreparedAgentLaunch::new(self.build_command(&request.disallowed_paths));
         if let Some(servers) = &self.mcp_servers {

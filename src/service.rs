@@ -4,7 +4,7 @@ mod registry;
 mod runtime;
 
 pub use context::ProjectContext;
-pub use engine::ChiefEngine;
+pub use engine::{ChiefEngine, ReviewRun};
 pub use registry::ProjectRegistry;
 
 pub(crate) use runtime::{

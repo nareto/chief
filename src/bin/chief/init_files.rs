@@ -15,6 +15,7 @@ pub(super) const INIT_CHIEF_YAML_CONTENT: &str = r#"chief:
   # flow: refactor # uncomment to run queued workflow
   agent: codex
   agent_extra_args: []
+  agent_sandbox: bypass # native keeps the agent's own sandbox on (codex, claude, cursor-agent)
   mcp_servers: {} # chief-managed no-MCP config; remove this key to leave the agent MCP config untouched
   max_loop_iterations: 20
   required_stable_iterations: 2

@@ -18,11 +18,12 @@ struct EmbeddedPrompt {
     source: &'static str,
 }
 
-const REQUIRED_PROMPT_FILES: [&str; 4] = [
+const REQUIRED_PROMPT_FILES: [&str; 5] = [
     "loop_file_prompt.md",
     "structural_cleanup.md",
     "mechanical_cleanup.md",
     "requirements.md",
+    "review.md",
 ];
 
 const EMBEDDED_PROMPTS: &[EmbeddedPrompt] = &[
@@ -37,6 +38,10 @@ const EMBEDDED_PROMPTS: &[EmbeddedPrompt] = &[
     EmbeddedPrompt {
         name: "requirements.md",
         source: include_str!("../prompts/requirements.md"),
+    },
+    EmbeddedPrompt {
+        name: "review.md",
+        source: include_str!("../prompts/review.md"),
     },
     EmbeddedPrompt {
         name: "structural_cleanup.md",
@@ -128,6 +133,7 @@ mod tests {
                 "loop_file_prompt.md",
                 "mechanical_cleanup.md",
                 "requirements.md",
+                "review.md",
                 "structural_cleanup.md",
             ]
         );
@@ -161,6 +167,47 @@ mod tests {
             .expect("loop_file prompt should render");
 
         assert!(rendered.contains("Tighten parser errors"));
+    }
+
+    #[test]
+    fn embedded_prompt_store_renders_review_prompt() {
+        let store =
+            EmbeddedPromptStore::from_embedded_prompts().expect("embedded prompts should validate");
+
+        let rendered = store
+            .render_json(
+                "review.md",
+                &json!({
+                    "base_ref": "origin/main",
+                    "merge_base": "abc123",
+                    "findings_path": ".chief/review/findings.yaml",
+                    "iteration": 2,
+                    "findings_validation_error": null,
+                }),
+            )
+            .expect("review prompt should render");
+
+        assert!(rendered.contains("git diff abc123"));
+        assert!(rendered.contains("`origin/main`"));
+        assert!(rendered.contains("review pass 2"));
+        assert!(rendered.contains("Read `.chief/review/findings.yaml` first"));
+        assert!(rendered.contains("should this stop the merge?"));
+        assert!(!rendered.contains("could not parse the findings file"));
+
+        let with_error = store
+            .render_json(
+                "review.md",
+                &json!({
+                    "base_ref": "main",
+                    "merge_base": "abc123",
+                    "findings_path": "findings.yaml",
+                    "iteration": 3,
+                    "findings_validation_error": "finding #1 has an empty `why`",
+                }),
+            )
+            .expect("review prompt should render with a validation error");
+        assert!(with_error.contains("could not parse the findings file"));
+        assert!(with_error.contains("finding #1 has an empty `why`"));
     }
 
     #[test]

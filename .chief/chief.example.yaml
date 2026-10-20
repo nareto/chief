@@ -15,6 +15,11 @@ chief:
   # model_reasoning_effort: high
   # Extra CLI args forwarded to the selected agent (YAML/JSON string list).
   agent_extra_args: []
+  # Agent sandbox mode: `bypass` turns the agent's own sandbox and approvals off; `native` keeps them on (codex, claude, cursor-agent only).
+  # bypass (default) passes each agent's "skip approvals" flag, so run chief in a container or VM.
+  # native: codex --sandbox workspace-write, claude --permission-mode acceptEdits with its sandbox enabled, cursor-agent --force --sandbox enabled (no --approve-mcps).
+  # See docs/safety.md.
+  agent_sandbox: bypass
   # Chief-managed MCP server config as a YAML/JSON object (`{}` means no servers).
   # Default from `chief init`: chief owns the MCP set and starts with none.
   # Delete this key entirely to leave the agent MCP config untouched.

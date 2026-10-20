@@ -626,6 +626,169 @@ fn parse_loop_file_command() {
 }
 
 #[test]
+fn parse_review_command_with_base_and_findings() {
+    let cli = Cli::try_parse_from([
+        "chief",
+        "review",
+        "--agent",
+        "claude",
+        "--base",
+        "origin/main",
+        "--findings",
+        "out/review.yaml",
+        "--max-loop-iterations",
+        "5",
+    ])
+    .expect("review command should parse");
+
+    assert_eq!(cli.chief.agent, Some(CliAgentValue::Claude));
+    assert_eq!(cli.chief.max_loop_iterations, Some(5));
+    let Some(Commands::Review(args)) = cli.command else {
+        panic!("expected review command");
+    };
+    assert_eq!(args.base.as_deref(), Some("origin/main"));
+    assert_eq!(args.findings, Some(PathBuf::from("out/review.yaml")));
+
+    let bare = Cli::try_parse_from(["chief", "review"]).expect("bare review should parse");
+    let Some(Commands::Review(args)) = bare.command else {
+        panic!("expected review command");
+    };
+    assert_eq!(args.base, None);
+    assert_eq!(args.findings, None);
+}
+
+#[test]
+fn review_subcommand_can_be_configless() {
+    let cli = Cli::try_parse_from(["chief", "review"]).expect("review should parse");
+    assert!(
+        !invocation_requires_chief_yaml(&cli),
+        "chief review should run on defaults plus CLI flags"
+    );
+}
+
+fn review_cli(project_dir: &std::path::Path, args: ReviewArgs) -> Cli {
+    Cli {
+        project_dir: project_dir.to_path_buf(),
+        sqlite_log: false,
+        chief: CliChiefOverrides::default(),
+        file: None,
+        prompt: None,
+        watch_only: Vec::new(),
+        requirements: Vec::new(),
+        requirements_file: Vec::new(),
+        command: Some(Commands::Review(args)),
+    }
+}
+
+#[test]
+fn review_fails_for_unknown_base_before_creating_state() {
+    let temp = TempDir::new("review-unknown-base");
+    init_git_repo(&temp.path);
+    git_commit_file(&temp.path, "README.md", "hello\n", "initial");
+
+    let cli = review_cli(
+        &temp.path,
+        ReviewArgs {
+            base: Some("does-not-exist".to_owned()),
+            findings: None,
+        },
+    );
+    let err = run(&cli).expect_err("unknown base should fail");
+    assert!(
+        format!("{err:#}").contains("review base 'does-not-exist' does not resolve"),
+        "unexpected error: {err:#}"
+    );
+    assert!(!chief::paths::chief_db_path(&temp.path).exists());
+}
+
+#[test]
+fn review_rejects_an_invalid_existing_findings_file() {
+    let temp = TempDir::new("review-invalid-findings");
+    init_git_repo(&temp.path);
+    git_commit_file(&temp.path, "README.md", "hello\n", "initial");
+    fs::write(temp.path.join("findings.yaml"), "findings: nope\n").expect("findings written");
+
+    let cli = review_cli(
+        &temp.path,
+        ReviewArgs {
+            base: Some("HEAD".to_owned()),
+            findings: Some(PathBuf::from("findings.yaml")),
+        },
+    );
+    let err = run(&cli).expect_err("invalid existing findings should fail");
+    assert!(
+        format!("{err:#}").contains("fix it or delete it"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn review_findings_path_defaults_to_ignored_chief_review_dir() {
+    let temp = TempDir::new("review-default-findings");
+    let (display, absolute) =
+        resolve_review_findings_path(&temp.path, None).expect("default path should resolve");
+    assert_eq!(display, ".chief/review/findings.yaml");
+    assert_eq!(absolute, temp.path.join(".chief/review/findings.yaml"));
+    let ignore = fs::read_to_string(temp.path.join(".chief/review/.gitignore"))
+        .expect("review dir should ignore itself");
+    assert!(ignore.lines().any(|line| line == "*"));
+
+    let (display, absolute) =
+        resolve_review_findings_path(&temp.path, Some(std::path::Path::new("out/r.yaml")))
+            .expect("custom path should resolve");
+    assert_eq!(display, "out/r.yaml");
+    assert_eq!(absolute, temp.path.join("out/r.yaml"));
+    assert!(
+        temp.path.join("out").is_dir(),
+        "parent dir should be created"
+    );
+
+    let err = resolve_review_findings_path(&temp.path, Some(std::path::Path::new("out")))
+        .expect_err("a directory is not a findings file");
+    assert!(err.to_string().contains("must be a file path"));
+}
+
+#[test]
+fn explicit_default_findings_path_still_ignores_review_dir() {
+    let temp = TempDir::new("review-explicit-default-findings");
+    let (display, _) = resolve_review_findings_path(
+        &temp.path,
+        Some(std::path::Path::new(".chief/review/findings.yaml")),
+    )
+    .expect("explicit default path should resolve");
+    assert_eq!(display, ".chief/review/findings.yaml");
+    assert!(
+        temp.path.join(".chief/review/.gitignore").is_file(),
+        "passing the default path explicitly should still ignore the review dir"
+    );
+}
+
+#[test]
+fn review_summary_counts_by_severity_and_blocking() {
+    let findings = chief::review::parse_findings(
+        "findings:\n  - {severity: P0, file: a, title: t, why: w}\n  - {severity: P2, file: b, title: t, why: w}\n  - {severity: P2, file: c, title: t, why: w}\n",
+    )
+    .expect("findings should parse");
+    let summary = render_review_summary("f.yaml", &findings);
+    assert_eq!(
+        summary,
+        "review: 3 finding(s) in f.yaml (P0 1, P1 0, P2 2, P3 0); 1 would block the merge (P0/P1)"
+    );
+}
+
+#[test]
+fn parse_agent_sandbox_override() {
+    let cli = Cli::try_parse_from(["chief", "--agent-sandbox", "native", "review"])
+        .expect("agent sandbox flag should parse");
+    let overrides = cli
+        .chief
+        .to_config_overrides()
+        .expect("overrides should convert");
+    assert_eq!(overrides.agent_sandbox, Some(AgentSandbox::Native));
+    assert!(Cli::try_parse_from(["chief", "--agent-sandbox", "off"]).is_err());
+}
+
+#[test]
 fn parse_refactor_command() {
     let cli = Cli::try_parse_from(["chief", "refactor"]).expect("refactor command should parse");
 
@@ -651,6 +814,15 @@ fn parse_introspection_commands() {
     let explain = Cli::try_parse_from(["chief", "explain", "flow", "--flow", "refactor"])
         .expect("explain flow command should parse");
     assert!(matches!(explain.command, Some(Commands::Explain(_))));
+
+    let explain_review = Cli::try_parse_from(["chief", "explain", "review", "--json"])
+        .expect("explain review command should parse");
+    assert!(matches!(
+        explain_review.command,
+        Some(Commands::Explain(ExplainArgs {
+            command: ExplainCommand::Review(ExplainReviewArgs { json: true })
+        }))
+    ));
 
     let doctor =
         Cli::try_parse_from(["chief", "doctor", "--json"]).expect("doctor command should parse");
@@ -753,12 +925,94 @@ fn cli_schema_lists_typed_values_and_introspection_commands() {
         .iter()
         .map(|command| command.name.as_str())
         .collect();
-    for expected in ["schema", "config", "list", "explain", "doctor"] {
+    for expected in ["schema", "config", "list", "explain", "doctor", "review"] {
         assert!(
             command_names.contains(expected),
-            "schema should list introspection command {expected}"
+            "schema should list command {expected}"
         );
     }
+
+    let review = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "review")
+        .expect("review command should exist");
+    let review_options: Vec<_> = review
+        .options
+        .iter()
+        .filter_map(|option| option.long.as_deref())
+        .collect();
+    assert_eq!(review_options, vec!["base", "findings"]);
+    let findings = review
+        .options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("findings"))
+        .expect("findings option");
+    assert_eq!(
+        findings.default.as_deref(),
+        Some(chief::review::default_findings_relative_path().as_str())
+    );
+
+    let sandbox_option = schema
+        .global_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("agent-sandbox"))
+        .expect("agent-sandbox option should exist");
+    assert_eq!(sandbox_option.possible_values, vec!["bypass", "native"]);
+    assert_eq!(sandbox_option.default.as_deref(), Some("bypass"));
+
+    let explain_subcommands: Vec<_> = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "explain")
+        .expect("explain command")
+        .subcommands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(explain_subcommands, vec!["flow", "review"]);
+    assert!(
+        schema
+            .examples
+            .iter()
+            .any(|example| example.starts_with("chief review"))
+    );
+}
+
+#[test]
+fn cli_help_and_review_help_document_review() {
+    let mut command = Cli::command();
+    let mut help_buffer = Vec::new();
+    command
+        .write_long_help(&mut help_buffer)
+        .expect("long help should render");
+    let help = String::from_utf8(help_buffer).expect("help should be UTF-8");
+    assert!(help.contains("chief review --agent claude --max-loop-iterations 5"));
+    assert!(help.contains("Review the current branch against a base"));
+
+    let mut review = Cli::command()
+        .find_subcommand_mut("review")
+        .expect("review subcommand")
+        .clone();
+    let mut review_buffer = Vec::new();
+    review
+        .write_long_help(&mut review_buffer)
+        .expect("review help should render");
+    let review_help_text = String::from_utf8(review_buffer).expect("help should be UTF-8");
+    assert!(review_help_text.contains("--base"));
+    assert!(review_help_text.contains("--findings"));
+    assert!(review_help_text.contains(".chief/review/findings.yaml"));
+
+    assert!(review_help_text.contains("adds no new findings"));
+
+    let explanation = build_review_explanation();
+    assert_eq!(explanation.flow, "review");
+    assert!(
+        explanation
+            .examples
+            .iter()
+            .any(|example| example == "chief review --agent claude --max-loop-iterations 5")
+    );
 }
 
 #[test]

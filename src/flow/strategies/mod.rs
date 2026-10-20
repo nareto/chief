@@ -2,9 +2,12 @@ use super::*;
 
 mod loop_file_phase;
 mod refactor_phase;
+mod review_phase;
 
 use loop_file_phase::LoopFilePhaseStrategy;
 use refactor_phase::RefactorPhaseStrategy;
+use review_phase::ReviewPhaseStrategy;
+pub use review_phase::{ReviewContractViolation, ReviewSpec};
 
 pub trait ExecutionFlow: Send + Sync {
     fn name(&self) -> &'static str;
@@ -144,6 +147,47 @@ impl ExecutionFlow for RefactorFlow {
         Ok(TodoOutcome {
             todo_id: execution.work_item_id().to_owned(),
             commit_hash: Some(commit_hash),
+        })
+    }
+}
+
+/// Read-only review: converges on the findings file and never commits.
+#[derive(Debug, Clone)]
+pub struct ReviewFlow {
+    loop_policy: ConvergenceLoopPolicy,
+    spec: ReviewSpec,
+}
+
+impl ReviewFlow {
+    pub fn new(spec: ReviewSpec, max_loop: usize, required_stable_iterations: usize) -> Self {
+        let loop_policy = ConvergenceLoopPolicy {
+            max_loops: max_loop.max(1),
+            required_stable_iterations: required_stable_iterations.max(1),
+        };
+        Self { loop_policy, spec }
+    }
+}
+
+impl ExecutionFlow for ReviewFlow {
+    fn name(&self) -> &'static str {
+        "review"
+    }
+
+    fn run(&self, execution: &mut FlowExecution<'_>) -> Result<TodoOutcome> {
+        let mut strategy = ReviewPhaseStrategy::new(self.spec.clone());
+        self.loop_policy.run(&mut strategy, execution)?;
+
+        execution.log_event(
+            "info",
+            Some(Phase::Exit),
+            EventType::PhaseChange,
+            "review converged; no commit (review is read-only)",
+            BTreeMap::new(),
+        )?;
+
+        Ok(TodoOutcome {
+            todo_id: execution.work_item_id().to_owned(),
+            commit_hash: None,
         })
     }
 }
