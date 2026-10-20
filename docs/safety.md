@@ -56,7 +56,10 @@ For chief 0.2.0, on Linux:
 
 - Command construction for every agent and mode is covered by unit tests (`src/agent/tests.rs`).
 - `codex sandbox` in `workspace-write` mode was run directly: writes inside the workspace succeeded, writes to `.git` failed with a read-only file system error, and the default read-only mode blocked all writes.
-- End-to-end agent runs under `native` (Codex, Claude Code, Cursor) were not completed: the test machine had no valid credentials for Codex or Claude Code, and the Cursor CLI could not run there.
+- `chief review --agent claude --model claude-haiku-5-5 --agent-sandbox native` with Claude Code 2.1.119 ran end to end on a scratch repository with two planted bugs. It recorded both, converged on the second pass and left the repository unchanged.
+- With the same flags chief passes, Claude Code's sandboxed shell could not write to the home directory (read-only file system), its proxy refused a host that was not allowed (HTTP 403), and a connection that skipped the proxy could not resolve the host.
+- Inside the sandbox, the agent saw untracked `.bashrc`, `.gitconfig`, `.mcp.json` and similar files in the working tree that were gone after the run, most likely the sandbox's guards for protected paths. The reviewer mentioned them as outside the change, so a review may comment on them.
+- End-to-end runs under `native` with Codex and Cursor were not completed: the test machine had no valid Codex credentials, and the Cursor CLI could not run there.
 - Real organization policies (a managed Codex `requirements.toml`, Claude managed settings with bypass disabled) were not tested, because installing them needs system-level access the test machine did not allow. The behavior described above comes from each vendor's documentation.
 
 Reports from runs under real policies are welcome as issues.
